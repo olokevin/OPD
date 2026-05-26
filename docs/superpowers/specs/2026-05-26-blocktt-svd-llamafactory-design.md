@@ -135,7 +135,7 @@ def init_compress_model(config, model, model_args, finetuning_args, is_trainable
         return model     # inference loads dense HF; nothing to do
     _ensure_compress_on_path()
     from compress.integration import (
-        apply_calibrated_btt, build_calib_loader,
+        apply_calibrated_btt, apply_calibrated_svd, build_calib_loader,
         convert_linear_to_btt_compress, convert_linear_to_svd_compress,
         configure_compress_btt_trainability, configure_compress_svd_trainability,
         get_blocktt_target_module_names, get_svd_target_module_names,
@@ -152,7 +152,14 @@ def init_compress_model(config, model, model_args, finetuning_args, is_trainable
             samples=fa.calib_samples, seq_len=fa.calib_seq_len,
             batch_size=fa.calib_batch_size, traces_path=fa.calib_traces_path,
         )
-        apply_calibrated_btt(model, args_namespace=ns, calib_loader=loader)
+        # apply_calibrated_btt handles BTT-family calib_modes (v2/v2_bp/
+        # v2_combined/twosteps); apply_calibrated_svd handles SVD-family
+        # calib_modes (svd_v2/svd_v2_combined). The mode <-> method match
+        # was already enforced by the validators in Section 3.1.
+        if method == "blocktt":
+            apply_calibrated_btt(model, args_namespace=ns, calib_loader=loader)
+        else:
+            apply_calibrated_svd(model, args_namespace=ns, calib_loader=loader)
     else:
         if method == "blocktt":
             targets = get_blocktt_target_module_names(fa.trainable_type)
@@ -183,7 +190,7 @@ def init_compress_model(config, model, model_args, finetuning_args, is_trainable
 
 `_to_namespace(fa)` builds an `argparse.Namespace` view so `validate_calibrated_btt_args` / `apply_calibrated_btt` (designed against `run_rl.py`'s argparse) keep working unchanged.
 
-`_resolve_rank` parses `"full"` (returns the sentinel the compress API expects) or a positive integer string.
+`_resolve_rank` parses the `blocktt_rank` string and returns whatever `convert_linear_to_btt_compress`'s `rank` argument accepts: the literal string `"full"` for the lossless case, or `int(s)` for a positive integer string. Invalid input raises `ValueError` (also enforced by the validator in Section 3.1). Mirrors `run_rl.py::resolve_blocktt_rank`.
 
 `_load_tokenizer(model_args)` loads the tokenizer lazily for calib only — avoids importing `transformers.AutoTokenizer` on every adapter init.
 
@@ -222,11 +229,15 @@ class CompressSaveCallback(TrainerCallback):
         self.calibrated = finetuning_args.calib_mode != "none"
 
     def on_save(self, args, state, control, model=None, **kwargs):
+        if not state.is_world_process_zero:
+            return
         out = pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
         out.mkdir(parents=True, exist_ok=True)
         self._dump(model, str(out))
 
     def on_train_end(self, args, state, control, model=None, **kwargs):
+        if not state.is_world_process_zero:
+            return
         out = pathlib.Path(args.output_dir) / "final-merged"
         out.mkdir(parents=True, exist_ok=True)
         self._dump(model, str(out))
@@ -239,7 +250,15 @@ class CompressSaveCallback(TrainerCallback):
             _materialize_and_save(model, ckpt_dir)   # local helper
 ```
 
-`_materialize_and_save` is a private helper in `callbacks.py`. It does **not** mutate the training model: it iterates `model.named_modules()`, replaces every `BTTLinear` / `SVDCompressedLinear` with a dense `nn.Linear` carrying the materialized weight in a **detached clone**, then calls `model.save_pretrained(ckpt_dir)` on the cloned graph. The training model is left intact for the next step.
+`_materialize_and_save` is a private helper in `callbacks.py`. It must **not** mutate the training model. Concretely:
+
+1. Build a fresh `state_dict` by walking `model.named_modules()` and, for each `BTTLinear` / `SVDCompressedLinear`, materializing a dense `weight` tensor (detached clone) under that module's full parameter name (e.g. `model.layers.0.mlp.down_proj.weight`). Non-compressed parameters pass through with `.detach().clone()`.
+2. Construct a peer dense model: `peer = AutoModelForCausalLM.from_config(model.config)` (no checkpoint download — config-only init on `meta` device, then `to_empty` on CPU), then call `peer.load_state_dict(merged_state_dict, strict=True)`.
+3. Call `peer.save_pretrained(ckpt_dir)` and discard `peer`.
+
+The live training model and its `BTTLinear`/`SVDCompressedLinear` modules are never touched. This is identical in spirit to `run_rl.py::export_weights_for_vllm` but writes to disk instead of vLLM.
+
+**Under DeepSpeed ZeRO-2**, optimizer state is sharded but parameter tensors are still fully replicated per rank, so step 1 reads complete `nn.Parameter` data without any gather. (ZeRO-3, which shards parameters, is disallowed by the validator in Section 3.1, so we don't need a gather path here.) Merged saves run only on `state.is_world_process_zero` to avoid N-way duplicate writes.
 
 (Materialization helpers are mirrored from `run_rl.py::materialize_btt_weight` and `materialize_svd_weight`; we copy the small wrapper functions into `callbacks.py` rather than reaching back into `run_rl.py`.)
 
