@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 
 @dataclass
@@ -441,6 +441,91 @@ class SwanLabArguments:
 
 
 @dataclass
+class CompressArguments:
+    """BlockTT / SVD compression-aware finetuning knobs (see src/compress)."""
+
+    # Shared (blocktt + svd)
+    trainable_type: Literal["all", "mlp", "attn"] = field(
+        default="all",
+        metadata={"help": "Compress target modules: all | mlp | attn."},
+    )
+    train_position: Optional[Literal["output", "input", "small", "large", "both"]] = field(
+        default=None,
+        metadata={"help": "Trainable side: svd uses output|input|both, blocktt uses small|large|both."},
+    )
+    s_merged_to: Optional[Literal[
+        "frozen", "trainable", "output", "input",
+        "split", "keep_frozen", "keep_trainable",
+    ]] = field(
+        default=None,
+        metadata={"help": "Where to merge SVD S during init."},
+    )
+
+    # BlockTT-only
+    decomp_mode: str = field(
+        default="input_one_block",
+        metadata={"help": "BlockTT decomp mode (scalar or dict literal)."},
+    )
+    blocktt_rank: str = field(
+        default="full",
+        metadata={"help": "BTT rank: 'full' or positive integer string."},
+    )
+    convert_mode: Literal["svd", "qr"] = field(
+        default="svd",
+        metadata={"help": "Per-block decomposition for BlockTT init: svd | qr."},
+    )
+    train_bias: bool = field(
+        default=True,
+        metadata={"help": "Train BTT biases (mirror of --no-train-bias inverted)."},
+    )
+    blocktt_normalize_after_update: bool = field(
+        default=False,
+        metadata={"help": "Normalize trainable BTT cores after each optimizer step."},
+    )
+    blocktt_factorize_by_head: bool = field(
+        default=True,
+        metadata={"help": "Align attention BTT blocks with head structure."},
+    )
+
+    # Calibrated init (1:1 with add_calibrated_btt_args, hyphen_style=False)
+    calib_mode: Literal[
+        "none", "v2", "v2_bp", "v2_combined",
+        "twosteps", "svd_v2", "svd_v2_combined",
+    ] = field(
+        default="none",
+        metadata={"help": "Calibrated init mode. 'none' = plain conversion."},
+    )
+    calib_source: Literal["c4", "traces", "training_data"] = field(
+        default="c4",
+        metadata={"help": "Calibration data source."},
+    )
+    calib_num_seqs: int = field(
+        default=128,
+        metadata={"help": "Number of calibration sequences."},
+    )
+    calib_max_length: int = field(
+        default=2048,
+        metadata={"help": "Max token length per calibration sample."},
+    )
+    calib_seed: int = field(
+        default=3,
+        metadata={"help": "RNG seed for calibration sampling."},
+    )
+    calib_batch_size: int = field(
+        default=8,
+        metadata={"help": "Batch size for calibration DataLoader."},
+    )
+    calib_traces_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to traces JSONL when calib_source=traces."},
+    )
+    compression_ratio: float = field(
+        default=1.0,
+        metadata={"help": "SVD compression ratio in (0, 1] for svd_v2 modes."},
+    )
+
+
+@dataclass
 class FinetuningArguments(
     SwanLabArguments,
     BAdamArgument,
@@ -450,6 +535,7 @@ class FinetuningArguments(
     LoraArguments,
     OFTArguments,
     FreezeArguments,
+    CompressArguments,
 ):
     r"""Arguments pertaining to which techniques we are going to fine-tuning with."""
 
@@ -461,7 +547,7 @@ class FinetuningArguments(
         default="sft",
         metadata={"help": "Which stage will be performed in training."},
     )
-    finetuning_type: Literal["lora", "oft", "freeze", "full"] = field(
+    finetuning_type: Literal["lora", "oft", "freeze", "full", "blocktt", "svd"] = field(
         default="lora",
         metadata={"help": "Which fine-tuning method to use."},
     )
@@ -555,7 +641,9 @@ class FinetuningArguments(
         self.apollo_target: list[str] = split_arg(self.apollo_target)
         self.use_ref_model = self.stage == "dpo" and self.pref_loss not in ["orpo", "simpo"]
 
-        assert self.finetuning_type in ["lora", "oft", "freeze", "full"], "Invalid fine-tuning method."
+        assert self.finetuning_type in [
+            "lora", "oft", "freeze", "full", "blocktt", "svd",
+        ], "Invalid fine-tuning method."
         assert self.ref_model_quantization_bit in [None, 8, 4], "We only accept 4-bit or 8-bit quantization."
         assert self.reward_model_quantization_bit in [None, 8, 4], "We only accept 4-bit or 8-bit quantization."
 
