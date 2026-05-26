@@ -12,6 +12,19 @@
       "assistant_tag": "assistant"
     }
   },
+  "openthought3_qwen3_4b": {
+    "file_name": "/home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant"
+    }
+  },
   "identity": {
     "file_name": "identity.json"
   },

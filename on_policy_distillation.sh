@@ -30,8 +30,8 @@ fi
 
 ray stop --force
 export RAY_memory_usage_threshold=0.99
-export CUDA_LAUNCH_BLOCKING=1
-# export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-6,7}
 export PYTHONUNBUFFERED=1
 export PROJECT_NAME='OnPolicyDistillation' # TODO
 export TORCH_NCCL_BLOCKING_WAIT=1
@@ -49,15 +49,15 @@ export GRPO_OUTCOME_WEIGHT=1.0
 
 
 # DeepMath-103K
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=31744 # TODO: 15360 / 7168 / 3072
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+export MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-7168}  # TODO: 31744 /15360 / 7168 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-31744} # TODO: 15360 / 7168 / 3072
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
 export TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0} # Teacher logits temperature (default 1.0, no scaling)
 export REPETITION_PENALTY=${REPETITION_PENALTY:-1.0} # TODO: 1.0 / 1.1 / 1.2 (default 1.0, no penalty)
-export N_RESPONSES=4 # TODO: 4 / 8 / 16 / 32 (default: 8)
+export N_RESPONSES=${N_RESPONSES:-4} # TODO: 4 / 8 / 16 / 32 (default: 8)
 export LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16} # 0 represents no top-k sampling
 export TOP_K_STRATEGY=${TOP_K_STRATEGY:-"only_stu"} # "only_stu" or "only_tch" or "intersection" or "union" or "union-intersection"
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-"student_p"} # "student_p" or "teacher_p" or "none"
@@ -106,32 +106,49 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B-RL
 # export ACTOR_MODEL_PATH=/workspace/model/Qwen3-1.7B-SFT-DAPO-4B
 # export ACTOR_MODEL_PATH=model/Qwen2.5-Math-1.5B
-export ACTOR_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-1.5B
+# export ACTOR_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-1.5B
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B-step_0400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-Base-SFT-OpenThought3-4B/checkpoint-1800
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-Base
-# export ACTOR_MODEL_PATH=model/Qwen3-1.7B
+export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-model/Qwen3-1.7B}
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-Base-SFT-DeepMath-4B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-sft/checkpoint-6000
 # export ACTOR_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-7B
 # export ACTOR_MODEL_PATH=model/DS-1.5B-SFT
+
 export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
+
 # export REWARD_MODEL_PATH=model/Qwen3-4B
 # export REWARD_MODEL_PATH=model/Qwen3-4B-grpo
 # export REWARD_MODEL_PATH=model/Qwen3-1.7B
 # export REWARD_MODEL_PATH=model/OpenMath-Nemotron-1.5B
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-7B
-# export REWARD_MODEL_PATH=model/Qwen3-4B-Non-Thinking-RL-Math
+export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-model/Qwen3-4B-Non-Thinking-RL-Math}
 # export REWARD_MODEL_PATH=model/Skywork-OR1-Math-7B
 # export REWARD_MODEL_PATH=model/Polaris-4B-Preview
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
-export REWARD_MODEL_PATH=model/JustRL-DeepSeek-1.5B
+# export REWARD_MODEL_PATH=model/JustRL-DeepSeek-1.5B
+
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
-export PROJECT_PATH=checkpoint
-export PARALLEL_SIZE=1
+export PROJECT_PATH=${PROJECT_PATH:-/data/yequan/compress_train/OPD}
+export PARALLEL_SIZE=${PARALLEL_SIZE:-1}
+# Hardware / scheduling knobs (overridable from wrapper scripts)
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
+export NNODES=${NNODES:-1}
+export LR=${LR:-1e-6}
+export ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-False}
+export ACTOR_OPTIM_OFFLOAD=${ACTOR_OPTIM_OFFLOAD:-False}
+export REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-True}
+export REWARD_PARAM_OFFLOAD=${REWARD_PARAM_OFFLOAD:-False}
+export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
+export VAL_N=${VAL_N:-16}
+export SAVE_FREQ=${SAVE_FREQ:-20}
+export TEST_FREQ=${TEST_FREQ:-20}
+export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}
 export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
@@ -184,7 +201,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=$LR \
     $LR_ARGS \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
@@ -193,12 +210,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=$PARALLEL_SIZE \
     $KL_ARGS \
     actor_rollout_ref.actor.loss_agg_mode=$LOSS_AGG_MODE \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=$ACTOR_PARAM_OFFLOAD \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=$ACTOR_OPTIM_OFFLOAD \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE \
     actor_rollout_ref.rollout.max_num_batched_tokens=$PPO_MAX_TOKEN_LEN_PER_GPU \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=$REF_PARAM_OFFLOAD \
     actor_rollout_ref.ref.fsdp_config.model_dtype=$MODEL_DTYPE \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.name=vllm \
@@ -209,12 +226,12 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
     actor_rollout_ref.rollout.n=$N_RESPONSES \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     +actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
-    actor_rollout_ref.rollout.val_kwargs.n=16 \
+    actor_rollout_ref.rollout.val_kwargs.n=$VAL_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.repetition_penalty=$REPETITION_PENALTY \
@@ -225,22 +242,22 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.path=$REWARD_MODEL_PATH \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \
-    reward_model.model.fsdp_config.param_offload=False \
+    reward_model.model.fsdp_config.param_offload=$REWARD_PARAM_OFFLOAD \
     +reward_model.model.dtype=$MODEL_DTYPE \
-    reward_model.micro_batch_size_per_gpu=24 \
+    reward_model.micro_batch_size_per_gpu=$REWARD_MICRO_BATCH_SIZE_PER_GPU \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
     trainer.val_before_train=False \
     trainer.log_val_generations=2 \
-    trainer.logger=['console','swanlab'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.validation_data_dir=validation_log/$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=8 \
-    trainer.nnodes=1 \
-    trainer.save_freq=20 \
-    trainer.test_freq=20 \
-    trainer.total_epochs=1 \
+    trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
+    trainer.nnodes=$NNODES \
+    trainer.save_freq=$SAVE_FREQ \
+    trainer.test_freq=$TEST_FREQ \
+    trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
 

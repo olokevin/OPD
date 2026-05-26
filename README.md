@@ -1,6 +1,6 @@
 ﻿<div align="center">
 
-# Rethinking On-Policy Distillation of Large Language Models:<br>Phenomenology, Mechanism, and Recipe
+# Rethinking On-Policy Distillation of Large Language Models:`<br>`Phenomenology, Mechanism, and Recipe
 
 [![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2604.13016)  [![Github](https://img.shields.io/badge/OPD-000000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/thunlp/OPD)  [![Rethinking OPD](https://img.shields.io/badge/Rethinking--OPD-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/collections/lllyx/rethinking-opd)  [![Twitter](https://img.shields.io/badge/Twitter-%23000000.svg?style=for-the-badge&logo=x&logoColor=white)](https://x.com/HBX_hbx/status/2044464414829777354)
 
@@ -73,21 +73,21 @@ bash on_policy_distillation.sh
 <details>
 <summary><b>Key Parameters</b></summary>
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| **Distillation Method** |||
-| `ADV_ESTIMATOR` | `token_reward_direct` | It can't be modified if you use OPD |
-| `ACTOR_MODEL_PATH` | — | Path to the student (policy) model to be trained |
-| `REWARD_MODEL_PATH` | — | Path to the teacher model that provides token-level reward signals |
-| **Generation Control** |||
-| `N_RESPONSES` | `4` | Number of rollout responses generated per prompt |
-| `MAX_PROMPT_LENGTH` | `1024` | Maximum token length for prompts |
-| `MAX_RESP_LENGTH` | `7168` | Maximum token length for responses during training |
-| `MAX_VAL_RESP_LENGTH` | `31744` | Maximum token length for responses during validation (set larger to ensure complete generation) |
-| **Top-K & Weighting Strategy** |||
-| `LOG_PROB_TOP_K` | `16` | Number of Top-K tokens retained when computing token-level rewards; setting to `0` falls back to sampled-token OPD |
-| `TOP_K_STRATEGY` | `only_stu` | Strategy for selecting the Top-K token set. Options: `only_stu` (select Top-K from the student, then query the teacher for corresponding log-probs), `only_tch` (select Top-K from the teacher), `intersection` (keep tokens appearing in both student and teacher Top-K), `union` (merge student and teacher Top-K), `union-intersection` (tokens in either Top-K but not both, i.e. symmetric difference) |
-| `REWARD_WEIGHT_MODE` | `student_p` | Weighting scheme for token rewards. `student_p`: weighted by student probability; `teacher_p`: weighted by teacher probability; `none`: no weighting |
+| Parameter                            | Default                 | Description                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Distillation Method**        |                         |                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `ADV_ESTIMATOR`                    | `token_reward_direct` | It can't be modified if you use OPD                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ACTOR_MODEL_PATH`                 | —                      | Path to the student (policy) model to be trained                                                                                                                                                                                                                                                                                                                                                                     |
+| `REWARD_MODEL_PATH`                | —                      | Path to the teacher model that provides token-level reward signals                                                                                                                                                                                                                                                                                                                                                   |
+| **Generation Control**         |                         |                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `N_RESPONSES`                      | `4`                   | Number of rollout responses generated per prompt                                                                                                                                                                                                                                                                                                                                                                     |
+| `MAX_PROMPT_LENGTH`                | `1024`                | Maximum token length for prompts                                                                                                                                                                                                                                                                                                                                                                                     |
+| `MAX_RESP_LENGTH`                  | `7168`                | Maximum token length for responses during training                                                                                                                                                                                                                                                                                                                                                                   |
+| `MAX_VAL_RESP_LENGTH`              | `31744`               | Maximum token length for responses during validation (set larger to ensure complete generation)                                                                                                                                                                                                                                                                                                                      |
+| **Top-K & Weighting Strategy** |                         |                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `LOG_PROB_TOP_K`                   | `16`                  | Number of Top-K tokens retained when computing token-level rewards; setting to `0` falls back to sampled-token OPD                                                                                                                                                                                                                                                                                                 |
+| `TOP_K_STRATEGY`                   | `only_stu`            | Strategy for selecting the Top-K token set. Options:`only_stu` (select Top-K from the student, then query the teacher for corresponding log-probs), `only_tch` (select Top-K from the teacher), `intersection` (keep tokens appearing in both student and teacher Top-K), `union` (merge student and teacher Top-K), `union-intersection` (tokens in either Top-K but not both, i.e. symmetric difference) |
+| `REWARD_WEIGHT_MODE`               | `student_p`           | Weighting scheme for token rewards.`student_p`: weighted by student probability; `teacher_p`: weighted by teacher probability; `none`: no weighting                                                                                                                                                                                                                                                            |
 
 </details>
 
@@ -101,14 +101,14 @@ Use `scripts/infer/vllm_rollout.py` to rollout teacher responses that will later
 <details>
 <summary><b>Key Parameters</b></summary>
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--input-parquet` | required | Path to the parquet file that provides prompts for teacher rollout |
-| `--model-path` | required | Path to the teacher model checkpoint used to generate responses |
-| `--gpu-ids` | `0,1,2,3,4,5,6,7` | Comma-separated GPU IDs used for multiprocessing rollout |
-| `--enable-thinking` | `false` | Whether to enable the model's thinking template when formatting prompts |
-| `--enable-rejection-sampling` | `true` | Whether to reject invalid outputs and retry generation |
-| `--max-attempts-per-rollout` | `3` | Maximum number of retries for each rollout slot when rejection sampling is enabled |
+| Parameter                       | Default             | Description                                                                        |
+| ------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
+| `--input-parquet`             | required            | Path to the parquet file that provides prompts for teacher rollout                 |
+| `--model-path`                | required            | Path to the teacher model checkpoint used to generate responses                    |
+| `--gpu-ids`                   | `0,1,2,3,4,5,6,7` | Comma-separated GPU IDs used for multiprocessing rollout                           |
+| `--enable-thinking`           | `false`           | Whether to enable the model's thinking template when formatting prompts            |
+| `--enable-rejection-sampling` | `true`            | Whether to reject invalid outputs and retry generation                             |
+| `--max-attempts-per-rollout`  | `3`               | Maximum number of retries for each rollout slot when rejection sampling is enabled |
 
 </details>
 
@@ -118,7 +118,7 @@ Below is an example command for generating teacher responses with `Qwen3-4B (Non
 python scripts/infer/vllm_rollout.py \
   --input-parquet datasets/OpenThoughts3-1.2M-math.parquet \
   --model-path model/Qwen3-4B \
-  --gpu-ids 0,1,2,3,4,5,6,7 \
+  --gpu-ids 4,5,6,7 \
   --enable-thinking false \
   --enable-rejection-sampling true \
   --max-attempts-per-rollout 3
