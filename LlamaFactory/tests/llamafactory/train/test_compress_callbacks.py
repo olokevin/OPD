@@ -1,34 +1,24 @@
-"""Unit tests for CompressNormalizeCallback and CompressSaveCallback."""
-import pathlib
-
-import pytest
-import torch
+"""Unit tests for CompressNormalizeCallback."""
 import torch.nn as nn
 
 
-class _FakeFA:
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-def test_normalize_callback_disabled_when_flag_off():
+def test_normalize_callback_disabled_when_flag_off(fake_finetuning_args):
     from llamafactory.train.callbacks import CompressNormalizeCallback
-    cb = CompressNormalizeCallback(_FakeFA(
+    cb = CompressNormalizeCallback(fake_finetuning_args(
         finetuning_type="blocktt", blocktt_normalize_after_update=False,
     ))
     assert cb.enabled is False
 
 
-def test_normalize_callback_disabled_for_svd():
+def test_normalize_callback_disabled_for_svd(fake_finetuning_args):
     from llamafactory.train.callbacks import CompressNormalizeCallback
-    cb = CompressNormalizeCallback(_FakeFA(
+    cb = CompressNormalizeCallback(fake_finetuning_args(
         finetuning_type="svd", blocktt_normalize_after_update=True,
     ))
     assert cb.enabled is False
 
 
-def test_normalize_callback_calls_compress_helper(monkeypatch):
+def test_normalize_callback_calls_compress_helper(monkeypatch, fake_finetuning_args):
     """When enabled, on_step_end should call normalize_trainable_blocktt_cores_."""
     from llamafactory.model import compress_setup
     compress_setup._ensure_compress_on_path()
@@ -41,7 +31,7 @@ def test_normalize_callback_calls_compress_helper(monkeypatch):
     )
 
     from llamafactory.train.callbacks import CompressNormalizeCallback
-    cb = CompressNormalizeCallback(_FakeFA(
+    cb = CompressNormalizeCallback(fake_finetuning_args(
         finetuning_type="blocktt", blocktt_normalize_after_update=True,
     ))
     assert cb.enabled is True
@@ -51,7 +41,7 @@ def test_normalize_callback_calls_compress_helper(monkeypatch):
     assert calls == [fake_model]
 
 
-def test_normalize_callback_no_model_kwarg_is_noop(monkeypatch):
+def test_normalize_callback_no_model_kwarg_is_noop(monkeypatch, fake_finetuning_args):
     from llamafactory.model import compress_setup
     compress_setup._ensure_compress_on_path()
     import compress.integration as ci
@@ -62,7 +52,7 @@ def test_normalize_callback_no_model_kwarg_is_noop(monkeypatch):
         lambda m: calls.append(m),
     )
     from llamafactory.train.callbacks import CompressNormalizeCallback
-    cb = CompressNormalizeCallback(_FakeFA(
+    cb = CompressNormalizeCallback(fake_finetuning_args(
         finetuning_type="blocktt", blocktt_normalize_after_update=True,
     ))
     cb.on_step_end(args=None, state=None, control=None, model=None)

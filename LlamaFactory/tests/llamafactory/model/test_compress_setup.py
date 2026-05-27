@@ -2,18 +2,12 @@
 import sys
 
 
-class _FakeFA:
-    """Minimal FinetuningArguments stand-in for unit tests."""
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
 def _default_fa_kwargs(**overrides):
-    """Build a kwargs dict for _FakeFA with sensible defaults for every
-    field consumed by init_compress_model. Tests pass **overrides to set
-    method-specific values (finetuning_type, train_position, calib_mode,
-    etc.) without copy-pasting the shared ~12 fields each time."""
+    """Build a kwargs dict for the fake_finetuning_args fixture with
+    sensible defaults for every field consumed by init_compress_model.
+    Tests pass **overrides to set method-specific values (finetuning_type,
+    train_position, calib_mode, etc.) without copy-pasting the shared
+    ~12 fields each time."""
     defaults = dict(
         # Shared
         trainable_type="all",
@@ -62,23 +56,23 @@ def test_repo_src_dir_resolves_to_opd_src():
     assert (src.parent / "LlamaFactory").exists()
 
 
-def test_init_compress_model_skips_when_not_trainable():
+def test_init_compress_model_skips_when_not_trainable(fake_finetuning_args):
     from llamafactory.model import compress_setup
     sentinel = object()
     out = compress_setup.init_compress_model(
         config=None, model=sentinel, model_args=None,
-        finetuning_args=_FakeFA(finetuning_type="blocktt", calib_mode="none"),
+        finetuning_args=fake_finetuning_args(finetuning_type="blocktt", calib_mode="none"),
         is_trainable=False,
     )
     assert out is sentinel
 
 
-def test_to_namespace_covers_all_compress_fields():
+def test_to_namespace_covers_all_compress_fields(fake_finetuning_args):
     import dataclasses
     from llamafactory.hparams.finetuning_args import CompressArguments
     from llamafactory.model import compress_setup
 
-    fa = _FakeFA(
+    fa = fake_finetuning_args(
         finetuning_type="blocktt",
         # populate every CompressArguments field with a recognizable value
         **{f.name: f.default for f in dataclasses.fields(CompressArguments)},
@@ -124,7 +118,7 @@ def _tiny_qwen_like_model():
     return Model()
 
 
-def test_plain_blocktt_converts_linear_modules():
+def test_plain_blocktt_converts_linear_modules(fake_finetuning_args):
     if not torch.cuda.is_available():
         import pytest
         pytest.skip("compress conversion requires CUDA")
@@ -133,7 +127,7 @@ def test_plain_blocktt_converts_linear_modules():
     from compress.integration import BTTLinear
 
     model = _tiny_qwen_like_model().cuda()
-    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="blocktt"))
+    fa = fake_finetuning_args(**_default_fa_kwargs(finetuning_type="blocktt"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,
@@ -146,7 +140,7 @@ def test_plain_blocktt_converts_linear_modules():
     assert any(".btt_l" in n or ".btt_r" in n for n in trainable), trainable
 
 
-def test_plain_svd_converts_linear_modules():
+def test_plain_svd_converts_linear_modules(fake_finetuning_args):
     if not torch.cuda.is_available():
         import pytest
         pytest.skip("compress conversion requires CUDA")
@@ -155,7 +149,7 @@ def test_plain_svd_converts_linear_modules():
     from compress.integration import SVDCompressedLinear
 
     model = _tiny_qwen_like_model().cuda()
-    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="svd", train_position="output"))
+    fa = fake_finetuning_args(**_default_fa_kwargs(finetuning_type="svd", train_position="output"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,
@@ -168,7 +162,7 @@ def test_plain_svd_converts_linear_modules():
     assert any(".U_r" in n or ".V_r" in n for n in trainable), trainable
 
 
-def test_calibrated_btt_v2_runs(monkeypatch):
+def test_calibrated_btt_v2_runs(monkeypatch, fake_finetuning_args):
     """Calibrated v2 path: validates that compress_setup wires
     validate_calibrated_btt_args + build_calib_loader + apply_calibrated_btt
     together. We monkeypatch each of the three to assert dispatch."""
@@ -200,7 +194,7 @@ def test_calibrated_btt_v2_runs(monkeypatch):
     monkeypatch.setattr(compress_setup, "_load_tokenizer", lambda model_args: object())
 
     model = _tiny_qwen_like_model()
-    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="blocktt", calib_mode="v2"))
+    fa = fake_finetuning_args(**_default_fa_kwargs(finetuning_type="blocktt", calib_mode="v2"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,

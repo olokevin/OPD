@@ -404,6 +404,8 @@ class CompressNormalizeCallback(TrainerCallback):
     """
 
     def __init__(self, finetuning_args):
+        # getattr defaults keep this robust to partial test fakes; in
+        # production both attributes are always set by CompressArguments.
         self.enabled = (
             getattr(finetuning_args, "finetuning_type", None) == "blocktt"
             and getattr(finetuning_args, "blocktt_normalize_after_update", False)
