@@ -230,14 +230,18 @@ case "$PEFT_MODE" in
     PEFT_ARGS="$PEFT_ARGS \
       +actor_rollout_ref.peft.lora.rank=$LORA_RANK \
       +actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
-      +actor_rollout_ref.peft.lora.dropout=$LORA_DROPOUT" ;;
+      +actor_rollout_ref.peft.lora.dropout=$LORA_DROPOUT \
+      actor_rollout_ref.model.lora_rank=$LORA_RANK \
+      actor_rollout_ref.model.lora_alpha=$LORA_ALPHA" ;;
   qlora)
     PEFT_ARGS="$PEFT_ARGS \
       +actor_rollout_ref.peft.lora.rank=$LORA_RANK \
       +actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
       +actor_rollout_ref.peft.qlora.bnb_4bit_quant_type=$QLORA_QUANT_TYPE \
       +actor_rollout_ref.peft.qlora.bnb_4bit_use_double_quant=$QLORA_DOUBLE_QUANT \
-      +actor_rollout_ref.peft.qlora.bnb_4bit_compute_dtype=$QLORA_COMPUTE_DTYPE" ;;
+      +actor_rollout_ref.peft.qlora.bnb_4bit_compute_dtype=$QLORA_COMPUTE_DTYPE \
+      actor_rollout_ref.model.lora_rank=$LORA_RANK \
+      actor_rollout_ref.model.lora_alpha=$LORA_ALPHA" ;;
   blocktt)
     PEFT_ARGS="$PEFT_ARGS \
       +actor_rollout_ref.peft.blocktt.decomp_mode=$BTT_DECOMP_MODE \
