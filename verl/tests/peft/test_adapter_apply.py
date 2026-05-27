@@ -109,3 +109,61 @@ def test_qlora_topology_meta_has_qlora_block(tiny_tokenizer):
     meta = adapter.topology_meta()
     assert meta["mode"] == "qlora"
     assert meta["qlora"]["bnb_4bit_quant_type"] == "nf4"
+
+
+def _blocktt_cfg(qfura=False, calib_mode="none"):
+    return PEFTConfig.from_omegaconf(OmegaConf.create({
+        "mode": "blocktt",
+        "target_modules": "all",
+        "blocktt": {
+            "decomp_mode": "input_one_block",
+            "rank": "full",
+            "train_position": "small",
+            "s_merged_to": "frozen",
+            "convert_mode": "svd",
+            "factorize_by_head": True,
+            "train_bias": True,
+            "normalize_after_update": False,
+            "qfura": {"enabled": qfura},
+        },
+        "calib": {"mode": calib_mode, "source": "c4", "num_seqs": 4, "max_length": 64,
+                  "batch_size": 2, "seed": 0},
+    }))
+
+
+@pytest.mark.gpu
+def test_blocktt_plain_apply_installs_btt_modules(tiny_model, tiny_tokenizer):
+    from compress.btt.btt_linear import BTTLinear
+    cfg = _blocktt_cfg()
+    adapter = PEFTAdapter.from_config(cfg, model_config=None)
+    out = adapter.apply(tiny_model.cuda(), tokenizer=tiny_tokenizer,
+                        calib_loader_builder=lambda: None)
+    n_btt = sum(1 for m in out.modules() if isinstance(m, BTTLinear))
+    assert n_btt > 0, "no BTTLinear modules installed"
+    # vLLM kwargs are empty for compress modes (full-base sync).
+    assert adapter.vllm_engine_kwargs() == {}
+
+
+@pytest.mark.gpu
+def test_blocktt_qfura_apply_installs_qbtt_modules(tiny_model, tiny_tokenizer):
+    from compress.btt.qbtt_linear import QBTTLinear
+    cfg = _blocktt_cfg(qfura=True)
+    adapter = PEFTAdapter.from_config(cfg, model_config=None)
+    out = adapter.apply(tiny_model.cuda(), tokenizer=tiny_tokenizer,
+                        calib_loader_builder=lambda: None)
+    n_qbtt = sum(1 for m in out.modules() if isinstance(m, QBTTLinear))
+    assert n_qbtt > 0, "no QBTTLinear modules installed"
+
+
+@pytest.mark.gpu
+def test_blocktt_export_for_vllm_returns_dense_weights(tiny_model, tiny_tokenizer):
+    cfg = _blocktt_cfg()
+    adapter = PEFTAdapter.from_config(cfg, model_config=None)
+    out = adapter.apply(tiny_model.cuda(), tokenizer=tiny_tokenizer,
+                        calib_loader_builder=lambda: None)
+    exported = adapter.export_for_vllm(out)
+    assert isinstance(exported, dict) and len(exported) > 0
+    # Keys must look like nn.Linear params, not factor names.
+    for k in exported:
+        assert ".btt_l" not in k and ".btt_r" not in k
+        assert k.endswith(".weight") or k.endswith(".bias")
