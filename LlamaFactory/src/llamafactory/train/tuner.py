@@ -27,7 +27,13 @@ from ..extras.misc import find_available_port, get_device_name, get_torch_device
 from ..extras.packages import is_mcore_adapter_available, is_ray_available, is_transformers_version_greater_than
 from ..hparams import RayArguments, get_infer_args, get_ray_args, get_train_args, read_args
 from ..model import load_model, load_tokenizer
-from .callbacks import LogCallback, PissaConvertCallback, ReporterCallback
+from .callbacks import (
+    CompressNormalizeCallback,
+    CompressSaveCallback,
+    LogCallback,
+    PissaConvertCallback,
+    ReporterCallback,
+)
 from .dpo import run_dpo
 from .kto import run_kto
 from .ppo import run_ppo
@@ -68,6 +74,10 @@ def _training_function(config: dict[str, Any]) -> None:
 
     if finetuning_args.early_stopping_steps is not None:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=finetuning_args.early_stopping_steps))
+
+    if finetuning_args.finetuning_type in ("blocktt", "svd"):
+        callbacks.append(CompressNormalizeCallback(finetuning_args))
+        callbacks.append(CompressSaveCallback(finetuning_args))
 
     callbacks.append(ReporterCallback(model_args, data_args, finetuning_args, generating_args))  # add to last
 
