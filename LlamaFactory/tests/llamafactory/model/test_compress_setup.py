@@ -147,3 +147,58 @@ def test_plain_svd_converts_linear_modules():
 
     trainable = [n for n, p in out.named_parameters() if p.requires_grad]
     assert any(".U_r" in n or ".V_r" in n for n in trainable), trainable
+
+
+def test_calibrated_btt_v2_runs(monkeypatch):
+    """Calibrated v2 path: validates that compress_setup wires
+    validate_calibrated_btt_args + build_calib_loader + apply_calibrated_btt
+    together. We monkeypatch each of the three to assert dispatch."""
+    from llamafactory.model import compress_setup
+    compress_setup._ensure_compress_on_path()
+    import compress.integration as ci
+
+    seen = {}
+    fake_loader = object()
+
+    def fake_validate(args, *, argv, hyphen_style):
+        seen["validate"] = (args, argv, hyphen_style)
+
+    def fake_build(args, *, tokenizer, training_dataset=None, training_collate_fn=None,
+                   rl_rollout_fn=None, hyphen_style=True):
+        seen["build"] = {"args": args, "tokenizer": tokenizer,
+                         "hyphen_style": hyphen_style}
+        return fake_loader
+
+    def fake_apply_btt(model, args, *, calib_loader, device=None, hyphen_style=True):
+        seen["apply_btt"] = {"loader": calib_loader, "hyphen_style": hyphen_style}
+        return model, {"num_btt_layers": 1}
+
+    monkeypatch.setattr(ci, "validate_calibrated_btt_args", fake_validate)
+    monkeypatch.setattr(ci, "build_calib_loader", fake_build)
+    monkeypatch.setattr(ci, "apply_calibrated_btt", fake_apply_btt)
+    # The tokenizer load is also monkeypatched — calibrated path doesn't
+    # need a real one for this dispatch test.
+    monkeypatch.setattr(compress_setup, "_load_tokenizer", lambda model_args: object())
+
+    model = _tiny_qwen_like_model()
+    fa = _FakeFA(
+        finetuning_type="blocktt", calib_mode="v2", calib_source="c4",
+        calib_num_seqs=4, calib_max_length=16, calib_seed=0, calib_batch_size=1,
+        calib_traces_path=None, compression_ratio=1.0,
+        trainable_type="all", train_position="small", s_merged_to="frozen",
+        decomp_mode="input_one_block", blocktt_rank="full", convert_mode="svd",
+        train_bias=True, blocktt_normalize_after_update=False,
+        blocktt_factorize_by_head=True,
+    )
+    out = compress_setup.init_compress_model(
+        config=None, model=model, model_args=None,
+        finetuning_args=fa, is_trainable=True,
+    )
+
+    assert seen["validate"][2] is False        # hyphen_style=False
+    assert seen["build"]["hyphen_style"] is False
+    assert seen["apply_btt"]["loader"] is fake_loader
+    assert seen["apply_btt"]["hyphen_style"] is False
+    # apply_calibrated_btt returns (model, stats); the model in the namespace
+    # is what init_compress_model returns.
+    assert out is model

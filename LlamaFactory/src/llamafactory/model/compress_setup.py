@@ -6,7 +6,7 @@ from __future__ import annotations
 import pathlib
 import sys
 from argparse import Namespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..extras.logging import get_logger
 
@@ -64,10 +64,36 @@ def init_compress_model(
     method = fa.finetuning_type
 
     if fa.calib_mode != "none":
-        # Calibrated path lands in Task 5.
-        raise NotImplementedError(
-            "compress_setup: calibrated init not implemented yet (Task 5)."
+        from compress.integration import (
+            validate_calibrated_btt_args,
+            build_calib_loader,
+            apply_calibrated_btt,
+            apply_calibrated_svd,
         )
+        ns = _to_namespace(fa)
+        validate_calibrated_btt_args(ns, argv=None, hyphen_style=False)
+        tokenizer = _load_tokenizer(model_args)
+        calib_loader = build_calib_loader(
+            ns, tokenizer=tokenizer, hyphen_style=False,
+        )
+        if calib_loader is None:
+            raise RuntimeError(
+                f"compress_setup: build_calib_loader returned None for "
+                f"calib_mode={fa.calib_mode!r}, calib_source={fa.calib_source!r}."
+            )
+        if method == "blocktt":
+            model, _stats = apply_calibrated_btt(
+                model, ns, calib_loader=calib_loader, hyphen_style=False,
+            )
+        elif method == "svd":
+            model = apply_calibrated_svd(
+                model, ns, calib_loader=calib_loader, hyphen_style=False,
+            )
+        else:
+            raise ValueError(
+                f"compress_setup: unsupported finetuning_type={method!r} for calibrated init."
+            )
+        return model
 
     rank = _resolve_rank(fa.blocktt_rank)
 
@@ -118,6 +144,22 @@ def init_compress_model(
         )
 
     return model
+
+
+def _load_tokenizer(model_args: "ModelArguments") -> Any:
+    """Load the tokenizer for calibration. Imports HF lazily to keep
+    cold-start fast in the plain (non-calibrated) path."""
+    from transformers import AutoTokenizer
+    name = getattr(model_args, "model_name_or_path", None)
+    if not name:
+        raise ValueError(
+            "compress_setup: model_args.model_name_or_path is required for "
+            "calibrated BlockTT/SVD finetuning."
+        )
+    return AutoTokenizer.from_pretrained(
+        name,
+        trust_remote_code=getattr(model_args, "trust_remote_code", False),
+    )
 
 
 def _resolve_rank(rank_arg: str) -> "str | int":
