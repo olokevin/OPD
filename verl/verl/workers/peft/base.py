@@ -21,7 +21,13 @@ class PEFTAdapter(ABC):
         self.model_config = model_config
 
     @classmethod
-    def from_config(cls, peft_cfg, *, model_config) -> "PEFTAdapter":
+    def from_config(
+        cls,
+        peft_cfg,
+        *,
+        model_config,
+        teacher_model_path: Optional[str] = None,
+    ) -> "PEFTAdapter":
         # Importing here avoids a circular import at module-load time.
         from verl.workers.peft.lora import LoRAAdapter
         from verl.workers.peft.qlora import QLoRAAdapter
@@ -36,7 +42,16 @@ class PEFTAdapter(ABC):
             "svd": SVDAdapter,
         }
         cls_ = registry[peft_cfg.mode]
-        return cls_(peft_cfg, model_config=model_config)
+        # Only BTT / SVD adapters know about teacher_model_path; the others
+        # don't accept the kwarg, so fall back to the legacy signature.
+        try:
+            return cls_(
+                peft_cfg,
+                model_config=model_config,
+                teacher_model_path=teacher_model_path,
+            )
+        except TypeError:
+            return cls_(peft_cfg, model_config=model_config)
 
     def needs_calibration(self) -> bool:
         return False

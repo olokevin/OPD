@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+from typing import Optional
 
 import torch
 
@@ -13,9 +14,11 @@ from verl.workers.peft.base import PEFTAdapter
 class SVDAdapter(PEFTAdapter):
     mode = "svd"
 
-    def __init__(self, peft_cfg, model_config=None):
+    def __init__(self, peft_cfg, model_config=None, teacher_model_path: Optional[str] = None):
         super().__init__(peft_cfg, model_config=model_config)
         self._is_calibrated = peft_cfg.calib.mode != "none"
+        # Path to teacher LM for calib.loss=="opd"; loaded lazily in apply().
+        self._teacher_model_path: Optional[str] = teacher_model_path
 
     def needs_calibration(self) -> bool:
         return self._is_calibrated
@@ -49,10 +52,33 @@ class SVDAdapter(PEFTAdapter):
                 calib_seed=self.peft_cfg.calib.seed,
                 calib_batch_size=self.peft_cfg.calib.batch_size,
             )
+            args.calib_loss = self.peft_cfg.calib.loss
+            if self.peft_cfg.calib.loss == "opd":
+                args.calib_top_k = self.peft_cfg.calib.top_k
+                args.calib_top_k_strategy = self.peft_cfg.calib.top_k_strategy
+                args.calib_reward_weight_mode = self.peft_cfg.calib.reward_weight_mode
+                args.calib_temperature = self.peft_cfg.calib.temperature
+                args.calib_teacher_temperature = self.peft_cfg.calib.teacher_temperature
             calib_loader = calib_loader_builder()
             if calib_loader is None:
                 raise RuntimeError("SVDAdapter calibration requires a non-None calib_loader.")
             device = "cuda" if torch.cuda.is_available() else None
+            if self.peft_cfg.calib.loss == "opd":
+                if not self._teacher_model_path:
+                    raise RuntimeError(
+                        "SVDAdapter with calib.loss='opd' requires teacher_model_path "
+                        "(typically reward_model.model.path / REWARD_MODEL_PATH)"
+                    )
+                from transformers import AutoModelForCausalLM
+                tdtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+                teacher = AutoModelForCausalLM.from_pretrained(
+                    self._teacher_model_path, torch_dtype=tdtype,
+                )
+                teacher = teacher.to(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+                for p in teacher.parameters():
+                    p.requires_grad_(False)
+                teacher.eval()
+                args.teacher_model = teacher
             model = apply_calibrated_svd(model, args, calib_loader=calib_loader,
                                          device=device, hyphen_style=True)
         else:

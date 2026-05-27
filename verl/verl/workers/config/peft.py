@@ -69,6 +69,15 @@ class CalibConfig:
     batch_size: int = 8
     seed: int = 3
     cpu_offload: bool = False
+    # Gradient-source for v2_combined / svd_v2_combined modes.
+    # "ce" — standard cross-entropy (default). "opd" — token-level on-policy
+    # distillation against a teacher model on device.
+    loss: str = "ce"
+    top_k: int = 16                         # OPD: Top-K size for student's selected ids
+    top_k_strategy: str = "only_stu"        # only currently supported value
+    reward_weight_mode: str = "student_p"   # student_p | teacher_p | none
+    temperature: float = 1.0
+    teacher_temperature: float = 1.0
 
 
 @dataclass
@@ -116,6 +125,15 @@ class PEFTConfig:
         ):
             if not self.calib.traces_path:
                 raise ValueError("peft.calib.traces_path is required when calib.source=traces")
+        if self.calib.loss not in {"ce", "opd"}:
+            raise ValueError(
+                f"peft.calib.loss must be 'ce' or 'opd'; got {self.calib.loss!r}"
+            )
+        if self.calib.loss == "opd" and self.calib.mode == "none":
+            raise ValueError(
+                "peft.calib.loss='opd' requires peft.calib.mode to be set "
+                "(e.g. v2_combined)"
+            )
 
     @classmethod
     def from_omegaconf(cls, cfg: Any) -> "PEFTConfig":

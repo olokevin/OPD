@@ -452,7 +452,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         peft_raw = self.config.get("peft", None)
         peft_cfg = PEFTConfig.legacy_shim(peft_cfg=peft_raw, model_cfg=self.config.model)
-        self._peft_adapter = PEFTAdapter.from_config(peft_cfg, model_config=self.config.model)
+        # Teacher LM path for calib.loss=="opd". The full verl config is not
+        # available here (self.config is just actor_rollout_ref), so we read
+        # from the REWARD_MODEL_PATH env var that the OPD launch scripts
+        # already export. BTT / SVD adapters use this only when
+        # peft.calib.loss == "opd"; the other adapters ignore it.
+        teacher_path = os.environ.get("REWARD_MODEL_PATH") or None
+        self._peft_adapter = PEFTAdapter.from_config(
+            peft_cfg,
+            model_config=self.config.model,
+            teacher_model_path=teacher_path,
+        )
 
         # Resume: if a peft_meta.json sits at default_local_dir, rebuild topology
         # instead of re-applying (skips calibration).

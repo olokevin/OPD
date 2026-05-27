@@ -166,6 +166,26 @@ actor_rollout_ref:
       # Whether to offload calibration activations to CPU
       cpu_offload: false
 
+      # Gradient source for v2_combined / svd_v2_combined: ce | opd
+      # (opd needs a teacher model on device, taken from REWARD_MODEL_PATH)
+      loss: ce
+
+      # OPD: Top-K size for student's selected ids
+      top_k: 16
+
+      # OPD: how to pick the K tokens scored by teacher. Currently only
+      # "only_stu" is plumbed through to the calibrator.
+      top_k_strategy: only_stu
+
+      # OPD: token-reward reweighting: student_p | teacher_p | none
+      reward_weight_mode: student_p
+
+      # OPD: temperature applied to student logits
+      temperature: 1.0
+
+      # OPD: temperature applied to teacher logits
+      teacher_temperature: 1.0
+
 # custom reward function definition
 custom_reward_function:
 

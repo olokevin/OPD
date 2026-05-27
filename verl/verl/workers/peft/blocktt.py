@@ -15,11 +15,14 @@ from verl.workers.peft.base import PEFTAdapter
 class BlockTTAdapter(PEFTAdapter):
     mode = "blocktt"
 
-    def __init__(self, peft_cfg, model_config=None):
+    def __init__(self, peft_cfg, model_config=None, teacher_model_path: Optional[str] = None):
         super().__init__(peft_cfg, model_config=model_config)
         self._topology_payload: Optional[dict] = None
         self._is_calibrated: bool = peft_cfg.calib.mode != "none"
         self._is_qfura: bool = peft_cfg.blocktt.qfura.enabled
+        # Path to teacher LM, only used when peft.calib.loss == "opd".
+        # Loaded lazily inside apply() to keep imports cheap.
+        self._teacher_model_path: Optional[str] = teacher_model_path
 
     def needs_calibration(self) -> bool:
         return self._is_calibrated
@@ -32,7 +35,7 @@ class BlockTTAdapter(PEFTAdapter):
 
     def _build_compress_args(self):
         bt = self.peft_cfg.blocktt
-        return SimpleNamespace(
+        args = SimpleNamespace(
             train_mode="blocktt",
             trainable_type=self._trainable_type(),
             decomp_mode=bt.decomp_mode,
@@ -50,6 +53,16 @@ class BlockTTAdapter(PEFTAdapter):
             calib_seed=self.peft_cfg.calib.seed,
             calib_batch_size=self.peft_cfg.calib.batch_size,
         )
+        # Forward calib_loss + OPD knobs to apply_calibrated_btt; teacher_model
+        # itself is attached lazily in apply() once we know the target device.
+        args.calib_loss = self.peft_cfg.calib.loss
+        if self.peft_cfg.calib.loss == "opd":
+            args.calib_top_k = self.peft_cfg.calib.top_k
+            args.calib_top_k_strategy = self.peft_cfg.calib.top_k_strategy
+            args.calib_reward_weight_mode = self.peft_cfg.calib.reward_weight_mode
+            args.calib_temperature = self.peft_cfg.calib.temperature
+            args.calib_teacher_temperature = self.peft_cfg.calib.teacher_temperature
+        return args
 
     def apply(self, model, *, tokenizer, calib_loader_builder):
         from compress.integration import (
@@ -81,6 +94,24 @@ class BlockTTAdapter(PEFTAdapter):
                     "check peft.calib.* and that calib_loader_builder was passed."
                 )
             device = "cuda" if torch.cuda.is_available() else None
+            # Lazy-load teacher model when calib_loss == "opd". Apply requires_grad_(False)
+            # and .eval() before handing off to compress.apply_calibrated_btt.
+            if self.peft_cfg.calib.loss == "opd":
+                if not self._teacher_model_path:
+                    raise RuntimeError(
+                        "BlockTTAdapter with calib.loss='opd' requires teacher_model_path "
+                        "(typically reward_model.model.path / REWARD_MODEL_PATH)"
+                    )
+                from transformers import AutoModelForCausalLM
+                tdtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+                teacher = AutoModelForCausalLM.from_pretrained(
+                    self._teacher_model_path, torch_dtype=tdtype,
+                )
+                teacher = teacher.to(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+                for p in teacher.parameters():
+                    p.requires_grad_(False)
+                teacher.eval()
+                args.teacher_model = teacher
             model, stats = apply_calibrated_btt(model, args, calib_loader=calib_loader,
                                                 device=device, hyphen_style=True)
             self._topology_payload = {"calib_stats": stats}

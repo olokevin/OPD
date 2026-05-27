@@ -79,3 +79,23 @@ def test_legacy_shim_propagates_exclude_modules():
     merged = PEFTConfig.legacy_shim(peft_cfg=peft_cfg, model_cfg=model_cfg)
     assert merged.mode == "lora"
     assert merged.lora.exclude_modules == ["lm_head"]
+
+
+def test_calib_loss_opd_requires_mode():
+    raw = OmegaConf.create({
+        "mode": "blocktt",
+        "calib": {"mode": "none", "loss": "opd"},
+    })
+    with pytest.raises(ValueError, match="calib.loss='opd' requires peft.calib.mode"):
+        PEFTConfig.from_omegaconf(raw)
+
+
+def test_calib_loss_opd_with_v2_combined_ok():
+    raw = OmegaConf.create({
+        "mode": "blocktt",
+        "blocktt": {"rank": "full"},
+        "calib": {"mode": "v2_combined", "loss": "opd", "top_k": 8},
+    })
+    cfg = PEFTConfig.from_omegaconf(raw)
+    assert cfg.calib.loss == "opd"
+    assert cfg.calib.top_k == 8

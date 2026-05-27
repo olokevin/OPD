@@ -306,6 +306,12 @@ actor_rollout_ref:
       batch_size: 8
       seed: 3
       cpu_offload: false
+      loss: ce
+      top_k: 16
+      top_k_strategy: only_stu
+      reward_weight_mode: student_p
+      temperature: 1.0
+      teacher_temperature: 1.0
   hybrid_engine: true
   nccl_timeout: 600
 data:
