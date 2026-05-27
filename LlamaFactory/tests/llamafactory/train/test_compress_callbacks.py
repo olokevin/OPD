@@ -90,7 +90,7 @@ def _build_btt_converted_tiny_model(fake_finetuning_args):
     )
 
 
-def test_save_callback_plain_writes_merged_dir(tmp_path, fake_finetuning_args):
+def test_build_materialized_state_dict_has_no_btt_keys(fake_finetuning_args):
     """Plain BTT model: _build_materialized_state_dict materializes BTT
     cores into dense nn.Linear-shaped weights, with no .btt_l/.btt_r keys."""
     from llamafactory.train.callbacks import _build_materialized_state_dict
@@ -120,3 +120,53 @@ def test_save_callback_rank_zero_guard(tmp_path, fake_finetuning_args):
     )
     cb.on_save(args=_Args(), state=_State(), control=None, model=object())
     assert not (tmp_path / "checkpoint-5-merged").exists()
+
+
+def test_save_callback_does_not_mutate_live_model(tmp_path, fake_finetuning_args, monkeypatch):
+    """Critical: CompressSaveCallback must not replace BTT modules with
+    nn.Linear on the live training model, even for calibrated runs.
+    Regression for the bug where save_calibrated_btt_hf_pretrained
+    mutated the model in place via materialize_calibrated_btt_to_linear.
+
+    The tiny test model has no HF ``.config``, so we stub the peer-model
+    construction/save — the test's concern is whether the live model is
+    mutated by ``_materialize_and_save``, not the downstream HF save path.
+    """
+    from llamafactory.train.callbacks import _materialize_and_save
+    from llamafactory.model import compress_setup
+    compress_setup._ensure_compress_on_path()
+    from compress.integration import BTTLinear
+
+    model = _build_btt_converted_tiny_model(fake_finetuning_args)
+    btt_modules_before = [
+        n for n, m in model.named_modules() if isinstance(m, BTTLinear)
+    ]
+    assert btt_modules_before, "test precondition: model has BTT modules"
+
+    # Stub out the HF peer construction/save: the tiny fixture model
+    # has no .config, and the test is only concerned with whether the
+    # live model is mutated.
+    class _StubPeer:
+        def load_state_dict(self, sd, strict=False):  # noqa: ARG002
+            return None, None
+        def save_pretrained(self, path):  # noqa: ARG002
+            return None
+
+    import transformers
+    monkeypatch.setattr(
+        transformers.AutoModelForCausalLM, "from_config",
+        classmethod(lambda cls, *a, **kw: _StubPeer()),
+    )
+    # _materialize_and_save reads model.config; give the tiny model a
+    # placeholder attribute so the lookup itself doesn't AttributeError.
+    monkeypatch.setattr(model, "config", object(), raising=False)
+
+    _materialize_and_save(model, str(tmp_path / "merged"))
+
+    btt_modules_after = [
+        n for n, m in model.named_modules() if isinstance(m, BTTLinear)
+    ]
+    assert btt_modules_after == btt_modules_before, (
+        f"BTT modules were mutated by _materialize_and_save. "
+        f"Before: {btt_modules_before!r}, after: {btt_modules_after!r}"
+    )

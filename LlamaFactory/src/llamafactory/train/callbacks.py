@@ -14,6 +14,7 @@
 
 import json
 import os
+import pathlib
 import signal
 import sys
 import time
@@ -420,26 +421,13 @@ class CompressNormalizeCallback(TrainerCallback):
         normalize_trainable_blocktt_cores_(model)
 
 
-import pathlib as _pathlib
-
-
 def _materialize_btt_weight(layer) -> torch.Tensor:
     """Reconstruct the dense ``[out_features, in_features]`` weight of a
-    ``BTTLinear`` layer by running the forward pass on an identity input.
-
-    Mirrors run_rl.py::materialize_btt_weight semantics. We don't reach
-    back into run_rl.py — the BTTLinear.forward implementation is the
-    contract.
+    ``BTTLinear``. Delegates to the layer's own ``materialize_dense_weight``
+    method, mirroring ``run_rl.py::materialize_btt_weight``.
     """
-    n = layer.btt_r.shape[0]
-    b = layer.btt_r.shape[1]
-    in_features = n * b
-    device = layer.btt_l.device
-    dtype = layer.btt_l.dtype
-    eye = torch.eye(in_features, device=device, dtype=dtype)
     with torch.no_grad():
-        out = layer(eye)                       # (in_features, out_features)
-    return out.t().contiguous()                # (out_features, in_features)
+        return layer.materialize_dense_weight()
 
 
 def _materialize_svd_weight(layer) -> torch.Tensor:
@@ -505,7 +493,7 @@ def _materialize_and_save(model, ckpt_dir: str) -> None:
     """
     from transformers import AutoModelForCausalLM
 
-    ckpt = _pathlib.Path(ckpt_dir)
+    ckpt = pathlib.Path(ckpt_dir)
     ckpt.mkdir(parents=True, exist_ok=True)
 
     merged_sd = _build_materialized_state_dict(model)
@@ -523,28 +511,28 @@ class CompressSaveCallback(TrainerCallback):
     """
 
     def __init__(self, finetuning_args):
-        self.method = getattr(finetuning_args, "finetuning_type", None)
-        self.calibrated = getattr(finetuning_args, "calib_mode", "none") != "none"
+        del finetuning_args   # currently unused; accepted for symmetry
+                              # with CompressNormalizeCallback's signature.
 
     def on_save(self, args, state, control, model=None, **kwargs):
         if not getattr(state, "is_world_process_zero", False):
             return
-        out = _pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
+        out = pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
         out.mkdir(parents=True, exist_ok=True)
         self._dump(model, str(out))
 
     def on_train_end(self, args, state, control, model=None, **kwargs):
         if not getattr(state, "is_world_process_zero", False):
             return
-        out = _pathlib.Path(args.output_dir) / "final-merged"
+        out = pathlib.Path(args.output_dir) / "final-merged"
         out.mkdir(parents=True, exist_ok=True)
         self._dump(model, str(out))
 
     def _dump(self, model, ckpt_dir: str) -> None:
-        if self.calibrated:
-            from ..model.compress_setup import _ensure_compress_on_path
-            _ensure_compress_on_path()
-            from compress.integration import save_calibrated_btt_hf_pretrained
-            save_calibrated_btt_hf_pretrained(model, ckpt_dir)
-        else:
-            _materialize_and_save(model, ckpt_dir)
+        # Use the same non-mutating peer-model path for both plain and
+        # calibrated runs. We deliberately avoid src/compress's
+        # save_calibrated_btt_hf_pretrained because it calls
+        # materialize_calibrated_btt_to_linear which mutates the live
+        # model in place — that destroys subsequent training steps when
+        # on_save fires multiple times.
+        _materialize_and_save(model, ckpt_dir)
