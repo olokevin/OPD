@@ -519,16 +519,24 @@ class CompressSaveCallback(TrainerCallback):
             return
         out = pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
         out.mkdir(parents=True, exist_ok=True)
-        self._dump(model, str(out))
+        self._dump(model, str(out), self._extract_tokenizer(kwargs))
 
     def on_train_end(self, args, state, control, model=None, **kwargs):
         if not getattr(state, "is_world_process_zero", False):
             return
         out = pathlib.Path(args.output_dir) / "final-merged"
         out.mkdir(parents=True, exist_ok=True)
-        self._dump(model, str(out))
+        self._dump(model, str(out), self._extract_tokenizer(kwargs))
 
-    def _dump(self, model, ckpt_dir: str) -> None:
+    @staticmethod
+    def _extract_tokenizer(kwargs):
+        """HF Trainer passes the processing class via ``processing_class``
+        in Transformers >= 4.46; older versions used ``tokenizer``. Accept
+        either so the merged checkpoint stays self-contained across the
+        rename window."""
+        return kwargs.get("processing_class") or kwargs.get("tokenizer")
+
+    def _dump(self, model, ckpt_dir: str, tokenizer=None) -> None:
         # Use the same non-mutating peer-model path for both plain and
         # calibrated runs. We deliberately avoid src/compress's
         # save_calibrated_btt_hf_pretrained because it calls
@@ -536,3 +544,10 @@ class CompressSaveCallback(TrainerCallback):
         # model in place — that destroys subsequent training steps when
         # on_save fires multiple times.
         _materialize_and_save(model, ckpt_dir)
+        # Also save the tokenizer / processor so the merged checkpoint
+        # is drop-in for vLLM / eval. HF Trainer passes the processing
+        # class (tokenizer or processor) via the ``processing_class``
+        # kwarg to on_save/on_train_end (Transformers >= 4.46); older
+        # versions used ``tokenizer``.
+        if tokenizer is not None and hasattr(tokenizer, "save_pretrained"):
+            tokenizer.save_pretrained(ckpt_dir)

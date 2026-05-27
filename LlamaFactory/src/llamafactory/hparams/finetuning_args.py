@@ -16,20 +16,79 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
-def resolve_blocktt_rank(rank_arg: str) -> "str | int":
-    """Parse the ``blocktt_rank`` YAML field into the value
-    ``convert_linear_to_btt_compress`` accepts: the literal string ``"full"``
-    or a positive ``int``. Mirrors ``run_rl.py::resolve_blocktt_rank``.
+def resolve_blocktt_rank(rank_arg: str, *, calib_mode: str = "none") -> "str | int | float":
+    """Parse the ``blocktt_rank`` YAML field into the value the underlying
+    compress API expects.
+
+    Plain (``calib_mode=='none'``) accepts:
+      * the literal string ``"full"`` (lossless decomposition)
+      * a positive integer string (truncated rank)
+
+    Calibrated (``calib_mode != "none"``) additionally accepts:
+      * a float string in ``(0, 1]`` (interpreted as the parameter-keep
+        ratio by ``compress.integration._resolve_ratio_from_rank``)
+
+    Integer ranks are NOT valid for calibrated mode: the upstream
+    ``validate_calibrated_btt_args`` rejects them with the same error.
+
+    Mirrors ``run_rl.py::resolve_blocktt_rank`` plus the calibrated-mode
+    branch in ``compress.integration.validate_calibrated_btt_args``.
     """
     if rank_arg == "full":
         return "full"
+
+    calibrated = (calib_mode != "none")
+    has_dot_or_exp = ("." in rank_arg) or ("e" in rank_arg.lower())
+
+    if has_dot_or_exp:
+        if not calibrated:
+            raise ValueError(
+                f"blocktt_rank float values are only valid when calib_mode != 'none' "
+                f"(got blocktt_rank={rank_arg!r}, calib_mode={calib_mode!r})."
+            )
+        try:
+            rank_float = float(rank_arg)
+        except ValueError as exc:
+            raise ValueError(
+                f"blocktt_rank must be parseable as float (got {rank_arg!r})."
+            ) from exc
+        if not (0.0 < rank_float <= 1.0):
+            raise ValueError(
+                f"blocktt_rank float must be in (0, 1] for calibrated BTT "
+                f"(got {rank_float})."
+            )
+        return rank_float
+
+    # No decimal/exponent — input looks integer-shaped.
     try:
         rank_int = int(rank_arg)
     except ValueError as exc:
         raise ValueError(
-            f"blocktt_rank must be 'full' or a positive integer string "
-            f"(got {rank_arg!r})."
+            f"blocktt_rank must be 'full', a positive integer string, "
+            f"or (in calibrated mode) a float in (0, 1] (got {rank_arg!r})."
         ) from exc
+
+    if calibrated:
+        # In calibrated mode the underlying API consumes a ratio, not a
+        # rank. If the value already lies in [0, 1] (e.g. "0" or "1"),
+        # report it as an out-of-range *float* — that's the closer
+        # diagnosis than "you wrote an integer rank". Otherwise (>= 2)
+        # it's unambiguously an integer-rank input, which is rejected
+        # outright by the upstream ``validate_calibrated_btt_args``.
+        if rank_int <= 1:
+            rank_float = float(rank_int)
+            if not (0.0 < rank_float <= 1.0):
+                raise ValueError(
+                    f"blocktt_rank float must be in (0, 1] for calibrated BTT "
+                    f"(got {rank_float})."
+                )
+            return rank_float
+        raise ValueError(
+            f"integer blocktt_rank is only valid when calib_mode == 'none'; "
+            f"for calibrated BTT pass 'full' or a float in (0, 1] "
+            f"(got blocktt_rank={rank_arg!r}, calib_mode={calib_mode!r})."
+        )
+
     if rank_int <= 0:
         raise ValueError(f"blocktt_rank must be > 0 (got {rank_int}).")
     return rank_int
@@ -765,8 +824,10 @@ class FinetuningArguments(
                 self.s_merged_to = None
 
             # blocktt_rank parseable (also normalizes to the form
-            # convert_linear_to_btt_compress accepts)
-            resolve_blocktt_rank(self.blocktt_rank)
+            # convert_linear_to_btt_compress accepts); calib-mode-aware so
+            # float-ratio inputs (only valid under calibrated BTT) are
+            # accepted up front.
+            resolve_blocktt_rank(self.blocktt_rank, calib_mode=self.calib_mode)
 
         # calib_mode is only meaningful when finetuning_type ∈ {blocktt, svd}
         if self.calib_mode != "none":

@@ -133,3 +133,26 @@ def test_compress_rejects_galore_apollo_badam():
         _make(finetuning_type="svd", use_apollo=True)
     with pytest.raises(ValueError, match="GaLore|APOLLO|BAdam"):
         _make(finetuning_type="blocktt", use_badam=True)
+
+
+def test_blocktt_rank_accepts_float_in_calibrated_mode():
+    # Float blocktt_rank is valid under calibrated BTT (0, 1] ratio.
+    _make(finetuning_type="blocktt", blocktt_rank="0.5", calib_mode="v2")
+    _make(finetuning_type="blocktt", blocktt_rank="1.0", calib_mode="v2")
+
+
+def test_blocktt_rank_rejects_float_in_plain_mode():
+    with pytest.raises(ValueError, match="float values are only valid"):
+        _make(finetuning_type="blocktt", blocktt_rank="0.5", calib_mode="none")
+
+
+def test_blocktt_rank_rejects_out_of_range_float():
+    with pytest.raises(ValueError, match=r"float must be in \(0, 1\]"):
+        _make(finetuning_type="blocktt", blocktt_rank="1.5", calib_mode="v2")
+    with pytest.raises(ValueError, match=r"float must be in \(0, 1\]"):
+        _make(finetuning_type="blocktt", blocktt_rank="0", calib_mode="v2")
+
+
+def test_blocktt_rank_rejects_integer_in_calibrated_mode():
+    with pytest.raises(ValueError, match="integer blocktt_rank is only valid"):
+        _make(finetuning_type="blocktt", blocktt_rank="16", calib_mode="v2")

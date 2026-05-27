@@ -170,3 +170,38 @@ def test_save_callback_does_not_mutate_live_model(tmp_path, fake_finetuning_args
         f"BTT modules were mutated by _materialize_and_save. "
         f"Before: {btt_modules_before!r}, after: {btt_modules_after!r}"
     )
+
+
+def test_save_callback_writes_tokenizer_when_provided(tmp_path, fake_finetuning_args, monkeypatch):
+    """CompressSaveCallback should save the tokenizer (passed via the HF
+    processing_class kwarg) alongside the merged model weights."""
+    from llamafactory.train.callbacks import CompressSaveCallback
+
+    class _State:
+        is_world_process_zero = True
+        global_step = 7
+
+    class _Args:
+        output_dir = str(tmp_path)
+
+    class _StubTokenizer:
+        def __init__(self):
+            self.saved_to = None
+        def save_pretrained(self, path):
+            self.saved_to = str(path)
+
+    # Stub _materialize_and_save so the test doesn't need a real BTT model.
+    def fake_materialize_and_save(model, ckpt_dir):
+        return None
+    monkeypatch.setattr(
+        "llamafactory.train.callbacks._materialize_and_save",
+        fake_materialize_and_save,
+    )
+
+    tok = _StubTokenizer()
+    cb = CompressSaveCallback(fake_finetuning_args(finetuning_type="blocktt", calib_mode="none"))
+    cb.on_save(
+        args=_Args(), state=_State(), control=None, model=object(),
+        processing_class=tok,
+    )
+    assert tok.saved_to == str(tmp_path / "checkpoint-7-merged")
