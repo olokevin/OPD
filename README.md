@@ -138,6 +138,28 @@ We use GRPO as the RL algorithm. To enable RL, set `ADV_ESTIMATOR=grpo` and `LOG
 
 We release the resulting RL checkpoint [Qwen3-4B-Base-GRPO](https://huggingface.co/lllyx/Qwen3-4B-Base-GRPO), which is obtained by zero RL from `Qwen3-4B-Base`.
 
+#### PEFT modes
+
+Both `grpo.sh` and `on_policy_distillation.sh` accept `PEFT_MODE=<mode>` to
+enable parameter-efficient training:
+
+| Mode | Description | Key env vars |
+|------|-------------|--------------|
+| `none` (default) | Full fine-tune | (none) |
+| `lora` | Standard LoRA | `LORA_RANK`, `LORA_ALPHA`, `LORA_DROPOUT` |
+| `qlora` | LoRA on a bnb 4-bit base | `LORA_RANK`, `QLORA_QUANT_TYPE`, `QLORA_COMPUTE_DTYPE` |
+| `blocktt` | BlockTT factorization from `src/compress` (set `BTT_QFURA=True` for NF4-quantized frozen core) | `BTT_DECOMP_MODE`, `BTT_TRAIN_POSITION`, `BTT_RANK`, `BTT_QFURA` |
+| `svd` | SVD low-rank factorization | `SVD_TRAIN_POSITION`, `SVD_COMPRESSION_RATIO` |
+
+Calibrated BlockTT/SVD: set `CALIB_MODE=v2` (or `twosteps` / `svd_v2` / ...)
+and `CALIB_SOURCE=c4|traces|training_data`.
+
+Checkpoints land in `<default_local_dir>/global_step_N/merged_hf/` and are
+loadable by stock `AutoModelForCausalLM.from_pretrained` (compress modes) or
+`PeftModel.from_pretrained(base, ...)` (LoRA/QLoRA). See
+`docs/superpowers/specs/2026-05-26-verl-peft-blocktt-svd-design.md` for the
+full design.
+
 > [!IMPORTANT]
 > **Non-thinking Models:** When training a non-thinking model (e.g., `Qwen3-1.7B (Non-thinking)`) using OPD or RL, you must add `+data.apply_chat_template_kwargs.enable_thinking=False` to the training script.
 
