@@ -72,22 +72,36 @@ def test_blocktt_both_with_frozen_s_merged_rejected():
         _make(finetuning_type="blocktt", train_position="both", s_merged_to="frozen")
 
 
-def test_blocktt_qr_with_s_merged_to_warns(caplog):
+def test_blocktt_qr_with_s_merged_to_warns():
+    # The "llamafactory" library root logger sets propagate=False and writes
+    # through its own StreamHandler bound to a captured sys.stdout (see
+    # llamafactory.extras.logging._configure_library_root_logger). Both
+    # caplog (which relies on propagation to the root logger) and capsys/
+    # capfd (which require the handler to write to the *current* fd) fail
+    # to observe the record cleanly. The least invasive approach is to
+    # attach our own list-collecting handler to the emitting submodule
+    # logger for the duration of the test, then assert against it. This
+    # avoids any monkey-patching of propagation or library globals.
     import logging
-    # The "llamafactory" library root logger sets propagate=False (see
-    # llamafactory.extras.logging), which prevents pytest's caplog from
-    # capturing records from submodules. Temporarily re-enable propagation
-    # so caplog (attached to the stdlib root) sees this warning.
-    caplog.set_level(logging.WARNING, logger="llamafactory.hparams.finetuning_args")
-    lf_root = logging.getLogger("llamafactory")
-    prev_propagate = lf_root.propagate
-    lf_root.propagate = True
+    captured: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    target = logging.getLogger("llamafactory.hparams.finetuning_args")
+    handler = _ListHandler(level=logging.WARNING)
+    prev_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.WARNING)
     try:
         fa = _make(finetuning_type="blocktt", convert_mode="qr", s_merged_to="output")
     finally:
-        lf_root.propagate = prev_propagate
+        target.removeHandler(handler)
+        target.setLevel(prev_level)
+
     assert fa.s_merged_to is None
-    assert any("convert_mode=qr" in r.message for r in caplog.records)
+    assert any("convert_mode=qr" in r.getMessage() for r in captured)
 
 
 def test_calib_mode_requires_compress_finetuning():

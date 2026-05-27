@@ -738,8 +738,8 @@ class FinetuningArguments(
                 and self.convert_mode == "qr"
                 and self.s_merged_to is not None
             ):
-                import logging
-                logging.getLogger(__name__).warning(
+                from ..extras.logging import get_logger
+                get_logger(__name__).warning_rank0(
                     "convert_mode=qr has no singular values; ignoring "
                     f"s_merged_to={self.s_merged_to!r}.",
                 )
