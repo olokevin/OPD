@@ -62,6 +62,8 @@ class LoRAAdapter(PEFTAdapter):
                 bias=self.peft_cfg.lora.bias,
                 target_modules=_target_modules_to_peft(self.peft_cfg.target_modules),
             )
+            if self.peft_cfg.lora.exclude_modules is not None:
+                lora_kwargs["exclude_modules"] = self.peft_cfg.lora.exclude_modules
             peft_model = get_peft_model(model, LoraConfig(**lora_kwargs))
         self._peft_model = peft_model
         return peft_model

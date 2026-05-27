@@ -24,6 +24,7 @@ class LoRAConfig:
     dropout: float = 0.0
     bias: str = "none"
     adapter_path: Optional[str] = None
+    exclude_modules: Optional[Union[str, list[str]]] = None
 
 
 @dataclass
@@ -163,5 +164,10 @@ class PEFTConfig:
         tm = model_raw.get("target_modules")
         if tm is not None:
             peft.target_modules = tm
+        exclude = model_raw.get("exclude_modules")
+        if exclude is not None:
+            peft.lora.exclude_modules = (
+                exclude if isinstance(exclude, str) else list(exclude)
+            )
         peft.__post_init__()
         return peft

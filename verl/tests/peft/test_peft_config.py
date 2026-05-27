@@ -71,3 +71,11 @@ def test_legacy_lora_rank_shim():
     assert merged.lora.rank == 16
     assert merged.lora.alpha == 32
     assert merged.target_modules == "all-linear"
+
+
+def test_legacy_shim_propagates_exclude_modules():
+    model_cfg = OmegaConf.create({"lora_rank": 8, "exclude_modules": ["lm_head"]})
+    peft_cfg = OmegaConf.create({"mode": "none"})
+    merged = PEFTConfig.legacy_shim(peft_cfg=peft_cfg, model_cfg=model_cfg)
+    assert merged.mode == "lora"
+    assert merged.lora.exclude_modules == ["lm_head"]

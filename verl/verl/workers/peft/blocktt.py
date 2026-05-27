@@ -156,7 +156,7 @@ class BlockTTAdapter(PEFTAdapter):
                 "factorize_by_head": bt.factorize_by_head,
                 "train_bias": bt.train_bias,
                 "normalize_after_update": bt.normalize_after_update,
-                "qfura": bt.qfura.enabled,
+                "qfura": {"enabled": bt.qfura.enabled},
             },
             "calib": {
                 "mode": self.peft_cfg.calib.mode,

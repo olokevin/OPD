@@ -1177,30 +1177,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         dist.barrier()
 
         # Adapter-driven HF-format save: writes merged_hf/ + peft_meta.json + compress/.
-        try:
-            merged_hf_dir = os.path.join(local_path, "merged_hf")
-            os.makedirs(merged_hf_dir, exist_ok=True)
-            # Materialize / merge happens inside adapter.save_pretrained.
-            peft_module_for_save = getattr(self, "actor_module", self.actor_module_fsdp)
-            self._peft_adapter.save_pretrained(peft_module_for_save, merged_hf_dir)
-            # Tokenizer next to the HF dir so eval can from_pretrained the same dir.
-            if self.tokenizer is not None:
-                self.tokenizer.save_pretrained(merged_hf_dir)
-            # Sidecar metadata (rank 0, first save only).
-            if dist.get_rank() == 0 and not os.path.exists(
-                os.path.join(local_path, "peft_meta.json")
-            ):
-                with open(os.path.join(local_path, "peft_meta.json"), "w") as f:
-                    json.dump(self._peft_adapter.topology_meta(), f, indent=2)
-            # BlockTT topology sidecar (only writes if adapter populated it).
-            write_sidecar = getattr(self._peft_adapter, "write_compress_sidecar", None)
-            if dist.get_rank() == 0 and callable(write_sidecar):
-                write_sidecar(local_path)
-        except Exception as e:
-            log_with_rank(
-                f"PEFT save_pretrained error ({e})", rank=dist.get_rank(), logger=logger,
-                log_only_rank_0=True,
-            )
+        # Skip entirely in default mode — NullAdapter delegates to fsdp_module.save_pretrained,
+        # which the FSDP-wrapped module does not implement; the FSDP shard save above
+        # already covers default-mode persistence.
+        if self._peft_adapter.mode != "none":
+            try:
+                merged_hf_dir = os.path.join(local_path, "merged_hf")
+                os.makedirs(merged_hf_dir, exist_ok=True)
+                # Materialize / merge happens inside adapter.save_pretrained.
+                peft_module_for_save = getattr(self, "actor_module", self.actor_module_fsdp)
+                self._peft_adapter.save_pretrained(peft_module_for_save, merged_hf_dir)
+                # Tokenizer next to the HF dir so eval can from_pretrained the same dir.
+                if self.tokenizer is not None:
+                    self.tokenizer.save_pretrained(merged_hf_dir)
+                # Sidecar metadata (rank 0, first save only).
+                if dist.get_rank() == 0 and not os.path.exists(
+                    os.path.join(local_path, "peft_meta.json")
+                ):
+                    with open(os.path.join(local_path, "peft_meta.json"), "w") as f:
+                        json.dump(self._peft_adapter.topology_meta(), f, indent=2)
+                # BlockTT topology sidecar (only writes if adapter populated it).
+                write_sidecar = getattr(self._peft_adapter, "write_compress_sidecar", None)
+                if dist.get_rank() == 0 and callable(write_sidecar):
+                    write_sidecar(local_path)
+            except Exception as e:
+                log_with_rank(
+                    f"PEFT save_pretrained error ({e})", rank=dist.get_rank(), logger=logger,
+                    log_only_rank_0=True,
+                )
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
