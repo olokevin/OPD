@@ -74,8 +74,14 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         offload_param: bool = False,
         load_format: str = "dummy_hf",
         layered_summon: bool = True,
+        peft_adapter=None,
     ):
         self.module = module
+        # Optional PEFTAdapter (BlockTT / SVD / LoRA / Null) so __enter__ can
+        # delegate dense-weight export to adapters that override
+        # ``export_for_vllm``. When ``None`` or when the adapter returns
+        # ``None`` from ``export_for_vllm``, behaviour is unchanged.
+        self._peft_adapter = peft_adapter
         # For AsyncLLM, inference_engine and model_runner are defer initialized in vLLMAsyncRollout.load_model
         self.inference_engine = inference_engine
         # self.model_runner = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner if
@@ -199,9 +205,31 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             if self.offload_param:
                 load_fsdp_model_to_gpu(self.module)
 
+            # Adapter-driven dense export (BlockTT / SVD / Null modes). When
+            # the attached PEFTAdapter overrides ``export_for_vllm`` with a
+            # concrete implementation that returns a dict, use it directly and
+            # skip the LoRA-specific collection path. LoRA/Null adapters fall
+            # through because their override returns ``None``.
+            exported_dense = None
+            if self._peft_adapter is not None:
+                from verl.workers.peft.base import PEFTAdapter as _PEFTAdapterBase
+
+                has_export_override = (
+                    self._peft_adapter.export_for_vllm.__func__
+                    is not _PEFTAdapterBase.export_for_vllm
+                )
+                if has_export_override:
+                    with FSDP.summon_full_params(self.module, writeback=False):
+                        maybe_dict = self._peft_adapter.export_for_vllm(self.module)
+                    if maybe_dict is not None:
+                        exported_dense = maybe_dict
+
             peft_config = None
             peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-            if hasattr(peft_model, "peft_config"):
+            if exported_dense is not None:
+                params = exported_dense
+                peft_config = None
+            elif hasattr(peft_model, "peft_config"):
                 peft_config = peft_model.peft_config.get("default", None)
                 params = __collect_lora_params()
             else:
