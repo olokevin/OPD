@@ -394,3 +394,25 @@ class ReporterCallback(TrainerCallback):
                     "generating_args": self.generating_args.to_dict(),
                 }
             )
+
+
+class CompressNormalizeCallback(TrainerCallback):
+    """Normalize trainable BTT cores after each optimizer step.
+
+    Mirrors run_rl.py's blocktt_normalize_after_update behavior. No-op when
+    finetuning_type != blocktt or when the flag is False.
+    """
+
+    def __init__(self, finetuning_args):
+        self.enabled = (
+            getattr(finetuning_args, "finetuning_type", None) == "blocktt"
+            and getattr(finetuning_args, "blocktt_normalize_after_update", False)
+        )
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if not self.enabled or model is None:
+            return
+        from ..model.compress_setup import _ensure_compress_on_path
+        _ensure_compress_on_path()
+        from compress.integration import normalize_trainable_blocktt_cores_
+        normalize_trainable_blocktt_cores_(model)
