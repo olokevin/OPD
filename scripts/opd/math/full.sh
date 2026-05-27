@@ -15,9 +15,16 @@ ACTOR_MODEL_PATH=Qwen/Qwen3-1.7B
 REWARD_MODEL_PATH=Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500
 HF_HOME=/data/yequan/huggingface
 
+TRAIN_DATASET_NAME=math-500k
+MAX_RESP_LENGTH=3072
+MAX_VAL_RESP_LENGTH=3072
+PROJECT_NAME=opd-qwen-math
+SAVE_FREQ=100
+TEST_FREQ=2
+
 # Hardware.
-CUDA_VISIBLE_DEVICES=3,6
-N_GPUS_PER_NODE=2
+CUDA_VISIBLE_DEVICES=3
+N_GPUS_PER_NODE=1
 
 # vLLM: disable FlashInfer sampler (its JIT compile hits a gcc-11 + nvcc
 # include_next bug — `-isystem /usr/include` from flashinfer's build script
@@ -33,8 +40,6 @@ ACTOR_OPTIM_OFFLOAD=True
 REWARD_PARAM_OFFLOAD=True
 GPU_MEMORY_UTILIZATION=0.55
 REWARD_MICRO_BATCH_SIZE_PER_GPU=8
-MAX_RESP_LENGTH=4096
-MAX_VAL_RESP_LENGTH=8192
 # Keep MINI_BATCH_SIZE=64 (the 8-GPU default) so the per-update sample count
 # stays identical to on_policy_distillation.sh: 64 prompts × N_RESPONSES per
 # update. Verl divides this across DP ranks automatically — on 2 GPUs each rank
@@ -46,4 +51,4 @@ VAL_N=4
 
 set +a
 
-bash "$SCRIPT_DIR/on_policy_distillation.sh"
+bash on_policy_distillation.sh

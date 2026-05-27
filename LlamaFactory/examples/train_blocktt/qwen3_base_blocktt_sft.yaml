@@ -26,7 +26,7 @@ calib_mode: none
 dataset: openthought3_qwen3_4b
 template: qwen3
 enable_thinking: false
-cutoff_len: 20480
+cutoff_len: 14336
 preprocessing_num_workers: 64
 dataloader_num_workers: 64
 

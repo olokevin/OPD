@@ -19,8 +19,10 @@ logs/
 outputs/
 ref/
 src/
-slurm/
 *.whl
+
+output/
+model/
 
 *.safetensors
 *.pth

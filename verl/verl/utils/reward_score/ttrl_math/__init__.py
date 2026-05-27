@@ -19,6 +19,7 @@ Based on HF math_verify, verl, open reasoner zero, etc.
 from latex2sympy2_extended import latex2sympy
 from sympy import simplify
 from sympy.parsing.sympy_parser import parse_expr
+import re
 import traceback
 
 from .math_utils import extract_boxed_answer, is_latex_equal, grade_answer_mathd, grade_answer_sympy, timeout_ours
@@ -27,9 +28,16 @@ from .math_utils import extract_boxed_answer, is_latex_equal, grade_answer_mathd
 This code is adapted from Entropy Machanism Recipe (https://github.com/volcengine/verl/tree/main/recipe/entropy/).
 """
 
+# GSM8K-style "#### <answer>" trailer (last occurrence wins).
+_GSM8K_HASHES_RE = re.compile(r"####\s*([^\n#]+?)\s*$", re.MULTILINE)
+
 def extract_answer(passage: str) -> str:
     if "\\boxed" in passage:
         return extract_boxed_answer(passage)
+    # Fallback for GSM8K-style outputs that end with "#### <answer>".
+    matches = _GSM8K_HASHES_RE.findall(passage)
+    if matches:
+        return matches[-1].strip().rstrip(".")
     return None
 
 

@@ -21,8 +21,6 @@
 #   CALIB_NUM_SEQS=32 BTT_RANK=0.3 bash scripts/compress_opd/math/btt_v2_combined_opd.sh
 
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 set -a  # auto-export every assignment below to on_policy_distillation.sh
 
@@ -34,16 +32,16 @@ REWARD_MODEL_PATH=Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500
 HF_HOME=/data/yequan/huggingface
 
 TRAIN_DATASET_NAME=math-500k
-MAX_PROMPT_LENGTH=512
-MAX_RESP_LENGTH=1024
-MAX_VAL_RESP_LENGTH=1024
-PROJECT_NAME=opd-compress-qwen-math
+MAX_PROMPT_LENGTH=1024
+MAX_RESP_LENGTH=2048
+MAX_VAL_RESP_LENGTH=2048
+PROJECT_NAME=opd-compress-qwen4B_1p7B-math
 
 # Smoke-test cadence — keep checkpoints sparse, run validation rarely.
 SAVE_FREQ=200
-TEST_FREQ=200
+TEST_FREQ=10
 TOTAL_EPOCHS=1
-VAL_N=1
+VAL_N=4
 
 # Hardware: single GPU.
 CUDA_VISIBLE_DEVICES=0
@@ -66,10 +64,10 @@ N_RESPONSES=2
 # PEFT: BlockTT compression with v2_combined calibration + OPD loss.
 PEFT_MODE=blocktt
 PEFT_TARGET_MODULES=all
-BTT_DECOMP_MODE=input_one_block   # smaller side comes from input dim
+BTT_DECOMP_MODE=output_one_block   # smaller side comes from input dim
 BTT_RANK=0.5                       # ratio in (0,1] — only valid with calibrated modes
 BTT_TRAIN_POSITION=small           # train the small factor
-BTT_S_MERGED_TO=frozen
+BTT_S_MERGED_TO=keep_trainable     # keep the merged S in the trainable small factor
 BTT_CONVERT_MODE=svd
 BTT_FACTORIZE_BY_HEAD=True
 BTT_NORMALIZE_AFTER_UPDATE=False
@@ -78,9 +76,9 @@ BTT_QFURA=False
 # Calibration: v2_combined (double whitening) + OPD-faithful gradient.
 CALIB_MODE=v2_combined
 CALIB_SOURCE=training_data         # reuse the OPD training data for calibration
-CALIB_NUM_SEQS=8                   # smoke value; bump to 128+ for real runs
+CALIB_NUM_SEQS=64                   # smoke value; bump to 128+ for real runs
 CALIB_MAX_LENGTH=512
-CALIB_BATCH_SIZE=2
+CALIB_BATCH_SIZE=8
 CALIB_SEED=0
 
 # OPD-faithful calibration loss — gradient direction matches the OPD trainer.
@@ -96,4 +94,4 @@ CALIB_TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0}
 
 set +a
 
-bash "$REPO_ROOT/on_policy_distillation.sh"
+bash on_policy_distillation.sh
