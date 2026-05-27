@@ -6,7 +6,6 @@ calib_source, ...); we adapt the PEFTConfig dataclass to that shape.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Optional
 
 
 def build_calib_loader_for_peft(peft_cfg, *, tokenizer, training_dataset=None,

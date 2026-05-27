@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from typing import Optional
 
 import torch
-import torch.nn as nn
 
 from verl.workers.peft.base import PEFTAdapter
 
