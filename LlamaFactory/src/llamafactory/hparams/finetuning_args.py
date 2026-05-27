@@ -751,23 +751,10 @@ class FinetuningArguments(
                 and self.s_merged_to is not None
             ):
                 import logging
-                # NOTE: LlamaFactory's library root logger ("llamafactory") sets
-                # propagate=False, which prevents pytest's caplog (installed on
-                # the stdlib root logger) from capturing submodule records. We
-                # therefore temporarily allow this single warning to propagate so
-                # that user-installed root handlers (and caplog) see it; the
-                # library's own stdout handler still emits it normally.
-                _logger = logging.getLogger(__name__)
-                _lf_root = logging.getLogger("llamafactory")
-                _prev_propagate = _lf_root.propagate
-                _lf_root.propagate = True
-                try:
-                    _logger.warning(
-                        "convert_mode=qr has no singular values; ignoring "
-                        f"s_merged_to={self.s_merged_to!r}.",
-                    )
-                finally:
-                    _lf_root.propagate = _prev_propagate
+                logging.getLogger(__name__).warning(
+                    "convert_mode=qr has no singular values; ignoring "
+                    f"s_merged_to={self.s_merged_to!r}.",
+                )
                 self.s_merged_to = None
 
             # blocktt_rank parseable

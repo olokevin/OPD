@@ -73,8 +73,19 @@ def test_blocktt_both_with_frozen_s_merged_rejected():
 
 
 def test_blocktt_qr_with_s_merged_to_warns(caplog):
-    # warn-and-ignore: object constructs, s_merged_to gets cleared
-    fa = _make(finetuning_type="blocktt", convert_mode="qr", s_merged_to="output")
+    import logging
+    # The "llamafactory" library root logger sets propagate=False (see
+    # llamafactory.extras.logging), which prevents pytest's caplog from
+    # capturing records from submodules. Temporarily re-enable propagation
+    # so caplog (attached to the stdlib root) sees this warning.
+    caplog.set_level(logging.WARNING, logger="llamafactory.hparams.finetuning_args")
+    lf_root = logging.getLogger("llamafactory")
+    prev_propagate = lf_root.propagate
+    lf_root.propagate = True
+    try:
+        fa = _make(finetuning_type="blocktt", convert_mode="qr", s_merged_to="output")
+    finally:
+        lf_root.propagate = prev_propagate
     assert fa.s_merged_to is None
     assert any("convert_mode=qr" in r.message for r in caplog.records)
 
