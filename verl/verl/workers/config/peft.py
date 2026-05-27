@@ -4,7 +4,6 @@ See docs/superpowers/specs/2026-05-26-verl-peft-blocktt-svd-design.md.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
