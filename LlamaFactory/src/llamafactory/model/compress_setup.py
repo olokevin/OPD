@@ -50,13 +50,89 @@ def init_compress_model(
         return model
 
     _ensure_compress_on_path()
-
-    # Conversion logic lands in Task 4. For now, raise an explicit error so
-    # accidentally hitting this path during testing is loud rather than silent.
-    raise NotImplementedError(
-        "init_compress_model: conversion path not implemented yet; "
-        "see Task 4 of the implementation plan."
+    from compress.integration import (
+        convert_linear_to_btt_compress,
+        convert_linear_to_svd_compress,
+        configure_compress_btt_trainability,
+        configure_compress_svd_trainability,
+        get_blocktt_target_module_names,
+        get_svd_target_module_names,
+        resolve_blocktt_decomp_modes,
     )
+
+    fa = finetuning_args
+    method = fa.finetuning_type
+
+    if fa.calib_mode != "none":
+        # Calibrated path lands in Task 5.
+        raise NotImplementedError(
+            "compress_setup: calibrated init not implemented yet (Task 5)."
+        )
+
+    rank = _resolve_rank(fa.blocktt_rank)
+
+    if method == "blocktt":
+        targets = get_blocktt_target_module_names(fa.trainable_type)
+        decomp_mode, module_decomp_modes = resolve_blocktt_decomp_modes(
+            fa.decomp_mode, include_names=targets,
+        )
+        convert_linear_to_btt_compress(
+            model,
+            btt_rank=rank,
+            decomp_mode=module_decomp_modes if module_decomp_modes else decomp_mode,
+            include_names=targets,
+            s_merged_to=fa.s_merged_to,
+            train_position=fa.train_position,
+            factorize_by_head=fa.blocktt_factorize_by_head,
+            model_config=getattr(model, "config", None),
+            convert_mode=fa.convert_mode,
+        )
+        configure_compress_btt_trainability(
+            model,
+            train_bias=fa.train_bias,
+            train_position=fa.train_position,
+            train_singular_values=(fa.s_merged_to == "keep_trainable"),
+        )
+    elif method == "svd":
+        targets = get_svd_target_module_names(fa.trainable_type)
+        convert_linear_to_svd_compress(
+            model,
+            include_names=targets,
+            s_merged_to=fa.s_merged_to,
+            train_position=fa.train_position,
+        )
+        configure_compress_svd_trainability(
+            model,
+            train_position=fa.train_position,
+            train_bias=fa.train_bias,
+            train_embed_lm_head=(fa.train_position == "both"),
+            train_singular_values=(fa.s_merged_to == "keep_trainable"),
+        )
+    else:
+        raise ValueError(
+            f"compress_setup: unsupported finetuning_type={method!r}; "
+            "expected 'blocktt' or 'svd'."
+        )
+
+    return model
+
+
+def _resolve_rank(rank_arg: str):
+    """Parse ``blocktt_rank`` into the value ``convert_linear_to_btt_compress``
+    accepts: the literal string ``"full"`` or a positive ``int``. Mirrors
+    ``run_rl.py::resolve_blocktt_rank``."""
+    if rank_arg == "full":
+        return "full"
+    try:
+        rank_int = int(rank_arg)
+    except ValueError as exc:
+        raise ValueError(
+            f"blocktt_rank must be 'full' or a positive integer string "
+            f"(got {rank_arg!r})."
+        ) from exc
+    if rank_int <= 0:
+        raise ValueError(f"blocktt_rank must be > 0 (got {rank_int}).")
+    return rank_int
 
 
 def _to_namespace(finetuning_args: "FinetuningArguments") -> Namespace:
