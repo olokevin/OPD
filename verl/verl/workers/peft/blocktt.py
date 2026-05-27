@@ -84,25 +84,46 @@ class BlockTTAdapter(PEFTAdapter):
             model, stats = apply_calibrated_btt(model, args, calib_loader=calib_loader,
                                                 device=device, hyphen_style=True)
             self._topology_payload = {"calib_stats": stats}
+        elif self._is_qfura:
+            # qfura streaming path does its own Linear -> BTT conversion +
+            # NF4 quantization in a single layer-streaming pass, so the plain
+            # convert + trainability calls would be redundant and would also
+            # leave full bf16 BTTLinear layers on-device before quantization.
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "BlockTTAdapter qfura requires a CUDA device for the "
+                    "streaming NF4 quantization pass."
+                )
+            convert_and_quantize_linear_to_qbtt_streaming(
+                model,
+                btt_rank=bt.rank,
+                decomp_mode=module_decomp_modes,
+                train_position=bt.train_position,
+                s_merged_to=bt.s_merged_to,
+                quant_layout="flat",
+                target_modules=include_names,
+                cuda_device=torch.cuda.current_device(),
+                factorize_by_head=bt.factorize_by_head,
+                convert_mode=bt.convert_mode,
+            )
         else:
             convert_linear_to_btt_compress(
                 model,
-                target_module_names=include_names,
-                decomp_mode=decomp_mode,
-                rank=bt.rank,
-                convert_mode=bt.convert_mode,
+                btt_rank=bt.rank,
+                decomp_mode=module_decomp_modes,
+                include_names=include_names,
+                s_merged_to=bt.s_merged_to,
+                train_position=bt.train_position,
                 factorize_by_head=bt.factorize_by_head,
-                module_decomp_modes=module_decomp_modes,
+                model_config=getattr(model, "config", None),
+                convert_mode=bt.convert_mode,
             )
             configure_compress_btt_trainability(
                 model,
-                train_position=bt.train_position,
-                s_merged_to=bt.s_merged_to,
                 train_bias=bt.train_bias,
+                train_position=bt.train_position,
+                train_singular_values=(bt.s_merged_to == "keep_trainable"),
             )
-
-        if self._is_qfura:
-            convert_and_quantize_linear_to_qbtt_streaming(model)
 
         # Record minimal topology used by save / resume.
         self._topology_payload = self._topology_payload or {}
