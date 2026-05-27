@@ -712,7 +712,33 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         peft_config = None
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
-        if hasattr(peft_model, "peft_config"):  # LoRA
+
+        # PEFTAdapter dense-export path (BlockTT / SVD). Falls through to LoRA/dense paths
+        # when the adapter has no concrete export_for_vllm override.
+        adapter = getattr(self, "_peft_adapter", None)
+        adapter_dense_params = None
+        if adapter is not None:
+            from verl.workers.peft.base import PEFTAdapter as _PEFTAdapterBase
+            has_export_override = (
+                adapter.export_for_vllm.__func__
+                is not _PEFTAdapterBase.export_for_vllm
+            )
+            if has_export_override:
+                # Need full unsharded weights for the export. summon_full_params will
+                # gather across all ranks.
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                try:
+                    with FSDP.summon_full_params(self.actor_module_fsdp, writeback=False):
+                        maybe = adapter.export_for_vllm(peft_model)
+                except Exception:
+                    # FSDP2 or non-FSDP path: call directly without summon.
+                    maybe = adapter.export_for_vllm(peft_model)
+                if maybe is not None and len(maybe) > 0:
+                    adapter_dense_params = maybe
+
+        if adapter_dense_params is not None:
+            params = adapter_dense_params
+        elif hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
             params = collect_lora_params(
                 module=self.actor_module_fsdp,
