@@ -360,6 +360,12 @@ def init_adapter(
         model = _setup_lora_tuning(
             config, model, model_args, finetuning_args, is_trainable, cast_trainable_params_to_fp32
         )
+    elif finetuning_args.finetuning_type in ("blocktt", "svd"):
+        from .compress_setup import init_compress_model
+        model = init_compress_model(config, model, model_args, finetuning_args, is_trainable)
+        # Compress modules are float32-internally where they need to be; the
+        # upcasting decision above doesn't apply to BTTLinear/SVDCompressedLinear
+        # which manage their own dtype.
     else:
         raise NotImplementedError(f"Unknown finetuning type: {finetuning_args.finetuning_type}.")
 
