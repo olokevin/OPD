@@ -1,8 +1,5 @@
 """Unit tests for compress_setup lazy import and dispatch."""
 import sys
-import pathlib
-
-import pytest
 
 
 class _FakeFA:
@@ -43,3 +40,23 @@ def test_init_compress_model_skips_when_not_trainable():
         is_trainable=False,
     )
     assert out is sentinel
+
+
+def test_to_namespace_covers_all_compress_fields():
+    import dataclasses
+    from llamafactory.hparams.finetuning_args import CompressArguments
+    from llamafactory.model import compress_setup
+
+    fa = _FakeFA(
+        finetuning_type="blocktt",
+        # populate every CompressArguments field with a recognizable value
+        **{f.name: f.default for f in dataclasses.fields(CompressArguments)},
+    )
+    ns = compress_setup._to_namespace(fa)
+
+    # train_mode is added explicitly
+    assert ns.train_mode == "blocktt"
+    # every CompressArguments field is on the namespace
+    for f in dataclasses.fields(CompressArguments):
+        assert hasattr(ns, f.name), f"_to_namespace missing field {f.name}"
+        assert getattr(ns, f.name) == f.default

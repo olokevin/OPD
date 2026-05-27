@@ -6,7 +6,7 @@ from __future__ import annotations
 import pathlib
 import sys
 from argparse import Namespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..extras.logging import get_logger
 
@@ -66,19 +66,18 @@ def _to_namespace(finetuning_args: "FinetuningArguments") -> Namespace:
     ``build_calib_loader``, ``apply_calibrated_btt``/``apply_calibrated_svd``)
     expect attribute access in the same shape as ``run_rl.py``'s argparse
     namespace, with ``hyphen_style=False`` for underscore field names.
+
+    Auto-derives the field list from ``CompressArguments`` so a new field
+    on the dataclass automatically propagates here — ``compress.integration``
+    reads via ``getattr(args, name, default)``, so a missing field would
+    silently fall back to the integration's default instead of the YAML value.
     """
+    import dataclasses
+    from ..hparams.finetuning_args import CompressArguments
+
     fa = finetuning_args
     ns = Namespace()
-    # train_mode: compress.integration.validate_calibrated_btt_args reads
-    # this when validating calib_mode (see integration.py line ~135).
     ns.train_mode = fa.finetuning_type            # "blocktt" or "svd"
-    # Compress knobs (underscore names; hyphen_style=False)
-    for attr in (
-        "trainable_type", "train_position", "s_merged_to",
-        "decomp_mode", "blocktt_rank", "convert_mode", "train_bias",
-        "blocktt_normalize_after_update", "blocktt_factorize_by_head",
-        "calib_mode", "calib_source", "calib_num_seqs", "calib_max_length",
-        "calib_seed", "calib_batch_size", "calib_traces_path", "compression_ratio",
-    ):
-        setattr(ns, attr, getattr(fa, attr))
+    for f in dataclasses.fields(CompressArguments):
+        setattr(ns, f.name, getattr(fa, f.name))
     return ns
