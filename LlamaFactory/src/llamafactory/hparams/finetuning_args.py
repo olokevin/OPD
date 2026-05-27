@@ -16,6 +16,25 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
+def resolve_blocktt_rank(rank_arg: str) -> "str | int":
+    """Parse the ``blocktt_rank`` YAML field into the value
+    ``convert_linear_to_btt_compress`` accepts: the literal string ``"full"``
+    or a positive ``int``. Mirrors ``run_rl.py::resolve_blocktt_rank``.
+    """
+    if rank_arg == "full":
+        return "full"
+    try:
+        rank_int = int(rank_arg)
+    except ValueError as exc:
+        raise ValueError(
+            f"blocktt_rank must be 'full' or a positive integer string "
+            f"(got {rank_arg!r})."
+        ) from exc
+    if rank_int <= 0:
+        raise ValueError(f"blocktt_rank must be > 0 (got {rank_int}).")
+    return rank_int
+
+
 @dataclass
 class FreezeArguments:
     r"""Arguments pertaining to the freeze (partial-parameter) training."""
@@ -745,19 +764,9 @@ class FinetuningArguments(
                 )
                 self.s_merged_to = None
 
-            # blocktt_rank parseable
-            if self.blocktt_rank != "full":
-                try:
-                    rank_int = int(self.blocktt_rank)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"blocktt_rank must be 'full' or a positive integer string "
-                        f"(got {self.blocktt_rank!r})."
-                    ) from exc
-                if rank_int <= 0:
-                    raise ValueError(
-                        f"blocktt_rank must be > 0 (got {rank_int})."
-                    )
+            # blocktt_rank parseable (also normalizes to the form
+            # convert_linear_to_btt_compress accepts)
+            resolve_blocktt_rank(self.blocktt_rank)
 
         # calib_mode is only meaningful when finetuning_type ∈ {blocktt, svd}
         if self.calib_mode != "none":

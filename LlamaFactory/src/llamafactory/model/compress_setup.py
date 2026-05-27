@@ -73,13 +73,16 @@ def init_compress_model(
 
     if method == "blocktt":
         targets = get_blocktt_target_module_names(fa.trainable_type)
-        decomp_mode, module_decomp_modes = resolve_blocktt_decomp_modes(
+        # resolve_blocktt_decomp_modes always returns a populated dict when
+        # include_names is non-empty (and targets is non-empty by construction
+        # of get_blocktt_target_module_names). We discard the scalar form.
+        _, module_decomp_modes = resolve_blocktt_decomp_modes(
             fa.decomp_mode, include_names=targets,
         )
         convert_linear_to_btt_compress(
             model,
             btt_rank=rank,
-            decomp_mode=module_decomp_modes if module_decomp_modes else decomp_mode,
+            decomp_mode=module_decomp_modes,
             include_names=targets,
             s_merged_to=fa.s_merged_to,
             train_position=fa.train_position,
@@ -117,22 +120,14 @@ def init_compress_model(
     return model
 
 
-def _resolve_rank(rank_arg: str):
-    """Parse ``blocktt_rank`` into the value ``convert_linear_to_btt_compress``
-    accepts: the literal string ``"full"`` or a positive ``int``. Mirrors
-    ``run_rl.py::resolve_blocktt_rank``."""
-    if rank_arg == "full":
-        return "full"
-    try:
-        rank_int = int(rank_arg)
-    except ValueError as exc:
-        raise ValueError(
-            f"blocktt_rank must be 'full' or a positive integer string "
-            f"(got {rank_arg!r})."
-        ) from exc
-    if rank_int <= 0:
-        raise ValueError(f"blocktt_rank must be > 0 (got {rank_int}).")
-    return rank_int
+def _resolve_rank(rank_arg: str) -> "str | int":
+    """Parse ``blocktt_rank``. Delegates to
+    ``llamafactory.hparams.finetuning_args.resolve_blocktt_rank`` so the
+    YAML-time validator in ``__post_init__`` and the model-init call here
+    stay in lockstep.
+    """
+    from ..hparams.finetuning_args import resolve_blocktt_rank
+    return resolve_blocktt_rank(rank_arg)
 
 
 def _to_namespace(finetuning_args: "FinetuningArguments") -> Namespace:
