@@ -327,7 +327,7 @@ def init_adapter(
 ) -> "PreTrainedModel":
     r"""Initialize the adapters.
 
-    Support full-parameter, freeze and LoRA training.
+    Support full-parameter, freeze, LoRA/OFT, and BlockTT/SVD training.
 
     Note that the trainable parameters must be cast to float32.
     """
@@ -360,12 +360,15 @@ def init_adapter(
         model = _setup_lora_tuning(
             config, model, model_args, finetuning_args, is_trainable, cast_trainable_params_to_fp32
         )
-    elif finetuning_args.finetuning_type in ("blocktt", "svd"):
+    elif finetuning_args.finetuning_type in ["blocktt", "svd"]:
         from .compress_setup import init_compress_model
+        if cast_trainable_params_to_fp32:
+            logger.info_rank0(
+                "BlockTT/SVD modules have their own dtype policy "
+                "(set in compress.integration); skipping the blanket "
+                "fp32 cast applied to other finetuning_types."
+            )
         model = init_compress_model(config, model, model_args, finetuning_args, is_trainable)
-        # Compress modules are float32-internally where they need to be; the
-        # upcasting decision above doesn't apply to BTTLinear/SVDCompressedLinear
-        # which manage their own dtype.
     else:
         raise NotImplementedError(f"Unknown finetuning type: {finetuning_args.finetuning_type}.")
 
