@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 
 @dataclass
@@ -449,14 +449,14 @@ class CompressArguments:
         default="all",
         metadata={"help": "Compress target modules: all | mlp | attn."},
     )
-    train_position: Optional[Literal["output", "input", "small", "large", "both"]] = field(
+    train_position: Literal["output", "input", "small", "large", "both"] | None = field(
         default=None,
         metadata={"help": "Trainable side: svd uses output|input|both, blocktt uses small|large|both."},
     )
-    s_merged_to: Optional[Literal[
+    s_merged_to: Literal[
         "frozen", "trainable", "output", "input",
         "split", "keep_frozen", "keep_trainable",
-    ]] = field(
+    ] | None = field(
         default=None,
         metadata={"help": "Where to merge SVD S during init."},
     )
@@ -515,7 +515,7 @@ class CompressArguments:
         default=8,
         metadata={"help": "Batch size for calibration DataLoader."},
     )
-    calib_traces_path: Optional[str] = field(
+    calib_traces_path: str | None = field(
         default=None,
         metadata={"help": "Path to traces JSONL when calib_source=traces."},
     )

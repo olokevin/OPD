@@ -1,4 +1,6 @@
 """Unit tests for CompressArguments mixin on FinetuningArguments."""
+import pytest
+
 from llamafactory.hparams.finetuning_args import FinetuningArguments
 
 
@@ -31,5 +33,10 @@ def test_default_compress_fields_present():
 
 
 def test_finetuning_type_blocktt_and_svd_accepted():
-    _make(finetuning_type="blocktt")
-    _make(finetuning_type="svd")
+    assert _make(finetuning_type="blocktt").finetuning_type == "blocktt"
+    assert _make(finetuning_type="svd").finetuning_type == "svd"
+
+
+def test_finetuning_type_invalid_rejected():
+    with pytest.raises(AssertionError, match="Invalid fine-tuning method"):
+        _make(finetuning_type="bogus")
