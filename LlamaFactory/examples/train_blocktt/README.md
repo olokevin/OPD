@@ -61,3 +61,12 @@ output_dir/
 - `learning_rate: 1.0e-4` is seeded from `run_rl.py`'s `MODE_DEFAULTS`. Tune for SFT.
 - BlockTT/SVD cannot be combined with GaLore, APOLLO, or BAdam.
 - `enable_liger_kernel: true` is fine — Liger patches HF attention/MLP modules but does not replace the inner `nn.Linear`, so BlockTT/SVD conversion (which runs in `init_adapter` after Liger patching) sees the post-Liger graph.
+
+## Verified configurations
+
+Last validated on 2026-05-26 (commit a7c2b2f):
+
+- Plain BTT — `qwen3_base_blocktt_sft.yaml` derivative on Qwen3-0.6B-Base, single H100, 5 steps via `max_steps`. PASS (final train_loss 2.71, materialized checkpoint reloaded at 596,049,920 params).
+- Plain SVD — `qwen3_base_svd_sft.yaml` derivative on Qwen3-0.6B-Base, single H100, 5 steps. PASS (final train_loss 3.01, materialized checkpoint reloaded at 596,049,920 params).
+- Calibrated BTT — `calib_mode=v2`, `calib_source=c4`, `calib_num_seqs=4`, `calib_max_length=64`. PASS (final train_loss 2.77, c4 download + 196-layer covariance collection completed, materialized checkpoint reloaded at 596,049,920 params).
+- ZeRO-3 rejection — `--deepspeed examples/deepspeed/ds_z3_config.json` plus `finetuning_type=blocktt`. PASS (errors at config-parse time with the expected ValueError).
