@@ -684,6 +684,124 @@ class FinetuningArguments(
             if self.pissa_init:
                 raise ValueError("`pissa_init` is only valid for LoRA training.")
 
+        # ---------------------------------------------------------------
+        # BlockTT / SVD validators (CompressArguments)
+        # ---------------------------------------------------------------
+        if self.finetuning_type in ("blocktt", "svd"):
+            # Reject ZeRO-3 (custom BTT/SVD layers don't survive param sharding)
+            ds = ""
+            for attr in ("deepspeed",):
+                v = getattr(self, attr, None)
+                if isinstance(v, str):
+                    ds = v
+            if "z3" in ds or "zero3" in ds:
+                raise ValueError(
+                    f"finetuning_type={self.finetuning_type!r} does not support "
+                    f"DeepSpeed ZeRO-3 (got deepspeed={ds!r})."
+                )
+
+            # Reject co-use with GaLore / APOLLO / BAdam
+            if self.use_galore or self.use_apollo or self.use_badam:
+                raise ValueError(
+                    "Cannot use GaLore, APOLLO or BAdam with "
+                    f"finetuning_type={self.finetuning_type!r}."
+                )
+
+            # Default train_position
+            if self.train_position is None:
+                self.train_position = "small" if self.finetuning_type == "blocktt" else "output"
+
+            # train_position whitelists
+            if self.finetuning_type == "blocktt" and self.train_position not in (
+                "small", "large", "both",
+            ):
+                raise ValueError(
+                    "blocktt train_position must be one of small|large|both "
+                    f"(got {self.train_position!r})."
+                )
+            if self.finetuning_type == "svd" and self.train_position not in (
+                "output", "input", "both",
+            ):
+                raise ValueError(
+                    "svd train_position must be one of output|input|both "
+                    f"(got {self.train_position!r})."
+                )
+
+            # Default s_merged_to (skip QR which has no S to merge)
+            if self.s_merged_to is None and not (
+                self.finetuning_type == "blocktt" and self.convert_mode == "qr"
+            ):
+                self.s_merged_to = "frozen"
+
+            # blocktt + train_position=both + s_merged_to in {frozen,trainable} is invalid
+            if (
+                self.finetuning_type == "blocktt"
+                and self.train_position == "both"
+                and self.s_merged_to in ("frozen", "trainable")
+            ):
+                raise ValueError(
+                    "blocktt train_position=both is incompatible with "
+                    f"s_merged_to={self.s_merged_to!r}; pick output|input|split."
+                )
+
+            # blocktt convert_mode=qr ignores s_merged_to (warn-and-clear)
+            if (
+                self.finetuning_type == "blocktt"
+                and self.convert_mode == "qr"
+                and self.s_merged_to is not None
+            ):
+                import logging
+                # NOTE: LlamaFactory's library root logger ("llamafactory") sets
+                # propagate=False, which prevents pytest's caplog (installed on
+                # the stdlib root logger) from capturing submodule records. We
+                # therefore temporarily allow this single warning to propagate so
+                # that user-installed root handlers (and caplog) see it; the
+                # library's own stdout handler still emits it normally.
+                _logger = logging.getLogger(__name__)
+                _lf_root = logging.getLogger("llamafactory")
+                _prev_propagate = _lf_root.propagate
+                _lf_root.propagate = True
+                try:
+                    _logger.warning(
+                        "convert_mode=qr has no singular values; ignoring "
+                        f"s_merged_to={self.s_merged_to!r}.",
+                    )
+                finally:
+                    _lf_root.propagate = _prev_propagate
+                self.s_merged_to = None
+
+            # blocktt_rank parseable
+            if self.blocktt_rank != "full":
+                try:
+                    rank_int = int(self.blocktt_rank)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"blocktt_rank must be 'full' or a positive integer string "
+                        f"(got {self.blocktt_rank!r})."
+                    ) from exc
+                if rank_int <= 0:
+                    raise ValueError(
+                        f"blocktt_rank must be > 0 (got {rank_int})."
+                    )
+
+        # calib_mode is only meaningful when finetuning_type ∈ {blocktt, svd}
+        if self.calib_mode != "none":
+            if self.finetuning_type not in ("blocktt", "svd"):
+                raise ValueError(
+                    f"calib_mode={self.calib_mode!r} only valid with "
+                    "finetuning_type blocktt or svd."
+                )
+            if self.calib_mode.startswith("svd_") and self.finetuning_type != "svd":
+                raise ValueError(
+                    f"calib_mode={self.calib_mode!r} (an SVD mode) requires "
+                    "finetuning_type=svd."
+                )
+            if (not self.calib_mode.startswith("svd_")) and self.finetuning_type != "blocktt":
+                raise ValueError(
+                    f"calib_mode={self.calib_mode!r} (a BTT mode) requires "
+                    "finetuning_type=blocktt."
+                )
+
     def to_dict(self) -> dict[str, Any]:
         args = asdict(self)
         args = {k: f"<{k.upper()}>" if k.endswith("api_key") else v for k, v in args.items()}

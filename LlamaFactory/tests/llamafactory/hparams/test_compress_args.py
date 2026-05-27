@@ -40,3 +40,71 @@ def test_finetuning_type_blocktt_and_svd_accepted():
 def test_finetuning_type_invalid_rejected():
     with pytest.raises(AssertionError, match="Invalid fine-tuning method"):
         _make(finetuning_type="bogus")
+
+
+def test_blocktt_default_train_position_small():
+    fa = _make(finetuning_type="blocktt")
+    assert fa.train_position == "small"
+
+
+def test_svd_default_train_position_output():
+    fa = _make(finetuning_type="svd")
+    assert fa.train_position == "output"
+
+
+def test_compress_default_s_merged_to_frozen():
+    assert _make(finetuning_type="blocktt").s_merged_to == "frozen"
+    assert _make(finetuning_type="svd").s_merged_to == "frozen"
+
+
+def test_blocktt_train_position_rejects_svd_values():
+    with pytest.raises(ValueError, match="train_position"):
+        _make(finetuning_type="blocktt", train_position="output")
+
+
+def test_svd_train_position_rejects_blocktt_values():
+    with pytest.raises(ValueError, match="train_position"):
+        _make(finetuning_type="svd", train_position="small")
+
+
+def test_blocktt_both_with_frozen_s_merged_rejected():
+    with pytest.raises(ValueError, match="train_position.*both"):
+        _make(finetuning_type="blocktt", train_position="both", s_merged_to="frozen")
+
+
+def test_blocktt_qr_with_s_merged_to_warns(caplog):
+    # warn-and-ignore: object constructs, s_merged_to gets cleared
+    fa = _make(finetuning_type="blocktt", convert_mode="qr", s_merged_to="output")
+    assert fa.s_merged_to is None
+    assert any("convert_mode=qr" in r.message for r in caplog.records)
+
+
+def test_calib_mode_requires_compress_finetuning():
+    with pytest.raises(ValueError, match="calib_mode"):
+        _make(finetuning_type="full", calib_mode="v2")
+
+
+def test_svd_calib_mode_rejects_blocktt_method():
+    with pytest.raises(ValueError, match="calib_mode"):
+        _make(finetuning_type="blocktt", calib_mode="svd_v2")
+
+
+def test_btt_calib_mode_rejects_svd_method():
+    with pytest.raises(ValueError, match="calib_mode"):
+        _make(finetuning_type="svd", calib_mode="v2")
+
+
+def test_blocktt_rank_must_parse():
+    with pytest.raises(ValueError, match="blocktt_rank"):
+        _make(finetuning_type="blocktt", blocktt_rank="notanumber")
+    _make(finetuning_type="blocktt", blocktt_rank="full")  # OK
+    _make(finetuning_type="blocktt", blocktt_rank="16")    # OK
+
+
+def test_compress_rejects_galore_apollo_badam():
+    with pytest.raises(ValueError, match="GaLore|APOLLO|BAdam"):
+        _make(finetuning_type="blocktt", use_galore=True)
+    with pytest.raises(ValueError, match="GaLore|APOLLO|BAdam"):
+        _make(finetuning_type="svd", use_apollo=True)
+    with pytest.raises(ValueError, match="GaLore|APOLLO|BAdam"):
+        _make(finetuning_type="blocktt", use_badam=True)
