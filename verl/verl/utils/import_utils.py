@@ -154,3 +154,55 @@ def deprecated(replacement: str = ""):
             return wrapped
 
     return decorator
+
+
+PKG_PATH_PREFIX = "pkg://"
+FILE_PATH_PREFIX = "file://"
+
+
+def load_module(module_path: str, module_name: Optional[str] = None) -> object:
+    """Load a module from a pkg:// or file:// path (or a bare filesystem path)."""
+    if not module_path:
+        return None
+
+    if module_path.startswith(PKG_PATH_PREFIX):
+        module_name = module_path[len(PKG_PATH_PREFIX) :].replace("/", ".")
+        module = importlib.import_module(module_name)
+    else:
+        if module_path.startswith(FILE_PATH_PREFIX):
+            module_path = module_path[len(FILE_PATH_PREFIX) :]
+
+        if not os.path.exists(module_path):
+            raise FileNotFoundError(f"Custom module file not found: {module_path=}")
+
+        spec_name = module_name or f"custom_module_{hash(os.path.abspath(module_path))}"
+        spec = importlib.util.spec_from_file_location(spec_name, module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load module from {module_path=}")
+
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as e:
+            raise RuntimeError(f"Error loading module from {module_path=}") from e
+
+        if module_name is not None:
+            import sys
+
+            if module_name in sys.modules and sys.modules[module_name] is not module:
+                raise RuntimeError(
+                    f"Module name '{module_name}' already in `sys.modules` and points to a different module."
+                )
+            sys.modules[module_name] = module
+
+    return module
+
+
+def load_extern_object(module_path: str, object_name: str) -> object:
+    """Load an object by name from a module loaded via :func:`load_module`."""
+    module = load_module(module_path)
+
+    if not hasattr(module, object_name):
+        raise AttributeError(f"Object not found in module: {object_name=}, {module_path=}.")
+
+    return getattr(module, object_name)

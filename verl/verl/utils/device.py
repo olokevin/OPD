@@ -93,3 +93,15 @@ def set_expandable_segments(enable: bool) -> None:
     """
     if is_cuda_available:
         torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
+
+
+def auto_set_device(config) -> None:
+    """Automatically set config.trainer.device based on available accelerator (NPU/CUDA)."""
+    if config and hasattr(config, "trainer") and hasattr(config.trainer, "device"):
+        if is_npu_available:
+            if config.trainer.device not in ["cpu", "npu"]:
+                logger.warning(
+                    f"Detected Ascend NPU but config.trainer.device={config.trainer.device}; "
+                    "overriding to 'npu'."
+                )
+            config.trainer.device = "npu"
