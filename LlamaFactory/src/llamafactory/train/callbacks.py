@@ -418,3 +418,133 @@ class CompressNormalizeCallback(TrainerCallback):
         _ensure_compress_on_path()
         from compress.integration import normalize_trainable_blocktt_cores_
         normalize_trainable_blocktt_cores_(model)
+
+
+import pathlib as _pathlib
+
+
+def _materialize_btt_weight(layer) -> torch.Tensor:
+    """Reconstruct the dense ``[out_features, in_features]`` weight of a
+    ``BTTLinear`` layer by running the forward pass on an identity input.
+
+    Mirrors run_rl.py::materialize_btt_weight semantics. We don't reach
+    back into run_rl.py — the BTTLinear.forward implementation is the
+    contract.
+    """
+    n = layer.btt_r.shape[0]
+    b = layer.btt_r.shape[1]
+    in_features = n * b
+    device = layer.btt_l.device
+    dtype = layer.btt_l.dtype
+    eye = torch.eye(in_features, device=device, dtype=dtype)
+    with torch.no_grad():
+        out = layer(eye)                       # (in_features, out_features)
+    return out.t().contiguous()                # (out_features, in_features)
+
+
+def _materialize_svd_weight(layer) -> torch.Tensor:
+    """Use the layer's own materialize_dense_weight() method."""
+    with torch.no_grad():
+        return layer.materialize_dense_weight()
+
+
+def _build_materialized_state_dict(model) -> "dict[str, torch.Tensor]":
+    """Walk ``model``, replacing each BTT/SVD module's factored parameters
+    with their dense equivalents under the HF parent-module key convention.
+
+    For a module at path ``a.b.c.q_proj`` (a BTTLinear), this produces:
+      a.b.c.q_proj.weight    -> materialized dense (out_features, in_features)
+      a.b.c.q_proj.bias      -> passed through if present
+
+    All non-compressed parameters and buffers pass through unchanged as
+    detached clones. The live training model is never mutated.
+    """
+    from ..model.compress_setup import _ensure_compress_on_path
+    _ensure_compress_on_path()
+    from compress.integration import BTTLinear, SVDCompressedLinear
+
+    sd: "dict[str, torch.Tensor]" = {}
+    compressed_prefixes: "list[str]" = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, BTTLinear):
+            sd[f"{name}.weight" if name else "weight"] = (
+                _materialize_btt_weight(module).detach().clone()
+            )
+            if getattr(module, "bias", None) is not None:
+                sd[f"{name}.bias"] = module.bias.detach().clone()
+            compressed_prefixes.append(name + "." if name else "")
+        elif isinstance(module, SVDCompressedLinear):
+            sd[f"{name}.weight" if name else "weight"] = (
+                _materialize_svd_weight(module).detach().clone()
+            )
+            if getattr(module, "bias", None) is not None:
+                sd[f"{name}.bias"] = module.bias.detach().clone()
+            compressed_prefixes.append(name + "." if name else "")
+
+    for name, param in model.named_parameters():
+        if any(name.startswith(p) for p in compressed_prefixes):
+            continue
+        sd[name] = param.detach().clone()
+    for name, buf in model.named_buffers():
+        if any(name.startswith(p) for p in compressed_prefixes):
+            continue
+        sd[name] = buf.detach().clone()
+    return sd
+
+
+def _materialize_and_save(model, ckpt_dir: str) -> None:
+    """Build a peer model with dense nn.Linear weights and save it as a
+    plain HF checkpoint at ``ckpt_dir``. The live training model is not
+    mutated.
+
+    Under DeepSpeed ZeRO-2, parameter tensors are fully replicated per
+    rank, so step 1 (state_dict materialization) reads complete data
+    without any gather. ZeRO-3 is disallowed by the validator in
+    llamafactory.hparams.parser.
+    """
+    from transformers import AutoModelForCausalLM
+
+    ckpt = _pathlib.Path(ckpt_dir)
+    ckpt.mkdir(parents=True, exist_ok=True)
+
+    merged_sd = _build_materialized_state_dict(model)
+
+    peer = AutoModelForCausalLM.from_config(model.config)
+    peer.load_state_dict(merged_sd, strict=False)
+    peer.save_pretrained(str(ckpt))
+
+
+class CompressSaveCallback(TrainerCallback):
+    """Write a merged (dense HF) sibling checkpoint on every save and at
+    end-of-train. The regular Trainer ``checkpoint-<step>/`` directory
+    (factored state_dict) is what ``resume_from_checkpoint`` consumes;
+    ``checkpoint-<step>-merged/`` and ``final-merged/`` are for vLLM / eval.
+    """
+
+    def __init__(self, finetuning_args):
+        self.method = getattr(finetuning_args, "finetuning_type", None)
+        self.calibrated = getattr(finetuning_args, "calib_mode", "none") != "none"
+
+    def on_save(self, args, state, control, model=None, **kwargs):
+        if not getattr(state, "is_world_process_zero", False):
+            return
+        out = _pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
+        out.mkdir(parents=True, exist_ok=True)
+        self._dump(model, str(out))
+
+    def on_train_end(self, args, state, control, model=None, **kwargs):
+        if not getattr(state, "is_world_process_zero", False):
+            return
+        out = _pathlib.Path(args.output_dir) / "final-merged"
+        out.mkdir(parents=True, exist_ok=True)
+        self._dump(model, str(out))
+
+    def _dump(self, model, ckpt_dir: str) -> None:
+        if self.calibrated:
+            from ..model.compress_setup import _ensure_compress_on_path
+            _ensure_compress_on_path()
+            from compress.integration import save_calibrated_btt_hf_pretrained
+            save_calibrated_btt_hf_pretrained(model, ckpt_dir)
+        else:
+            _materialize_and_save(model, ckpt_dir)
