@@ -268,6 +268,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
 
+    def _compare_peft_meta_to_cli(self, meta: dict, peft_cfg) -> None:
+        """Guard against drift between an on-disk peft_meta.json and the CLI config.
+
+        Raises ValueError if the resume checkpoint's PEFT topology disagrees
+        with what the user passed on the command line (Risk 6 in the spec).
+        """
+        if meta.get("mode") != peft_cfg.mode:
+            raise ValueError(
+                f"peft.mode drift on resume: checkpoint says {meta.get('mode')!r}, "
+                f"CLI says {peft_cfg.mode!r}. Delete the checkpoint or revert the override."
+            )
+        # Compare per-mode subkeys.
+        sub = meta.get(peft_cfg.mode, {})
+        cli_sub = getattr(peft_cfg, peft_cfg.mode, None)
+        if cli_sub is None:
+            return
+        for key, ckpt_val in sub.items():
+            cli_val = getattr(cli_sub, key, None)
+            if hasattr(cli_val, "__dict__"):
+                # Nested dataclass (e.g. blocktt.qfura) — compare attributes.
+                for k2, v2 in (ckpt_val.items() if isinstance(ckpt_val, dict) else []):
+                    if getattr(cli_val, k2, None) != v2:
+                        raise ValueError(
+                            f"peft.{peft_cfg.mode}.{key}.{k2} drift on resume: "
+                            f"checkpoint={v2!r}, CLI={getattr(cli_val, k2, None)!r}"
+                        )
+            elif cli_val != ckpt_val:
+                raise ValueError(
+                    f"peft.{peft_cfg.mode}.{key} drift on resume: "
+                    f"checkpoint={ckpt_val!r}, CLI={cli_val!r}"
+                )
+
     def _build_model_optimizer(
         self,
         model_path,
@@ -409,36 +441,55 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-        if self._is_lora:
-            print("Applying LoRA to actor module")
-            actor_module.enable_input_require_grads()
+        # Apply PEFT adapter (LoRA / QLoRA / BlockTT / SVD / none) via the
+        # unified dispatch. Imports are function-local because the
+        # verl.workers.peft.* packages pull in optional compress code that
+        # isn't on the Python path in every environment that imports this
+        # module.
+        from verl.workers.config.peft import PEFTConfig
+        from verl.workers.peft import PEFTAdapter
+        from verl.workers.peft.calib_loader import build_calib_loader_for_peft
 
-            lora_adapter_path = self.config.model.get("lora_adapter_path")
-            if lora_adapter_path is not None:
-                from peft import PeftModel
+        peft_raw = self.config.get("peft", None)
+        peft_cfg = PEFTConfig.legacy_shim(peft_cfg=peft_raw, model_cfg=self.config.model)
+        self._peft_adapter = PEFTAdapter.from_config(peft_cfg, model_config=self.config.model)
 
-                print(f"Loading pre-trained LoRA adapter to {role} from: {lora_adapter_path}")
+        # Resume: if a peft_meta.json sits at default_local_dir, rebuild topology
+        # instead of re-applying (skips calibration).
+        ckpt_root = (
+            getattr(self.config.trainer, "default_local_dir", None)
+            if hasattr(self.config, "trainer")
+            else None
+        )
+        peft_meta_path = (
+            os.path.join(ckpt_root, "peft_meta.json")
+            if ckpt_root and os.path.isfile(os.path.join(ckpt_root, "peft_meta.json"))
+            else None
+        )
+        if peft_meta_path is not None:
+            with open(peft_meta_path) as f:
+                meta = json.load(f)
+            # On-disk drift guard (Risk 6 in spec).
+            self._compare_peft_meta_to_cli(meta, peft_cfg)
+            if meta.get("compress_topology_path"):
+                meta["_resolved_topology_path"] = os.path.join(
+                    ckpt_root, "compress", meta["compress_topology_path"]
+                )
+            actor_module = type(self._peft_adapter).rebuild_from_meta(actor_module, meta)
+        else:
+            calib_loader = None
+            if self._peft_adapter.needs_calibration():
+                calib_loader = build_calib_loader_for_peft(
+                    peft_cfg,
+                    tokenizer=self.tokenizer,
+                )
+            actor_module = self._peft_adapter.apply(
+                actor_module,
+                tokenizer=self.tokenizer,
+                calib_loader_builder=lambda: calib_loader,
+            )
 
-                # Copy adapter to local if needed
-                local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
-
-                actor_module = PeftModel.from_pretrained(actor_module, local_adapter_path, is_trainable=True)
-                peft_config = actor_module.peft_config["default"]
-                # Ensure task_type is TaskType enum, not string
-                if isinstance(peft_config.task_type, str):
-                    peft_config.task_type = TaskType.CAUSAL_LM
-
-            else:
-                # Convert config to regular Python types before creating PEFT model
-                lora_config = {
-                    "task_type": TaskType.CAUSAL_LM,
-                    "r": self.config.model.lora_rank,
-                    "lora_alpha": self.config.model.lora_alpha,
-                    "target_modules": convert_to_regular_types(self.config.model.target_modules),
-                    "exclude_modules": convert_to_regular_types(self.config.model.exclude_modules),
-                    "bias": "none",
-                }
-                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+        self._is_lora = self._peft_adapter.mode in {"lora", "qlora"}
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):
@@ -1125,34 +1176,29 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         dist.barrier()
 
-        if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
-            lora_save_path = os.path.join(local_path, "lora_adapter")
-            peft_model = getattr(self, "actor_module", self.actor_module_fsdp)
-            peft_config = {}
-            if dist.get_rank() == 0:
-                os.makedirs(lora_save_path, exist_ok=True)
-                peft_config = asdict(peft_model.peft_config.get("default", {}))
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
-            try:
-                if fsdp_version(self.actor_module_fsdp) > 0:
-                    self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
-                    lora_params = layered_summon_lora_params(self.actor_module_fsdp)
-                    if dist.get_rank() == 0:
-                        save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
-                        with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-                            json.dump(peft_config, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                log_with_rank(
-                    f"Save LoRA Adapter Error ({e})", rank=dist.get_rank(), logger=logger, log_only_rank_0=True
-                )
-
-            dist.barrier()
+        # Adapter-driven HF-format save: writes merged_hf/ + peft_meta.json + compress/.
+        try:
+            merged_hf_dir = os.path.join(local_path, "merged_hf")
+            os.makedirs(merged_hf_dir, exist_ok=True)
+            # Materialize / merge happens inside adapter.save_pretrained.
+            peft_module_for_save = getattr(self, "actor_module", self.actor_module_fsdp)
+            self._peft_adapter.save_pretrained(peft_module_for_save, merged_hf_dir)
+            # Tokenizer next to the HF dir so eval can from_pretrained the same dir.
+            if self.tokenizer is not None:
+                self.tokenizer.save_pretrained(merged_hf_dir)
+            # Sidecar metadata (rank 0, first save only).
+            if dist.get_rank() == 0 and not os.path.exists(
+                os.path.join(local_path, "peft_meta.json")
+            ):
+                with open(os.path.join(local_path, "peft_meta.json"), "w") as f:
+                    json.dump(self._peft_adapter.topology_meta(), f, indent=2)
+            # BlockTT topology sidecar (only writes if adapter populated it).
+            write_sidecar = getattr(self._peft_adapter, "write_compress_sidecar", None)
+            if dist.get_rank() == 0 and callable(write_sidecar):
+                write_sidecar(local_path)
+        except Exception as e:
             log_with_rank(
-                f"[rank-{self.rank}]: Saved LoRA adapter to: {lora_save_path}",
-                rank=dist.get_rank(),
-                logger=logger,
+                f"PEFT save_pretrained error ({e})", rank=dist.get_rank(), logger=logger,
                 log_only_rank_0=True,
             )
 

@@ -52,6 +52,120 @@ actor_rollout_ref:
     # for huge model, layered summon can save memory (prevent OOM) but make it slower
     layered_summon: False
 
+  # PEFT (parameter-efficient fine-tuning) dispatch config.
+  # Selects a single adapter family (none / lora / qlora / blocktt / svd) and
+  # carries its sub-config. Legacy `actor_rollout_ref.model.lora_*` fields are
+  # still honoured via PEFTConfig.legacy_shim when this block is absent.
+  peft:
+
+    # Adapter family: none | lora | qlora | blocktt | svd
+    mode: none
+
+    # Which Linear modules to compress/adapt: all | mlp | attn | custom
+    target_modules: all
+
+    # LoRA hyperparameters (used when mode=lora or mode=qlora)
+    lora:
+
+      # LoRA rank (0 means inherit legacy actor_rollout_ref.model.lora_rank)
+      rank: 0
+
+      # LoRA alpha scaling
+      alpha: 16
+
+      # LoRA dropout
+      dropout: 0.0
+
+      # Bias treatment: none | all | lora_only
+      bias: none
+
+      # Optional path to a pre-trained LoRA adapter to resume from
+      adapter_path: null
+
+    # QLoRA-specific (bitsandbytes) options, used only when mode=qlora
+    qlora:
+
+      # 4-bit quant type: nf4 or fp4
+      bnb_4bit_quant_type: nf4
+
+      # Compute dtype for de-quantized matmul
+      bnb_4bit_compute_dtype: bfloat16
+
+      # Whether to use the double-quantization trick
+      bnb_4bit_use_double_quant: true
+
+    # BlockTT compression options, used only when mode=blocktt
+    blocktt:
+
+      # Decomposition mode: input_one_block | output_one_block
+      decomp_mode: input_one_block
+
+      # Rank: int or "full"
+      rank: full
+
+      # Conversion mode: svd | random | calib
+      convert_mode: svd
+
+      # Which factor to keep trainable: small | large | both
+      train_position: small
+
+      # Where to absorb the singular values: frozen | trainable
+      s_merged_to: frozen
+
+      # Factorize per attention head (only meaningful for attn modules)
+      factorize_by_head: true
+
+      # Whether bias terms are trainable
+      train_bias: true
+
+      # Renormalize factors after each update
+      normalize_after_update: false
+
+      # qFurA quantization options (used only when blocktt.qfura.enabled=true)
+      qfura:
+
+        # Enable qFurA quantization on the frozen side
+        enabled: false
+
+    # SVD compression options, used only when mode=svd
+    svd:
+
+      # Which factor to keep trainable: output | input | both
+      train_position: output
+
+      # Where to absorb the singular values: frozen | trainable
+      s_merged_to: frozen
+
+      # Compression ratio (1.0 = no compression)
+      compression_ratio: 1.0
+
+    # Calibration loader config (used by blocktt/svd convert_mode=calib)
+    calib:
+
+      # Calibration mode: none | activation
+      mode: none
+
+      # Calibration source: c4 | wikitext | jsonl | parquet | hf_dataset
+      source: c4
+
+      # Optional path to pre-computed activation traces
+      traces_path: null
+
+      # Number of calibration sequences
+      num_seqs: 128
+
+      # Max sequence length for calibration
+      max_length: 2048
+
+      # Calibration batch size
+      batch_size: 8
+
+      # RNG seed for calibration sampling
+      seed: 3
+
+      # Whether to offload calibration activations to CPU
+      cpu_offload: false
+
 # custom reward function definition
 custom_reward_function:
 
