@@ -50,6 +50,62 @@ def init_compress_model(
         return model
 
     _ensure_compress_on_path()
+
+    fa = finetuning_args
+    method = fa.finetuning_type
+
+    if method not in ("blocktt", "svd"):
+        raise ValueError(
+            f"compress_setup: unsupported finetuning_type={method!r}; "
+            "expected 'blocktt' or 'svd'."
+        )
+
+    if fa.calib_mode != "none":
+        return _init_compress_calibrated(model, model_args, fa, method)
+
+    return _init_compress_plain(model, fa, method)
+
+
+def _init_compress_calibrated(model, model_args, fa, method: str):
+    """Calibrated BlockTT/SVD init: validates args, builds a calib loader,
+    runs the calibrated decomposition. Returns the (possibly replaced) model.
+    """
+    from compress.integration import (
+        validate_calibrated_btt_args,
+        build_calib_loader,
+        apply_calibrated_btt,
+        apply_calibrated_svd,
+    )
+    ns = _to_namespace(fa)
+    validate_calibrated_btt_args(ns, argv=None, hyphen_style=False)
+    tokenizer = _load_tokenizer(model_args)
+    calib_loader = build_calib_loader(
+        ns, tokenizer=tokenizer, hyphen_style=False,
+    )
+    if calib_loader is None:
+        raise RuntimeError(
+            f"compress_setup: build_calib_loader returned None for "
+            f"calib_mode={fa.calib_mode!r}, calib_source={fa.calib_source!r}."
+        )
+    if method == "blocktt":
+        model, stats = apply_calibrated_btt(
+            model, ns, calib_loader=calib_loader, hyphen_style=False,
+        )
+        logger.info_rank0(
+            f"compress_setup: calibrated BTT installed "
+            f"{stats.get('num_btt_layers', '?')} layers."
+        )
+    else:  # svd — guaranteed by the method check in init_compress_model
+        model = apply_calibrated_svd(
+            model, ns, calib_loader=calib_loader, hyphen_style=False,
+        )
+        logger.info_rank0("compress_setup: calibrated SVD applied.")
+    return model
+
+
+def _init_compress_plain(model, fa, method: str):
+    """Plain (non-calibrated) BlockTT/SVD init: lossless decomposition or
+    int-rank truncation, followed by trainability configuration."""
     from compress.integration import (
         convert_linear_to_btt_compress,
         convert_linear_to_svd_compress,
@@ -60,48 +116,12 @@ def init_compress_model(
         resolve_blocktt_decomp_modes,
     )
 
-    fa = finetuning_args
-    method = fa.finetuning_type
-
-    if fa.calib_mode != "none":
-        from compress.integration import (
-            validate_calibrated_btt_args,
-            build_calib_loader,
-            apply_calibrated_btt,
-            apply_calibrated_svd,
-        )
-        ns = _to_namespace(fa)
-        validate_calibrated_btt_args(ns, argv=None, hyphen_style=False)
-        tokenizer = _load_tokenizer(model_args)
-        calib_loader = build_calib_loader(
-            ns, tokenizer=tokenizer, hyphen_style=False,
-        )
-        if calib_loader is None:
-            raise RuntimeError(
-                f"compress_setup: build_calib_loader returned None for "
-                f"calib_mode={fa.calib_mode!r}, calib_source={fa.calib_source!r}."
-            )
-        if method == "blocktt":
-            model, _stats = apply_calibrated_btt(
-                model, ns, calib_loader=calib_loader, hyphen_style=False,
-            )
-        elif method == "svd":
-            model = apply_calibrated_svd(
-                model, ns, calib_loader=calib_loader, hyphen_style=False,
-            )
-        else:
-            raise ValueError(
-                f"compress_setup: unsupported finetuning_type={method!r} for calibrated init."
-            )
-        return model
-
     rank = _resolve_rank(fa.blocktt_rank)
 
     if method == "blocktt":
         targets = get_blocktt_target_module_names(fa.trainable_type)
-        # resolve_blocktt_decomp_modes always returns a populated dict when
-        # include_names is non-empty (and targets is non-empty by construction
-        # of get_blocktt_target_module_names). We discard the scalar form.
+        # resolve_blocktt_decomp_modes returns a populated dict when
+        # include_names is non-empty; we discard the scalar form.
         _, module_decomp_modes = resolve_blocktt_decomp_modes(
             fa.decomp_mode, include_names=targets,
         )
@@ -122,7 +142,7 @@ def init_compress_model(
             train_position=fa.train_position,
             train_singular_values=(fa.s_merged_to == "keep_trainable"),
         )
-    elif method == "svd":
+    else:  # svd — guaranteed by the method check in init_compress_model
         targets = get_svd_target_module_names(fa.trainable_type)
         convert_linear_to_svd_compress(
             model,
@@ -137,12 +157,6 @@ def init_compress_model(
             train_embed_lm_head=(fa.train_position == "both"),
             train_singular_values=(fa.s_merged_to == "keep_trainable"),
         )
-    else:
-        raise ValueError(
-            f"compress_setup: unsupported finetuning_type={method!r}; "
-            "expected 'blocktt' or 'svd'."
-        )
-
     return model
 
 
@@ -154,7 +168,7 @@ def _load_tokenizer(model_args: "ModelArguments") -> Any:
     if not name:
         raise ValueError(
             "compress_setup: model_args.model_name_or_path is required for "
-            "calibrated BlockTT/SVD finetuning."
+            "calibrated BlockTT/SVD finetuning (got model_args=None or unset)."
         )
     return AutoTokenizer.from_pretrained(
         name,

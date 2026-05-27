@@ -9,6 +9,37 @@ class _FakeFA:
             setattr(self, k, v)
 
 
+def _default_fa_kwargs(**overrides):
+    """Build a kwargs dict for _FakeFA with sensible defaults for every
+    field consumed by init_compress_model. Tests pass **overrides to set
+    method-specific values (finetuning_type, train_position, calib_mode,
+    etc.) without copy-pasting the shared ~12 fields each time."""
+    defaults = dict(
+        # Shared
+        trainable_type="all",
+        train_position="small",
+        s_merged_to="frozen",
+        # BTT-only
+        decomp_mode="input_one_block",
+        blocktt_rank="full",
+        convert_mode="svd",
+        train_bias=True,
+        blocktt_normalize_after_update=False,
+        blocktt_factorize_by_head=True,
+        # Calibration
+        calib_mode="none",
+        calib_source="c4",
+        calib_num_seqs=4,
+        calib_max_length=16,
+        calib_seed=0,
+        calib_batch_size=1,
+        calib_traces_path=None,
+        compression_ratio=1.0,
+    )
+    defaults.update(overrides)
+    return defaults
+
+
 def test_ensure_compress_on_path_idempotent():
     from llamafactory.model import compress_setup
     # Drop any pre-existing entry
@@ -102,13 +133,7 @@ def test_plain_blocktt_converts_linear_modules():
     from compress.integration import BTTLinear
 
     model = _tiny_qwen_like_model().cuda()
-    fa = _FakeFA(
-        finetuning_type="blocktt", calib_mode="none",
-        trainable_type="all", train_position="small",
-        s_merged_to="frozen", decomp_mode="input_one_block",
-        blocktt_rank="full", convert_mode="svd", train_bias=True,
-        blocktt_normalize_after_update=False, blocktt_factorize_by_head=True,
-    )
+    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="blocktt"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,
@@ -130,13 +155,7 @@ def test_plain_svd_converts_linear_modules():
     from compress.integration import SVDCompressedLinear
 
     model = _tiny_qwen_like_model().cuda()
-    fa = _FakeFA(
-        finetuning_type="svd", calib_mode="none",
-        trainable_type="all", train_position="output",
-        s_merged_to="frozen", decomp_mode="input_one_block",
-        blocktt_rank="full", convert_mode="svd", train_bias=True,
-        blocktt_normalize_after_update=False, blocktt_factorize_by_head=True,
-    )
+    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="svd", train_position="output"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,
@@ -181,15 +200,7 @@ def test_calibrated_btt_v2_runs(monkeypatch):
     monkeypatch.setattr(compress_setup, "_load_tokenizer", lambda model_args: object())
 
     model = _tiny_qwen_like_model()
-    fa = _FakeFA(
-        finetuning_type="blocktt", calib_mode="v2", calib_source="c4",
-        calib_num_seqs=4, calib_max_length=16, calib_seed=0, calib_batch_size=1,
-        calib_traces_path=None, compression_ratio=1.0,
-        trainable_type="all", train_position="small", s_merged_to="frozen",
-        decomp_mode="input_one_block", blocktt_rank="full", convert_mode="svd",
-        train_bias=True, blocktt_normalize_after_update=False,
-        blocktt_factorize_by_head=True,
-    )
+    fa = _FakeFA(**_default_fa_kwargs(finetuning_type="blocktt", calib_mode="v2"))
     out = compress_setup.init_compress_model(
         config=None, model=model, model_args=None,
         finetuning_args=fa, is_trainable=True,
