@@ -9,18 +9,6 @@ from typing import Optional
 
 import torch
 
-from compress.integration import (
-    BTTLinear,
-    apply_calibrated_btt,
-    configure_compress_btt_trainability,
-    convert_and_quantize_linear_to_qbtt_streaming,
-    convert_linear_to_btt_compress,
-    get_blocktt_target_module_names,
-    materialize_calibrated_btt_to_linear,
-    materialize_calibrated_btt_weights,
-    resolve_blocktt_decomp_modes,
-)
-
 from verl.workers.peft.base import PEFTAdapter
 
 
@@ -64,6 +52,16 @@ class BlockTTAdapter(PEFTAdapter):
         )
 
     def apply(self, model, *, tokenizer, calib_loader_builder):
+        from compress.integration import (
+            apply_calibrated_btt,
+            configure_compress_btt_trainability,
+            convert_and_quantize_linear_to_qbtt_streaming,
+            convert_linear_to_btt_compress,
+            get_blocktt_target_module_names,
+            resolve_blocktt_decomp_modes,
+        )
+        from compress.topology import export_btt_topology
+
         bt = self.peft_cfg.blocktt
         include_names = get_blocktt_target_module_names(self._trainable_type())
         decomp_mode, module_decomp_modes = resolve_blocktt_decomp_modes(
@@ -107,16 +105,17 @@ class BlockTTAdapter(PEFTAdapter):
             convert_and_quantize_linear_to_qbtt_streaming(model)
 
         # Record minimal topology used by save / resume.
-        from compress.topology import export_btt_topology
         self._topology_payload = self._topology_payload or {}
         self._topology_payload["btt_topology"] = export_btt_topology(model)
         return model
 
     @torch.no_grad()
     def export_for_vllm(self, fsdp_module):
+        from compress.integration import materialize_calibrated_btt_weights
         return {k: v for k, v in materialize_calibrated_btt_weights(fsdp_module)}
 
     def save_pretrained(self, fsdp_module, out_dir: str) -> None:
+        from compress.integration import materialize_calibrated_btt_to_linear
         os.makedirs(out_dir, exist_ok=True)
         # materialize all BTT/QBTT factors back into nn.Linear weights, then save_pretrained.
         materialize_calibrated_btt_to_linear(fsdp_module)
