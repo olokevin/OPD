@@ -382,6 +382,19 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
     if training_args.deepspeed is not None and (finetuning_args.use_galore or finetuning_args.use_apollo):
         raise ValueError("GaLore and APOLLO are incompatible with DeepSpeed yet.")
 
+    if finetuning_args.finetuning_type in ("blocktt", "svd"):
+        ds_path = training_args.deepspeed if isinstance(training_args.deepspeed, str) else ""
+        if ds_path and ("z3" in ds_path or "zero3" in ds_path):
+            raise ValueError(
+                f"finetuning_type={finetuning_args.finetuning_type!r} does not support "
+                f"DeepSpeed ZeRO-3 (got deepspeed={ds_path!r})."
+            )
+        if is_deepspeed_zero3_enabled():
+            raise ValueError(
+                f"finetuning_type={finetuning_args.finetuning_type!r} does not support "
+                "DeepSpeed ZeRO-3."
+            )
+
     if not finetuning_args.use_mca and training_args.fp8 and model_args.quantization_bit is not None:
         raise ValueError("FP8 training is not compatible with quantization. Please disable one of them.")
 

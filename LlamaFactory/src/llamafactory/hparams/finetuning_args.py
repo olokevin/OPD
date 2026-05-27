@@ -688,18 +688,6 @@ class FinetuningArguments(
         # BlockTT / SVD validators (CompressArguments)
         # ---------------------------------------------------------------
         if self.finetuning_type in ("blocktt", "svd"):
-            # Reject ZeRO-3 (custom BTT/SVD layers don't survive param sharding)
-            ds = ""
-            for attr in ("deepspeed",):
-                v = getattr(self, attr, None)
-                if isinstance(v, str):
-                    ds = v
-            if "z3" in ds or "zero3" in ds:
-                raise ValueError(
-                    f"finetuning_type={self.finetuning_type!r} does not support "
-                    f"DeepSpeed ZeRO-3 (got deepspeed={ds!r})."
-                )
-
             # Reject co-use with GaLore / APOLLO / BAdam
             if self.use_galore or self.use_apollo or self.use_badam:
                 raise ValueError(
