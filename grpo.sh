@@ -73,21 +73,23 @@ export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-
 # TODO: qwen3_1p7b_base / qwen3_1p7b / llama31_8b_base / llama31_8b_inst / qwen3_8b_base / qwen3_8b / qwen25_1p5b_base / qwen25_1p5b_inst / qwen25_7b_base / qwen25_7b_inst / qwen25_math_7b_base / qwen25_math_7b_inst / qwen25_math_1p5b_base / qwen25_math_1p5b_inst / distill_r1_1p5b / olmo2_1124_7b_base / olmo2_1124_7b_sft / olmo2_1124_7b_inst / llama32_3b_inst
 # export EXPERIMENT_NAME=grpo_${TASK}_llama31_tulu3_8b_sft_8k-T_${TEMPERATURE}-n_${N_RESPONSES}-kl_${USE_KL}-mbs_${MINI_BATCH_SIZE}-${REWARD_TYPE}-$(date +%Y-%m-%d_%H-%M-%S)
 
-# export TRAIN_DATASET=datasets/DeepMath-103K/verl_format/train.parquet
-# export TRAIN_DATASET=datasets/DAPO-Math-17k/data/dapo-math-17k-1percent.parquet
-# export TRAIN_DATASET=datasets/DAPO-Math-17k/data/dapo-math-17k-1percent-processed.parquet
-export TRAIN_DATASET=datasets/DAPO-Math-17k-Processed/DAPO-Math.parquet
-# export TRAIN_DATASET=datasets/DeepMath-103K/verl_format/sampled_5k.parquet
-# export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/verl_format/train.parquet
-export TRAIN_DATASET_NAME=DAPO-Math-17k-Processed
-# export TRAIN_DATASET_NAME=DeepMath-103K-sampled_5k
-# export TRAIN_DATASET_NAME=DeepMath-103K
-
+# Default: DAPO-Math-17k-Processed. To switch to a packaged train_data/<name>/{train,test}.parquet
+# pair (e.g. gsm8k, math-500), just set TRAIN_DATASET_NAME=gsm8k|math-500 and the
+# train/val files are auto-filled from datasets/train_data/<name>/.
+export TRAIN_DATASET_NAME=${TRAIN_DATASET_NAME:-DAPO-Math-17k-Processed}
 export TEST_DATA_DIR=datasets/test_data
-# TRAIN_DATASET=${TRAIN_FILE:-["$DATA_DIR/$TASK/train_${SAMPLE_SIZE}.parquet"]}
-TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR/AMC23/test.parquet", "$TEST_DATA_DIR/AIME24/test.parquet"]}
-# TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME24/test.parquet"]}
-# TEST_DATASET=${TEST_FILE:-["$DATA_DIR/AIME24/test.parquet","$DATA_DIR/AIME25/test.parquet","$DATA_DIR/AMC23/test.parquet","$DATA_DIR/MATH-500/test.parquet","$DATA_DIR/Minerva/test.parquet","$DATA_DIR/Olympiad-Bench/test.parquet"]}
+export TRAIN_DATA_DIR=${TRAIN_DATA_DIR:-datasets/train_data}
+
+case "$TRAIN_DATASET_NAME" in
+  gsm8k|math-500)
+    export TRAIN_DATASET=${TRAIN_DATASET:-${TRAIN_DATA_DIR}/${TRAIN_DATASET_NAME}/train.parquet}
+    TEST_DATASET=${TEST_FILE:-["${TRAIN_DATA_DIR}/${TRAIN_DATASET_NAME}/test.parquet"]}
+    ;;
+  *)
+    export TRAIN_DATASET=${TRAIN_DATASET:-datasets/DAPO-Math-17k-Processed/DAPO-Math.parquet}
+    TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR/AMC23/test.parquet", "$TEST_DATA_DIR/AIME24/test.parquet"]}
+    ;;
+esac
 
 # TODO:
 # export ACTOR_MODEL_PATH=model/qwen3-1.7b-math-sft
@@ -109,7 +111,7 @@ export REWARD_MODEL_PATH=model/Qwen3-4B
 # export REWARD_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
-export PROJECT_PATH=checkpoint
+export PROJECT_PATH=data/yequan/opd/grpo/{TRAIN_DATASET_NAME}
 export PARALLEL_SIZE=1
 export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
@@ -157,56 +159,71 @@ export CALIB_BATCH_SIZE=${CALIB_BATCH_SIZE:-8}
 export CALIB_SEED=${CALIB_SEED:-3}
 export CALIB_TRACES_PATH=${CALIB_TRACES_PATH:-}
 
-PEFT_ARGS="+actor_rollout_ref.peft.mode=$PEFT_MODE \
-+actor_rollout_ref.peft.target_modules=$PEFT_TARGET_MODULES"
+# OPD-faithful calibration loss (v2_combined / svd_v2_combined only).
+export CALIB_LOSS=${CALIB_LOSS:-ce}
+export CALIB_TOP_K=${CALIB_TOP_K:-16}
+export CALIB_TOP_K_STRATEGY=${CALIB_TOP_K_STRATEGY:-only_stu}
+export CALIB_REWARD_WEIGHT_MODE=${CALIB_REWARD_WEIGHT_MODE:-student_p}
+export CALIB_TEMPERATURE=${CALIB_TEMPERATURE:-1.0}
+export CALIB_TEACHER_TEMPERATURE=${CALIB_TEACHER_TEMPERATURE:-1.0}
+
+PEFT_ARGS="++actor_rollout_ref.peft.mode=$PEFT_MODE \
+++actor_rollout_ref.peft.target_modules=$PEFT_TARGET_MODULES"
 
 case "$PEFT_MODE" in
   none) ;;
   lora)
     PEFT_ARGS="$PEFT_ARGS \
-      +actor_rollout_ref.peft.lora.rank=$LORA_RANK \
-      +actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
-      +actor_rollout_ref.peft.lora.dropout=$LORA_DROPOUT \
+      ++actor_rollout_ref.peft.lora.rank=$LORA_RANK \
+      ++actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
+      ++actor_rollout_ref.peft.lora.dropout=$LORA_DROPOUT \
       actor_rollout_ref.model.lora_rank=$LORA_RANK \
       actor_rollout_ref.model.lora_alpha=$LORA_ALPHA" ;;
   qlora)
     PEFT_ARGS="$PEFT_ARGS \
-      +actor_rollout_ref.peft.lora.rank=$LORA_RANK \
-      +actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
-      +actor_rollout_ref.peft.qlora.bnb_4bit_quant_type=$QLORA_QUANT_TYPE \
-      +actor_rollout_ref.peft.qlora.bnb_4bit_use_double_quant=$QLORA_DOUBLE_QUANT \
-      +actor_rollout_ref.peft.qlora.bnb_4bit_compute_dtype=$QLORA_COMPUTE_DTYPE \
+      ++actor_rollout_ref.peft.lora.rank=$LORA_RANK \
+      ++actor_rollout_ref.peft.lora.alpha=$LORA_ALPHA \
+      ++actor_rollout_ref.peft.qlora.bnb_4bit_quant_type=$QLORA_QUANT_TYPE \
+      ++actor_rollout_ref.peft.qlora.bnb_4bit_use_double_quant=$QLORA_DOUBLE_QUANT \
+      ++actor_rollout_ref.peft.qlora.bnb_4bit_compute_dtype=$QLORA_COMPUTE_DTYPE \
       actor_rollout_ref.model.lora_rank=$LORA_RANK \
       actor_rollout_ref.model.lora_alpha=$LORA_ALPHA" ;;
   blocktt)
     PEFT_ARGS="$PEFT_ARGS \
-      +actor_rollout_ref.peft.blocktt.decomp_mode=$BTT_DECOMP_MODE \
-      +actor_rollout_ref.peft.blocktt.rank=$BTT_RANK \
-      +actor_rollout_ref.peft.blocktt.train_position=$BTT_TRAIN_POSITION \
-      +actor_rollout_ref.peft.blocktt.s_merged_to=$BTT_S_MERGED_TO \
-      +actor_rollout_ref.peft.blocktt.convert_mode=$BTT_CONVERT_MODE \
-      +actor_rollout_ref.peft.blocktt.factorize_by_head=$BTT_FACTORIZE_BY_HEAD \
-      +actor_rollout_ref.peft.blocktt.normalize_after_update=$BTT_NORMALIZE_AFTER_UPDATE \
-      +actor_rollout_ref.peft.blocktt.qfura.enabled=$BTT_QFURA" ;;
+      ++actor_rollout_ref.peft.blocktt.decomp_mode=$BTT_DECOMP_MODE \
+      ++actor_rollout_ref.peft.blocktt.rank=$BTT_RANK \
+      ++actor_rollout_ref.peft.blocktt.train_position=$BTT_TRAIN_POSITION \
+      ++actor_rollout_ref.peft.blocktt.s_merged_to=$BTT_S_MERGED_TO \
+      ++actor_rollout_ref.peft.blocktt.convert_mode=$BTT_CONVERT_MODE \
+      ++actor_rollout_ref.peft.blocktt.factorize_by_head=$BTT_FACTORIZE_BY_HEAD \
+      ++actor_rollout_ref.peft.blocktt.normalize_after_update=$BTT_NORMALIZE_AFTER_UPDATE \
+      ++actor_rollout_ref.peft.blocktt.qfura.enabled=$BTT_QFURA" ;;
   svd)
     PEFT_ARGS="$PEFT_ARGS \
-      +actor_rollout_ref.peft.svd.train_position=$SVD_TRAIN_POSITION \
-      +actor_rollout_ref.peft.svd.s_merged_to=$SVD_S_MERGED_TO \
-      +actor_rollout_ref.peft.svd.compression_ratio=$SVD_COMPRESSION_RATIO" ;;
+      ++actor_rollout_ref.peft.svd.train_position=$SVD_TRAIN_POSITION \
+      ++actor_rollout_ref.peft.svd.s_merged_to=$SVD_S_MERGED_TO \
+      ++actor_rollout_ref.peft.svd.compression_ratio=$SVD_COMPRESSION_RATIO" ;;
   *) echo "Unknown PEFT_MODE=$PEFT_MODE" >&2; exit 1 ;;
 esac
 
 if [ "$CALIB_MODE" != "none" ]; then
   PEFT_ARGS="$PEFT_ARGS \
-    +actor_rollout_ref.peft.calib.mode=$CALIB_MODE \
-    +actor_rollout_ref.peft.calib.source=$CALIB_SOURCE \
-    +actor_rollout_ref.peft.calib.num_seqs=$CALIB_NUM_SEQS \
-    +actor_rollout_ref.peft.calib.max_length=$CALIB_MAX_LENGTH \
-    +actor_rollout_ref.peft.calib.batch_size=$CALIB_BATCH_SIZE \
-    +actor_rollout_ref.peft.calib.seed=$CALIB_SEED"
+    ++actor_rollout_ref.peft.calib.mode=$CALIB_MODE \
+    ++actor_rollout_ref.peft.calib.source=$CALIB_SOURCE \
+    ++actor_rollout_ref.peft.calib.num_seqs=$CALIB_NUM_SEQS \
+    ++actor_rollout_ref.peft.calib.max_length=$CALIB_MAX_LENGTH \
+    ++actor_rollout_ref.peft.calib.batch_size=$CALIB_BATCH_SIZE \
+    ++actor_rollout_ref.peft.calib.seed=$CALIB_SEED"
   if [ -n "$CALIB_TRACES_PATH" ]; then
-    PEFT_ARGS="$PEFT_ARGS +actor_rollout_ref.peft.calib.traces_path=$CALIB_TRACES_PATH"
+    PEFT_ARGS="$PEFT_ARGS ++actor_rollout_ref.peft.calib.traces_path=$CALIB_TRACES_PATH"
   fi
+  PEFT_ARGS="$PEFT_ARGS \
+    ++actor_rollout_ref.peft.calib.loss=$CALIB_LOSS \
+    ++actor_rollout_ref.peft.calib.top_k=$CALIB_TOP_K \
+    ++actor_rollout_ref.peft.calib.top_k_strategy=$CALIB_TOP_K_STRATEGY \
+    ++actor_rollout_ref.peft.calib.reward_weight_mode=$CALIB_REWARD_WEIGHT_MODE \
+    ++actor_rollout_ref.peft.calib.temperature=$CALIB_TEMPERATURE \
+    ++actor_rollout_ref.peft.calib.teacher_temperature=$CALIB_TEACHER_TEMPERATURE"
 fi
 # ---- /PEFT ----
 
@@ -236,8 +253,8 @@ sleep 5
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
-    +algorithm.rollout_correction.rollout_is=token \
-    +algorithm.rollout_correction.rollout_is_threshold=2.0 \
+    ++algorithm.rollout_correction.rollout_is=token \
+    ++algorithm.rollout_correction.rollout_is_threshold=2.0 \
     data.shuffle=False \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
@@ -247,7 +264,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=False \
+    ++data.apply_chat_template_kwargs.enable_thinking=False \
     actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=True \
@@ -272,16 +289,16 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    +actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K \
-    +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
-    +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
-    +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
+    ++actor_rollout_ref.rollout.log_prob_top_k=$LOG_PROB_TOP_K \
+    ++actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
+    ++actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
+    ++actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
     actor_rollout_ref.rollout.n=$N_RESPONSES \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    +actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
+    ++actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
     actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
@@ -294,7 +311,7 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=False \
-    +reward_model.model.dtype=$MODEL_DTYPE \
+    ++reward_model.model.dtype=$MODEL_DTYPE \
     reward_model.micro_batch_size_per_gpu=24 \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
