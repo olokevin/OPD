@@ -181,3 +181,7 @@ wandb/
 swanlog/
 generated_predictions.jsonl
 predictions_score.json
+
+# Throwaway smoke-test YAMLs for BlockTT/SVD compress training
+examples/train_blocktt/_smoke_*.yaml
+
