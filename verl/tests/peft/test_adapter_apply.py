@@ -167,3 +167,38 @@ def test_blocktt_export_for_vllm_returns_dense_weights(tiny_model, tiny_tokenize
     for k in exported:
         assert ".btt_l" not in k and ".btt_r" not in k
         assert k.endswith(".weight") or k.endswith(".bias")
+
+
+def _svd_cfg(calib_mode="none", ratio=1.0):
+    return PEFTConfig.from_omegaconf(OmegaConf.create({
+        "mode": "svd",
+        "target_modules": "all",
+        "svd": {"train_position": "output", "s_merged_to": "frozen",
+                "compression_ratio": ratio},
+        "calib": {"mode": calib_mode, "source": "c4", "num_seqs": 4, "max_length": 64,
+                  "batch_size": 2, "seed": 0},
+    }))
+
+
+@pytest.mark.gpu
+def test_svd_plain_apply_installs_svd_modules(tiny_model, tiny_tokenizer):
+    from compress.svd.svd_linear import SVDCompressedLinear
+    cfg = _svd_cfg()
+    adapter = PEFTAdapter.from_config(cfg, model_config=None)
+    out = adapter.apply(tiny_model.cuda(), tokenizer=tiny_tokenizer,
+                        calib_loader_builder=lambda: None)
+    n = sum(1 for m in out.modules() if isinstance(m, SVDCompressedLinear))
+    assert n > 0
+
+
+@pytest.mark.gpu
+def test_svd_export_for_vllm_returns_dense_weights(tiny_model, tiny_tokenizer):
+    cfg = _svd_cfg()
+    adapter = PEFTAdapter.from_config(cfg, model_config=None)
+    out = adapter.apply(tiny_model.cuda(), tokenizer=tiny_tokenizer,
+                        calib_loader_builder=lambda: None)
+    exported = adapter.export_for_vllm(out)
+    assert isinstance(exported, dict) and len(exported) > 0
+    for k in exported:
+        assert ".U_r" not in k and ".V_r" not in k
+        assert k.endswith(".weight") or k.endswith(".bias")
