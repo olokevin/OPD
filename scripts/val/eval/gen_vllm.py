@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 # Try to import distributed cleanup helpers for releasing GPU memory.
 try:
     from vllm.distributed.parallel_state import destroy_model_parallel
@@ -21,6 +22,28 @@ try:
     from vllm.distributed.parallel_state import destroy_distributed_environment
 except ImportError:
     destroy_distributed_environment = None
+
+
+def _resolve_peft_checkpoint(model_path: str):
+    """Returns (base_path, lora_path | None). If model_path/adapter_config.json
+    exists, treat it as a LoRA/QLoRA checkpoint."""
+    adapter_cfg = os.path.join(model_path, "adapter_config.json")
+    if not os.path.isfile(adapter_cfg):
+        return model_path, None
+    with open(adapter_cfg) as f:
+        cfg = json.load(f)
+    base = cfg.get("base_model_name_or_path")
+    base_txt = os.path.join(model_path, "base_model_path.txt")
+    if os.path.isfile(base_txt):
+        with open(base_txt) as f:
+            base_override = f.read().strip()
+        if base_override:
+            base = base_override
+    if base is None:
+        raise ValueError(
+            f"{model_path} looks like a PEFT checkpoint but has no base_model_name_or_path"
+        )
+    return base, model_path
 
 # --------------------------------------------------------------------------- #
 #                   Global constants / variables                              #
@@ -120,13 +143,20 @@ def worker_process(args_tuple):
             flush=True,
         )
         
-        # Initialize a single-GPU, single-instance LLM.
-        llm = LLM(
-            model=model_name,
+        # Detect PEFT adapter checkpoints (LoRA/QLoRA) and route the base + lora
+        # path through vLLM's LoRARequest API.
+        base_path, lora_path = _resolve_peft_checkpoint(model_name)
+        llm_kwargs = dict(
+            model=base_path,
             trust_remote_code=True,
             gpu_memory_utilization=0.9,
             tensor_parallel_size=1,
         )
+        if lora_path is not None:
+            llm_kwargs.update({"enable_lora": True, "max_loras": 1, "max_lora_rank": 64})
+        lora_request = LoRARequest("default", 1, lora_path) if lora_path else None
+        # Initialize a single-GPU, single-instance LLM.
+        llm = LLM(**llm_kwargs)
         
         # Get the tokenizer.
         try:
@@ -169,7 +199,12 @@ def worker_process(args_tuple):
             ]
             
             # Disable per-worker tqdm output to keep multi-process logs readable.
-            outputs = llm.generate(formatted_prompts, sampling, use_tqdm=False)
+            outputs = llm.generate(
+                formatted_prompts,
+                sampling,
+                use_tqdm=False,
+                lora_request=lora_request,
+            )
             
             for sample, out in zip(samples, outputs):
                 results.append(
