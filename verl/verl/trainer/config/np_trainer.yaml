@@ -1,0 +1,78 @@
+# Node-Perturbation (NP) Trainer Configuration
+# Mirrors es_trainer.yaml structure. See docs/superpowers/specs/2026-05-28-np-trainer-design.md
+defaults:
+  - _self_
+
+np:
+  # core NP knobs
+  sigma: 0.01
+  n_sample: 8                      # perturbed copies scored per decode step
+  n_rollout: 8                     # rollouts for sequence-level grad estimation
+  sample_method: bernoulli         # gaussian | bernoulli | uniform
+  en_layerwise_perturbation: true  # false = perturb all matched layers at once
+  perturb_method: forward          # forward (one-sided) | antithetic
+  perturb_granularity: token       # token | rollout
+  grad_estimate_sample: grpo       # average | grpo   (over n_sample, per-token)
+  grad_estimate_sequence: grpo     # average | grpo   (over n_rollout)
+  perturb_rules:
+    - '^model\.layers\.\d+\.mlp\.down_proj$'   # vLLM-real names (see spec §4)
+  lr: 1.0e-4
+  token_agg: sum                   # sum | mean
+  update_clip: null                # delta_W / ||u||^2 safety (null = eps-floor only)
+
+  # teacher scorer (v1, core)
+  teacher_model_path: null         # required for loss_type=opd
+  loss_type: opd                   # opd (teacher reverse-KL) | grpo (rule reward)
+  log_prob_top_k: 256
+  top_k_strategy: only_stu         # only_stu | only_tch | intersection | union | union-intersection
+  teacher_temperature: 1.0
+  reward_weight_mode: student_p    # student_p | teacher_p | none
+
+  # engine / eval (mirror es_trainer.yaml)
+  num_engines: 4
+  num_iterations: 800
+  precision: bfloat16
+  max_tokens: 1024
+  temperature: 0.0
+  eval_interval: 25
+  eval_batch_size: 256
+  gpu_memory_utilization: 0.7
+  global_seed: 42
+  verbose: false
+  worker_extension_cls: "verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension"
+
+model:
+  path: model/Qwen3-1.7B
+  trust_remote_code: false
+
+data:
+  task_type: opd_math
+  train_files: datasets/dapo-math-17k.parquet
+  val_files: datasets/test_data/AIME24/test.parquet
+  train_max_samples: 200
+  val_max_samples: -1
+  reward_fn_path: null
+  reward_fn_name: null
+  prompt_processor_path: null
+  prompt_processor_name: null
+
+trainer:
+  project_name: OPD-NP
+  experiment_name: np-run
+  logger:
+    - console
+    - wandb
+  default_local_dir: /tmp/${oc.env:USER}/verl/np_checkpoints
+  default_hdfs_dir: null
+  device: cuda
+  n_gpus_per_node: 8
+  nnodes: 1
+  total_epochs: null
+  test_freq: null
+  save_freq: 100
+  npu_profile:
+    enable: false
+
+ray_kwargs:
+  ray_init:
+    runtime_env: {}
