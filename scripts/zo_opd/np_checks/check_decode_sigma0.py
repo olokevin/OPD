@@ -7,6 +7,15 @@ Usage (needs 1 GPU + a small model):
       --model model/Qwen3-1.7B --layer 'model.layers.0.mlp.down_proj' --n-sample 4
 """
 import argparse
+import os
+
+# vLLM 0.11.0 V1 engine multiprocessing msgpack-serializes tensors across process
+# boundaries, which breaks `collective_rpc` returning CPU tensors. Run single-process
+# so the (1+n_sample, vocab) logits we return from run_np_decode arrive as a real
+# torch.Tensor. (The NP trainer entrypoint sets the same flag — see ES trainer.)
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+os.environ.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 import torch
 from vllm import LLM, SamplingParams

@@ -235,6 +235,7 @@ class WorkerExtension:
             attn_metadata,
             self.model_runner.vllm_config,
             num_tokens=num_input_tokens,
+            # enforce_eager + handcrafted slot_mapping/attn_metadata → CUDA graphs would skip our slot rewrites
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
         ):
             out = model(input_ids=ids, positions=pos)
