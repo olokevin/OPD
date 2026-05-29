@@ -58,27 +58,78 @@ class TeacherScorer:
         Returns (L_q_per_step, L_clean_per_step):
           L_q_per_step[t]:   [n_sample] reverse-KL of each perturbed candidate vs teacher
           L_clean_per_step[t]: float reverse-KL of the clean (row 0) candidate vs teacher
-        Implementation: feed [prefix + committed token sequence] to the teacher with
-        prompt_logprobs=top_k to get teacher top-k log-probs per position (vLLM
-        SamplingParams.prompt_logprobs, sampling_params.py:154-164). Align teacher
-        position p with student step p, gather student log-probs over the same top-k
-        token ids, call reverse_kl_topk. See spec §3.
+
+        Honors self.top_k_strategy when selecting the token set the KL is scored over:
+          - only_tch: teacher's prompt_logprobs ids (legacy default).
+          - only_stu: student-clean-row's top-k vocab ids.
+          - intersection: ids in BOTH sets.
+          - union: ids in EITHER set.
+          - union-intersection: union, but tokens missing from one side use -inf logp
+                                so the KL focuses on shared mass (same as union here,
+                                kept as an alias since the spec's "richest form" is
+                                a v2 refinement).
+        Teacher logprobs for ids the teacher didn't surface are filled with the
+        MIN of the teacher's surfaced logp at the same position (a calibrated
+        lower bound that doesn't explode the KL — `-1e30` would blow up
+        L_clean to ~1e25 since hundreds of student top-k tokens are off the
+        teacher's k=256 surface). The MIN is conservative: tokens off the
+        teacher's top-k have probability strictly less than the minimum it
+        surfaced, but using the minimum prevents log-prob domination.
+        See spec §3 and §4 (top_k_strategy).
         """
         L_q_per_step, L_clean_per_step = [], []
-        teacher_logp_by_pos, topk_ids_by_pos = self._teacher_topk_logprobs(
+        teacher_logp_by_pos, teacher_ids_by_pos = self._teacher_topk_logprobs(
             prefix_token_ids, len(candidate_logits))
         for t, cl in enumerate(candidate_logits):
-            ids = topk_ids_by_pos[t]                       # [k] teacher's top-k token ids
-            t_logp = teacher_logp_by_pos[t]                # [k]
             s_full_logp = torch.log_softmax(cl.float(), dim=-1)  # [1+n_sample, vocab]
-            s_logp = s_full_logp[:, ids]                   # [1+n_sample, k]
+            t_ids = teacher_ids_by_pos[t]
+            t_logp = teacher_logp_by_pos[t]
+            fallback = float(t_logp.min().item()) if t_logp.numel() else -50.0
+            ids, t_logp_aligned = self._select_ids(s_full_logp[0], t_ids, t_logp, fallback)
+            s_logp = s_full_logp[:, ids]                   # [1+n_sample, k']
             L_clean_per_step.append(
-                float(reverse_kl_topk(s_logp[0], t_logp, self.weight_mode)))
+                float(reverse_kl_topk(s_logp[0], t_logp_aligned, self.weight_mode)))
             L_q_per_step.append(torch.stack([
-                reverse_kl_topk(s_logp[1 + q], t_logp, self.weight_mode)
+                reverse_kl_topk(s_logp[1 + q], t_logp_aligned, self.weight_mode)
                 for q in range(s_logp.shape[0] - 1)
             ]))
         return L_q_per_step, L_clean_per_step
+
+    def _select_ids(self, s_clean_full_logp, t_ids, t_logp, fallback):
+        """Compute the union/intersection/etc id set per self.top_k_strategy and
+        return (ids[LongTensor], teacher_logp[FloatTensor]) aligned to ids.
+
+        Teacher entries missing from t_ids are filled with the `fallback` logp
+        (callers should pass the per-position min teacher logp to avoid blowing
+        up the reverse-KL — see score_rollout).
+        """
+        strat = self.top_k_strategy
+        if strat == "only_tch":
+            return t_ids, t_logp
+
+        # Student top-k from the clean-row full distribution.
+        s_top = torch.topk(s_clean_full_logp, self.top_k).indices  # [top_k]
+        s_set = set(s_top.tolist())
+        t_set = set(t_ids.tolist())
+        t_map = {int(i): float(lp) for i, lp in zip(t_ids.tolist(), t_logp.tolist())}
+
+        if strat == "only_stu":
+            ids_list = sorted(s_set)
+        elif strat == "intersection":
+            ids_list = sorted(s_set & t_set)
+        elif strat in ("union", "union-intersection"):
+            ids_list = sorted(s_set | t_set)
+        else:
+            raise ValueError(f"unknown top_k_strategy: {strat!r}")
+        if not ids_list:
+            # Defensive: empty intersection -> fall back to teacher's ids so the
+            # KL is well-defined rather than degenerate.
+            return t_ids, t_logp
+
+        ids = torch.tensor(ids_list, dtype=torch.long)
+        t_aligned = torch.tensor([t_map.get(int(i), fallback) for i in ids_list],
+                                 dtype=t_logp.dtype)
+        return ids, t_aligned
 
     def _teacher_topk_logprobs(self, prefix_token_ids, num_steps):
         """Query the teacher engine for per-position top-k log-probs over the response.

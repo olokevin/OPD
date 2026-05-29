@@ -367,7 +367,12 @@ class WorkerExtension:
         state["kv_cursor"] += 1
 
     def apply_node_update(self, layer_name, delta_w_cpu, lr, update_clip=None):
-        """W <- W + lr * delta_W for the wrapped layer's weight. delta_w_cpu: [d_out,d_in]."""
+        """W <- W - lr * delta_W (gradient DESCENT). delta_w_cpu: [d_out,d_in].
+
+        Sign: delta_w_cpu ~= +dL/dW (cosine-sim check empirically +0.4 against
+        autograd). Combined with the standard convention that `lr > 0` is a
+        positive learning rate, we subtract to minimize the loss.
+        """
         import torch
 
         wrapped = self.np_modules[layer_name]
@@ -376,7 +381,7 @@ class WorkerExtension:
         if update_clip is not None:
             dw = dw.clamp_(-float(update_clip), float(update_clip))
         with torch.no_grad():
-            weight.add_(float(lr) * dw)
+            weight.add_(dw, alpha=-float(lr))
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         return float(dw.norm().item())   # return ||delta_W|| for the >0 assertion

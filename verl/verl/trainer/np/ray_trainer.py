@@ -350,8 +350,13 @@ class RayNPTrainer:
             )
             for e in self.engines
         ])
-        if self.np_config.get("loss_type", "opd") == "opd":
+        loss_type = self.np_config.get("loss_type", "opd")
+        if loss_type == "opd":
             teacher_path = self.np_config.teacher_model_path
+            if not teacher_path:
+                raise ValueError(
+                    "loss_type=opd requires np.teacher_model_path to be set."
+                )
             print(f"Launching teacher engine ({teacher_path})...")
             self._launch_teacher_engine(teacher_path)
             self.scorer = TeacherScorer(
@@ -360,6 +365,15 @@ class RayNPTrainer:
                 top_k_strategy=self.np_config.top_k_strategy,
                 teacher_temperature=self.np_config.teacher_temperature,
                 weight_mode=self.np_config.reward_weight_mode,
+            )
+        elif loss_type == "grpo":
+            raise NotImplementedError(
+                "np.loss_type='grpo' (rule-reward only) is not implemented in v1. "
+                "Use loss_type='opd' (teacher reverse-KL). Tracking issue: see plan §5."
+            )
+        else:
+            raise ValueError(
+                f"np.loss_type={loss_type!r} is not supported. Use 'opd' (v1)."
             )
         print("Workers initialized successfully.")
 
