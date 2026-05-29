@@ -22,6 +22,16 @@ except ImportError:  # pragma: no cover - keep importable on stub installs
     set_forward_context = None
 
 
+def _stateless_init_process_group(master_address, master_port, rank, world_size, device):
+    """Initialize NCCL communicator for inter-engine weight broadcast."""
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.utils import StatelessProcessGroup
+    pg = StatelessProcessGroup.create(
+        host=master_address, port=master_port, rank=rank, world_size=world_size
+    )
+    return PyNcclCommunicator(pg, device=device)
+
+
 def _unpack(output):
     """vLLM linears may return a bare tensor or (tensor, bias). Normalize."""
     if isinstance(output, tuple):
@@ -370,6 +380,30 @@ class WorkerExtension:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         return float(dw.norm().item())   # return ||delta_W|| for the >0 assertion
+
+    def get_worker_ip(self):
+        """Return the worker's IP address for NCCL initialization."""
+        from vllm.utils import get_ip
+        return get_ip()
+
+    def init_inter_engine_group(self, master_address, master_port, rank, world_size):
+        """Initialize NCCL communicator for inter-engine weight synchronization."""
+        self.inter_pg = _stateless_init_process_group(
+            master_address, master_port, rank, world_size, self.device)
+        return True
+
+    def broadcast_layer_weights(self, layer_name, src_rank):
+        """Broadcast only the updated layer's weight (+bias if present)."""
+        import torch
+        wrapped = self.np_modules[layer_name]
+        params = [wrapped.wrapped.weight]
+        if getattr(wrapped.wrapped, "bias", None) is not None:
+            params.append(wrapped.wrapped.bias)
+        for p in params:
+            self.inter_pg.broadcast(p, src=int(src_rank), stream=torch.cuda.current_stream())
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return True
 
 
 def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
