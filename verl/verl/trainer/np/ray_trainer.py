@@ -159,6 +159,9 @@ class RayNPTrainer:
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=0,
         )
+        # vLLM caps prompt_logprobs at 20 by default; the teacher needs to return
+        # the OPD top-k set (np.log_prob_top_k, default 256), so raise the cap.
+        top_k = int(self.np_config.get("log_prob_top_k", 256))
         engine = ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(NPNcclLLM).remote(
             model=model_path,
             tensor_parallel_size=1,
@@ -167,6 +170,7 @@ class RayNPTrainer:
             dtype=precision,
             gpu_memory_utilization=self.np_config.get("teacher_gpu_memory_utilization",
                                                      self.np_config.get("gpu_memory_utilization", 0.9)),
+            max_logprobs=max(20, top_k),
         )
         self.teacher_engine = engine
         self.teacher_placement_group = pg
@@ -503,6 +507,9 @@ class RayNPTrainer:
             torch.cuda.empty_cache()
 
         progress_bar.close()
-        logger.finish()
+        # Tracking has no .finish(); per-backend cleanup runs in __del__. Be defensive
+        # so individual backends (wandb/swanlab) can still publish if exposed.
+        if hasattr(logger, "finish"):
+            logger.finish()
         self._cleanup()
         print(f"NP training completed. Results saved to {logging_dir}")

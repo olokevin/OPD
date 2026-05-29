@@ -19,6 +19,11 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 # FlashAttention v1 verified for the shared-prefix multi-query decode; SDPA was not.
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
+# Some boxes' flashinfer JIT can't find math.h; the NP path doesn't need it.
+export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
+# vLLM 0.11.0 V1 multiprocessing msgpack-serializes tensors across the EngineCore
+# boundary, breaking collective_rpc tensor returns. Run single-process (matches ES).
+export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
 # ---- NP knobs ----
@@ -69,7 +74,7 @@ python3 -m verl.trainer.main_np --config-name np_trainer \
     np.grad_estimate_sample=${GRAD_ESTIMATE_SAMPLE} \
     np.grad_estimate_sequence=${GRAD_ESTIMATE_SEQUENCE} \
     np.en_layerwise_perturbation=${EN_LAYERWISE} np.lr=${LR} np.token_agg=${TOKEN_AGG} \
-    np.loss_type=${LOSS_TYPE} "np.perturb_rules=[${PERTURB_RULES}]" \
+    np.loss_type=${LOSS_TYPE} 'np.perturb_rules=["'"${PERTURB_RULES}"'"]' \
     np.teacher_model_path=${TEACHER_MODEL_PATH} np.log_prob_top_k=${LOG_PROB_TOP_K} \
     np.top_k_strategy=${TOP_K_STRATEGY} np.teacher_temperature=${TEACHER_TEMPERATURE} \
     np.num_engines=${NUM_ENGINES} np.num_iterations=${NUM_ITERATIONS} \

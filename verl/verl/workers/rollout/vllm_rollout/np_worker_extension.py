@@ -450,8 +450,16 @@ class WorkerExtension:
         """One-RPC bundle of (assemble δW) + (apply δW locally) for layer_name.
 
         Returns ‖δW‖ (post-clip) as a float so the trainer can log + assert >0.
+
+        u_steps and x_steps may arrive on GPU (captured inside PerturbedLinear).
+        L_q_steps/L_clean_steps come from the teacher scorer on CPU. Coerce all
+        signal tensors to CPU here so assemble_layer_delta's accumulator (also
+        CPU) stays device-consistent.
         """
-        dw = assemble_layer_delta(L_q_steps, L_clean_steps, u_steps, x_steps,
+        u_cpu = [u.detach().cpu() for u in u_steps]
+        x_cpu = [x.detach().cpu() for x in x_steps]
+        L_q_cpu = [lq.detach().cpu() if hasattr(lq, "detach") else lq for lq in L_q_steps]
+        dw = assemble_layer_delta(L_q_cpu, L_clean_steps, u_cpu, x_cpu,
                                   sigma=sigma, sample_mode=sample_mode,
                                   normalize=normalize, token_agg=token_agg)
         return self.apply_node_update(layer_name, dw, lr, update_clip)
