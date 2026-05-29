@@ -201,16 +201,24 @@ echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
 if [ "$RAY_ISOLATE" = "1" ]; then
-    # Per-run private Ray head: unique port + temp dir so concurrent single-GPU
-    # runs don't collide on the default 6379 port or share a dashboard/temp dir.
-    # Derive a stable port from the first visible GPU id (4->6400, 5->6500, ...).
+    # Per-run private Ray head so concurrent single-GPU runs don't collide.
+    # Unique port + temp dir + a unique loopback node IP (127.0.0.<gpu+10>) per
+    # run. The node IP is the key fix: two heads sharing the node's real IP can
+    # cross-discover each other's workers, which made vLLM build a TP=2 engine
+    # spanning both GPUs (VLLM::Worker_TP0/TP1) and OOM. A distinct loopback IP
+    # keeps each cluster's GCS/raylet strictly separate.
     _gpu0=${CUDA_VISIBLE_DEVICES%%,*}
     export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
     export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_opd_gpu${_gpu0:-0}}
+    export RAY_NODE_IP=${RAY_NODE_IP:-127.0.0.$(( ${_gpu0:-0} + 10 ))}
     mkdir -p "$RAY_TMPDIR"
-    export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
+    # Start the head FRESH (RAY_ADDRESS unset so `ray start` never tries to
+    # attach to a sibling cluster), then point the python driver at it.
+    unset RAY_ADDRESS
     ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TMPDIR" \
-        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE"
+        --node-ip-address="$RAY_NODE_IP" --dashboard-host=127.0.0.1 \
+        --num-gpus="$N_GPUS_PER_NODE"
+    export RAY_ADDRESS="${RAY_NODE_IP}:${RAY_PORT}"
 else
     ray start --head
 fi

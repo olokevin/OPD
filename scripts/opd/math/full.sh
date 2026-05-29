@@ -39,8 +39,9 @@ IS_PLOT=False
 # Default LR (overridden by the LR search: 1e-6 / 5e-6 / 1e-5).
 LR=1e-6
 
-# Hardware: single H100.
-CUDA_VISIBLE_DEVICES=4
+# Hardware: single H100. Defaults to GPU 1; honor an external override so a
+# launcher can pin elsewhere (e.g. CUDA_VISIBLE_DEVICES=4 bash full.sh).
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 N_GPUS_PER_NODE=1
 
 # vLLM: disable FlashInfer sampler (its JIT compile hits a gcc-11 + nvcc

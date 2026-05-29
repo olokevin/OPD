@@ -33,8 +33,8 @@ IS_PLOT=False   # matplotlib not in verl env; wandb logs metrics. See full.sh.
 # Default LR (overridden by the LR search: 1e-5 / 5e-5 / 1e-4).
 LR=1e-5
 
-# Hardware: single H100.
-CUDA_VISIBLE_DEVICES=5
+# Hardware: single H100. Defaults to GPU 2; honor an external override.
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2}
 N_GPUS_PER_NODE=1
 
 # vLLM workarounds (see full.sh).
