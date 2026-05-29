@@ -405,6 +405,57 @@ class WorkerExtension:
             torch.cuda.synchronize()
         return True
 
+    def run_capture_pass(self, prompt_token_ids, clean_tokens, layer_name, np_cfg):
+        """Teacher-forced re-run of the committed sequence to capture x_t per response
+        step. Returns list[Tensor[d_in]] (CPU), one per token in clean_tokens.
+
+        Mechanics: we re-decode the fixed `prompt_token_ids + clean_tokens` sequence
+        one response step at a time. For each step we flip np_state to mode=capture
+        (the PerturbedLinear hook records the row-0 input x_t and otherwise leaves
+        the forward untouched), call `_np_step_forward(..., n_sample=0)` -- a
+        single-row forward (rows = 1 + n_sample, with n_sample=0 -> one clean row,
+        no perturbed companions). slot_mapping is [clean_slot] only; no PAD_SLOT_ID
+        rows. Then we commit the already-known clean token and advance kv_cursor.
+        Returns the list of captured x_t (CPU) -- one per step in clean_tokens.
+
+        Note: n_sample=0 is supported by `_np_step_forward` as written -- the
+        perturbed-row branches (`[-1] * n_sample`, `[q_token] * n_sample`) collapse
+        to empty lists, so the resulting batch is a single clean row.
+        """
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        x_per_step = []
+
+        # Prefill clean prompt KV. Use only the prompt -- the loop below replays
+        # clean_tokens one step at a time, writing each clean position's KV in row 0
+        # of `_np_step_forward` before advancing kv_cursor via `_np_commit_clean`.
+        state = self._np_prefill(model, device, list(prompt_token_ids))
+        for t, tok in enumerate(clean_tokens):
+            st.update({
+                "mode": "capture",
+                "layer": layer_name,
+                "n_clean_rows": 1,
+                "captured_x": {},
+            })
+            self._np_step_forward(model, device, state, n_sample=0)  # 1-row forward
+            x_per_step.append(st["captured_x"][layer_name].detach().to("cpu"))
+            self._np_commit_clean(state, tok)
+        st["mode"] = "off"
+        return x_per_step
+
+    def assemble_and_apply(self, layer_name, L_q_steps, L_clean_steps, u_steps, x_steps,
+                            sigma, sample_mode, normalize, token_agg, lr, update_clip):
+        """One-RPC bundle of (assemble δW) + (apply δW locally) for layer_name.
+
+        Returns ‖δW‖ (post-clip) as a float so the trainer can log + assert >0.
+        """
+        dw = assemble_layer_delta(L_q_steps, L_clean_steps, u_steps, x_steps,
+                                  sigma=sigma, sample_mode=sample_mode,
+                                  normalize=normalize, token_agg=token_agg)
+        return self.apply_node_update(layer_name, dw, lr, update_clip)
+
 
 def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
                          sigma, sample_mode, normalize, token_agg, eps=1e-6):
