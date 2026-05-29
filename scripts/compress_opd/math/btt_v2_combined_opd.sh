@@ -33,18 +33,18 @@ HF_HOME=/data/yequan/huggingface
 
 TRAIN_DATASET_NAME=math-500k
 MAX_PROMPT_LENGTH=1024
-MAX_RESP_LENGTH=2048
-MAX_VAL_RESP_LENGTH=2048
+MAX_RESP_LENGTH=3072
+MAX_VAL_RESP_LENGTH=3072
 PROJECT_NAME=opd-compress-qwen4B_1p7B-math
 
 # Smoke-test cadence — keep checkpoints sparse, run validation rarely.
 SAVE_FREQ=200
-TEST_FREQ=10
+TEST_FREQ=5
 TOTAL_EPOCHS=1
 VAL_N=4
 
 # Hardware: single GPU.
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=4
 N_GPUS_PER_NODE=1
 
 # vLLM workarounds (see scripts/opd/math/full.sh).
@@ -74,7 +74,8 @@ BTT_NORMALIZE_AFTER_UPDATE=False
 BTT_QFURA=False
 
 # Calibration: v2_combined (double whitening) + OPD-faithful gradient.
-CALIB_MODE=v2_combined
+# CALIB_MODE=v2_combined
+CALIB_MODE=v2
 CALIB_SOURCE=training_data         # reuse the OPD training data for calibration
 CALIB_NUM_SEQS=64                   # smoke value; bump to 128+ for real runs
 CALIB_MAX_LENGTH=512

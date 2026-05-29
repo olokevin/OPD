@@ -31,8 +31,21 @@ fi
 # Make compress/ package importable when PEFT_MODE=blocktt|svd is enabled.
 export PYTHONPATH="$(dirname "$(realpath "$0")")/src${PYTHONPATH:+:$PYTHONPATH}"
 
-ray stop --force
+# Ray isolation. When RAY_ISOLATE=1 (set by the per-GPU LR-search runner so
+# multiple single-GPU runs can coexist on one box), start a private Ray head on
+# a per-run port + temp dir and DO NOT global-`ray stop --force` (which would
+# tear down sibling runs). Otherwise keep the original single-run behavior.
+export RAY_ISOLATE=${RAY_ISOLATE:-0}
+if [ "$RAY_ISOLATE" != "1" ]; then
+    ray stop --force
+fi
 export RAY_memory_usage_threshold=0.99
+# Disable Ray's worker-OOM memory monitor. On this box (cgroup v2) the monitor
+# misreads usage — "Got negative used memory for cgroup -1" — and SIGKILLs the
+# raylet mid-step (-> ActorUnavailableError / "Socket closed") even with ~1.4TB
+# RAM free. refresh_ms=0 turns the monitor off; real OOMs still surface as CUDA
+# errors. See logs/lr_search/smoke2_*.log (step-4 crash, 2026-05-29).
+export RAY_memory_monitor_refresh_ms=${RAY_memory_monitor_refresh_ms:-0}
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-6,7}
 export PYTHONUNBUFFERED=1
@@ -87,6 +100,14 @@ case "$TRAIN_DATASET_NAME" in
     export TRAIN_DATASET=${TRAIN_DATASET:-${TRAIN_DATA_DIR}/${TRAIN_DATASET_NAME}/train.parquet}
     TEST_DATASET=${TEST_FILE:-["${TRAIN_DATA_DIR}/${TRAIN_DATASET_NAME}/test.parquet"]}
     ;;
+  MATH)
+    # SimpleRL-Zoo-aligned math setting (arXiv:2503.18892): train on MATH
+    # level 3-5 (8,890 rows, filtered from datasets/test_data/MATH/train.parquet
+    # by scripts/opd/math -> datasets/train_data/math-lv3to5/train.parquet),
+    # evaluate on MATH-500. Override TRAIN_DATASET to use the full MATH split.
+    export TRAIN_DATASET=${TRAIN_DATASET:-${TRAIN_DATA_DIR}/math-lv3to5/train.parquet}
+    TEST_DATASET=${TEST_FILE:-["${TEST_DATA_DIR}/MATH-500/test.parquet"]}
+    ;;
   *)
     export TRAIN_DATASET=${TRAIN_DATASET:-datasets/dapo-math-17k.parquet}
     TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AIME25/test.parquet", "$TEST_DATA_DIR/AMC23/test.parquet", "$TEST_DATA_DIR/AIME24/test.parquet"]}
@@ -128,7 +149,7 @@ export REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-model/Qwen3-4B-Non-Thinking-RL-Mat
 
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
 
-export PROJECT_PATH=${PROJECT_PATH:-/data/yequan/opd/opd/{TRAIN_DATASET_NAME}}
+export PROJECT_PATH=${PROJECT_PATH:-/data/yequan/opd/opd/${TRAIN_DATASET_NAME}}
 export PARALLEL_SIZE=${PARALLEL_SIZE:-1}
 # Hardware / scheduling knobs (overridable from wrapper scripts)
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
@@ -140,6 +161,9 @@ export REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-True}
 export REWARD_PARAM_OFFLOAD=${REWARD_PARAM_OFFLOAD:-False}
 export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 export VAL_N=${VAL_N:-16}
+# Validation generation: default to SimpleRL-Zoo eval setting (temp 1.0, top_p 0.95).
+export VAL_TEMPERATURE=${VAL_TEMPERATURE:-1.0}
+export VAL_TOP_P=${VAL_TOP_P:-0.95}
 export SAVE_FREQ=${SAVE_FREQ:-20}
 export TEST_FREQ=${TEST_FREQ:-20}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
@@ -176,7 +200,20 @@ PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_R
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
-ray start --head
+if [ "$RAY_ISOLATE" = "1" ]; then
+    # Per-run private Ray head: unique port + temp dir so concurrent single-GPU
+    # runs don't collide on the default 6379 port or share a dashboard/temp dir.
+    # Derive a stable port from the first visible GPU id (4->6400, 5->6500, ...).
+    _gpu0=${CUDA_VISIBLE_DEVICES%%,*}
+    export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
+    export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_opd_gpu${_gpu0:-0}}
+    mkdir -p "$RAY_TMPDIR"
+    export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
+    ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TMPDIR" \
+        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE"
+else
+    ray start --head
+fi
 sleep 5
 
 
@@ -331,8 +368,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     ++actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
     actor_rollout_ref.rollout.val_kwargs.n=$VAL_N \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
-    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=$VAL_TEMPERATURE \
+    actor_rollout_ref.rollout.val_kwargs.top_p=$VAL_TOP_P \
     actor_rollout_ref.rollout.repetition_penalty=$REPETITION_PENALTY \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \

@@ -18,3 +18,6 @@ bash grpo.sh
 bash on_policy_distillation.sh
 
 
+CUDA_VISIBLE_DEVICES=7 bash scripts/opd/math/full.sh > /dev/null 2>&1 &
+
+CUDA_VISIBLE_DEVICES=7 bash scripts/compress_opd/math/btt_v2_combined_opd.sh > /dev/null 2>&1 &
