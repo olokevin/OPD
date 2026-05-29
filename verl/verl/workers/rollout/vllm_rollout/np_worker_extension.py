@@ -355,3 +355,37 @@ class WorkerExtension:
         We now advance kv_cursor so the next step writes the next position."""
         state["committed_tokens"].append(int(token))
         state["kv_cursor"] += 1
+
+    def apply_node_update(self, layer_name, delta_w_cpu, lr, update_clip=None):
+        """W <- W + lr * delta_W for the wrapped layer's weight. delta_w_cpu: [d_out,d_in]."""
+        import torch
+
+        wrapped = self.np_modules[layer_name]
+        weight = wrapped.wrapped.weight  # vLLM linear weight [d_out, d_in]
+        dw = delta_w_cpu.to(weight.device, weight.dtype)
+        if update_clip is not None:
+            dw = dw.clamp_(-float(update_clip), float(update_clip))
+        with torch.no_grad():
+            weight.add_(float(lr) * dw)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return float(dw.norm().item())   # return ||delta_W|| for the >0 assertion
+
+
+def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
+                         sigma, sample_mode, normalize, token_agg, eps=1e-6):
+    """Build delta_W [d_out, d_in] from per-step signals. Pure math (CPU/GPU)."""
+    from verl.trainer.np.grad_estimator import sample_scale, accumulate_delta_w
+
+    assert len(L_q_per_step) == len(u_per_step) == len(x_per_step)
+    d_out = u_per_step[0].shape[1]
+    d_in = x_per_step[0].shape[0]
+    dw = torch.zeros(d_out, d_in, dtype=torch.float32)
+    T = max(len(L_q_per_step), 1)
+    for L_q, L_clean, u, x_t in zip(L_q_per_step, L_clean_per_step, u_per_step, x_per_step):
+        scales = sample_scale(L_q.float(), L_clean, sigma, sample_mode)
+        accumulate_delta_w(dw, scales=scales, u=u.float(), x_t=x_t.float(),
+                           normalize=normalize, eps=eps)
+    if token_agg == "mean":
+        dw.div_(T)
+    return dw
