@@ -201,24 +201,21 @@ echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
 if [ "$RAY_ISOLATE" = "1" ]; then
-    # Per-run private Ray head so concurrent single-GPU runs don't collide.
-    # Unique port + temp dir + a unique loopback node IP (127.0.0.<gpu+10>) per
-    # run. The node IP is the key fix: two heads sharing the node's real IP can
-    # cross-discover each other's workers, which made vLLM build a TP=2 engine
-    # spanning both GPUs (VLLM::Worker_TP0/TP1) and OOM. A distinct loopback IP
-    # keeps each cluster's GCS/raylet strictly separate.
+    # Per-run private Ray head so concurrent single-GPU runs don't collide:
+    # unique port + a FRESH temp dir per run keyed to the GPU id. CUDA_VISIBLE_
+    # DEVICES already confines each run to its own GPU, so no node-ip tricks are
+    # needed. Wipe the temp dir first so a stale session from a prior run can't
+    # trigger Ray's "Session name does not match persisted value" assertion.
     _gpu0=${CUDA_VISIBLE_DEVICES%%,*}
     export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
     export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_opd_gpu${_gpu0:-0}}
-    export RAY_NODE_IP=${RAY_NODE_IP:-127.0.0.$(( ${_gpu0:-0} + 10 ))}
-    mkdir -p "$RAY_TMPDIR"
+    rm -rf "$RAY_TMPDIR"; mkdir -p "$RAY_TMPDIR"
     # Start the head FRESH (RAY_ADDRESS unset so `ray start` never tries to
     # attach to a sibling cluster), then point the python driver at it.
     unset RAY_ADDRESS
     ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TMPDIR" \
-        --node-ip-address="$RAY_NODE_IP" --dashboard-host=127.0.0.1 \
-        --num-gpus="$N_GPUS_PER_NODE"
-    export RAY_ADDRESS="${RAY_NODE_IP}:${RAY_PORT}"
+        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE"
+    export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
 else
     ray start --head
 fi
@@ -290,7 +287,13 @@ case "$PEFT_MODE" in
       actor_rollout_ref.model.lora_rank=$LORA_RANK \
       actor_rollout_ref.model.lora_alpha=$LORA_ALPHA" ;;
   blocktt)
+    # BlockTT/FurA produces mixed requires_grad within a module (trainable small
+    # factor + frozen core), so FSDP must use use_orig_params=True — otherwise it
+    # raises "Must flatten tensors with uniform requires_grad when
+    # use_orig_params=False". (LoRA avoids this via a LoRA-aware wrap policy;
+    # blocktt has no such policy, so set it explicitly here.)
     PEFT_ARGS="$PEFT_ARGS \
+      actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
       ++actor_rollout_ref.peft.blocktt.decomp_mode=$BTT_DECOMP_MODE \
       ++actor_rollout_ref.peft.blocktt.rank=$BTT_RANK \
       ++actor_rollout_ref.peft.blocktt.train_position=$BTT_TRAIN_POSITION \
@@ -327,6 +330,11 @@ if [ "$CALIB_MODE" != "none" ]; then
     ++actor_rollout_ref.peft.calib.teacher_temperature=$CALIB_TEACHER_TEMPERATURE"
 fi
 # ---- /PEFT ----
+
+# Optional pass-through for ad-hoc Hydra overrides (e.g. non-thinking chat
+# template). Callers set EXTRA_HYDRA_ARGS to a single string of extra
+# `+key=value` clauses; left empty by default.
+export EXTRA_HYDRA_ARGS=${EXTRA_HYDRA_ARGS:-}
 
 
 python3 -m verl.trainer.main_ppo \
@@ -404,7 +412,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=$TOTAL_EPOCHS \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
-    $PEFT_ARGS
+    $PEFT_ARGS \
+    $EXTRA_HYDRA_ARGS
 
 # Log the end time for local runs.
 if [ -z "$SLURM_JOB_ID" ]; then
