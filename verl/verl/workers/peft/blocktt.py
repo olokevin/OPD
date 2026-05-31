@@ -207,6 +207,45 @@ class BlockTTAdapter(PEFTAdapter):
             # next run will simply recalibrate.
             pass
 
+    @staticmethod
+    def _untie_embeddings(model):
+        """Break the input/output-embedding weight tie so FSDP1 with
+        use_orig_params=True doesn't fail the update_actor writeback check
+        ("Cannot writeback when the parameter shape changes"). Copies the
+        embed weight into a fresh lm_head Parameter and flips the config flag.
+        No-op when the model isn't tied. Returns the (same) model."""
+        in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+        out_emb = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
+        in_w = getattr(in_emb, "weight", None)
+        out_w = getattr(out_emb, "weight", None)
+        cfg_ties = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+        tied = (
+            in_w is not None and out_w is not None
+            and in_w.data_ptr() == out_w.data_ptr()
+        )
+        print(
+            f"[blocktt untie] cfg.tie_word_embeddings={cfg_ties} "
+            f"in_emb={type(in_emb).__name__ if in_emb is not None else None} "
+            f"out_emb={type(out_emb).__name__ if out_emb is not None else None} "
+            f"storage_tied={tied}",
+            flush=True,
+        )
+        # Untie whenever the storage is shared OR the config flags a tie, even
+        # if get_output_embeddings() didn't expose a separate lm_head.
+        if tied:
+            out_emb.weight = torch.nn.Parameter(
+                in_w.detach().clone(), requires_grad=out_w.requires_grad,
+            )
+            if getattr(model, "config", None) is not None:
+                model.config.tie_word_embeddings = False
+            print("[blocktt untie] untied lm_head from embed_tokens (cloned weight)", flush=True)
+        elif cfg_ties and getattr(model, "config", None) is not None:
+            # Storage not shared but config still claims a tie — clear the flag so
+            # nothing re-ties them downstream (e.g. tie_weights() during vLLM load).
+            model.config.tie_word_embeddings = False
+            print("[blocktt untie] cleared stale tie_word_embeddings flag (storage already separate)", flush=True)
+        return model
+
     def apply(self, model, *, tokenizer, calib_loader_builder):
         from compress.integration import (
             apply_calibrated_btt,
@@ -217,6 +256,24 @@ class BlockTTAdapter(PEFTAdapter):
             resolve_blocktt_decomp_modes,
         )
         from compress.topology import export_btt_topology
+
+        # With the input embeddings frozen (BlockTT trains only the small BTT
+        # cores) and gradient checkpointing on (use_reentrant=False), the
+        # activations entering the first checkpointed block don't require grad,
+        # so the backward pass raises "element 0 of tensors does not require
+        # grad and does not have a grad_fn". Registering the input-require-grad
+        # hook (same as the LoRA adapter) gives autograd a path into the
+        # trainable cores. Must run before FSDP wraps the model.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+
+        # Untie input/output embeddings for ALL blocktt branches (plain FurA
+        # included, not just calibrated). FSDP1 with use_orig_params=True chokes
+        # on tied embed/lm_head during the update_actor pre-unshard writeback:
+        #   "Cannot writeback when the parameter shape changes
+        #    Expects torch.Size([311164928]) but got torch.Size([151936, 2048])"
+        # See the calibrated branch below, which does the same after calibration.
+        model = self._untie_embeddings(model)
 
         bt = self.peft_cfg.blocktt
         include_names = get_blocktt_target_module_names(self._trainable_type())

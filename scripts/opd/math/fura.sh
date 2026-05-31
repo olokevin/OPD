@@ -45,9 +45,13 @@ N_GPUS_PER_NODE=1
 VLLM_USE_FLASHINFER_SAMPLER=0
 VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
-# Memory-fit knobs. On-GPU optimizer states (BTT small-side only) for speed; see full.sh.
+# Memory-fit knobs. NOTE: ACTOR_PARAM_OFFLOAD MUST be False for FurA — the
+# Linear->BlockTT conversion at init requires all target Linear weights on CUDA
+# (param_offload=True leaves them on CPU -> "Linear->BTT conversion requires all
+# target Linear weights on CUDA"). The 1.7B actor + 4B teacher fit on one free
+# 95GB H100 without param offload.
 MODEL_DTYPE=bfloat16
-ACTOR_PARAM_OFFLOAD=True
+ACTOR_PARAM_OFFLOAD=False
 ACTOR_OPTIM_OFFLOAD=False
 REWARD_PARAM_OFFLOAD=True
 GPU_MEMORY_UTILIZATION=0.55
@@ -66,6 +70,14 @@ BTT_CONVERT_MODE=svd               # svd | random | calib
 BTT_FACTORIZE_BY_HEAD=True
 BTT_NORMALIZE_AFTER_UPDATE=False
 BTT_QFURA=False                    # FurA: keep frozen core in bf16
+
+# Use FSDP2 for the actor/ref. FSDP1 (use_orig_params=True, required for
+# BlockTT's mixed trainable/frozen params) fails the per-step writeback on the
+# frozen embedding: "Cannot writeback when the parameter shape changes
+# [311164928] vs [151936,2048]". FSDP2's per-parameter DTensor sharding has no
+# FlatParameter writeback constraint and wraps the (untied) embedding in its own
+# unit, so BlockTT trains cleanly.
+EXTRA_HYDRA_ARGS="actor_rollout_ref.actor.strategy=fsdp2 actor_rollout_ref.ref.strategy=fsdp2"
 
 set +a
 
