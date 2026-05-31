@@ -103,14 +103,14 @@ CALIB_TEACHER_TEMPERATURE=1.0
 # ---- Non-thinking chat template (teacher + student are both Non-Thinking) ----
 # Hydra override drives the trainer; ENABLE_THINKING also propagates into the
 # calibration loader inside the fsdp worker (which doesn't see data.* config).
-# Also disable gradient checkpointing: with a compressed ~1.66B actor we fit
-# comfortably on a single H100, and gradient_checkpointing + FSDP1
-# (use_orig_params=True) + a frozen embedding triggers either
-#   "element 0 of tensors does not require grad" (no input requires_grad), or
-#   "Cannot writeback when the parameter shape changes" (if
-#   enable_input_require_grads is used as a workaround).
+# Also force FSDP2 for actor + ref: FSDP1 with use_orig_params=True (required
+# for BlockTT's mixed trainable/frozen params) fails the per-step writeback on
+# the frozen embedding ("Cannot writeback when the parameter shape changes");
+# FSDP2's per-parameter DTensor sharding has no such constraint. This matches
+# fura.sh's verified-working config (commit 7a8a61c).
 EXTRA_HYDRA_ARGS="+data.apply_chat_template_kwargs.enable_thinking=False \
-  actor_rollout_ref.model.enable_gradient_checkpointing=False"
+  actor_rollout_ref.actor.strategy=fsdp2 \
+  actor_rollout_ref.ref.strategy=fsdp2"
 ENABLE_THINKING=False
 
 set +a
