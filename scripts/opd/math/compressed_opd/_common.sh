@@ -45,8 +45,11 @@ SAVE_FREQ=100
 TEST_FREQ=5
 IS_PLOT=False
 
-# Default LR. Compressed-model full-FT — 1e-5 (the user-requested LR).
-LR=${LR:-1e-5}
+# Default LR. Compressed-model full-FT — 1e-6 (the user-requested LR=1e-5 was
+# unstable at step 2: pearson_corr collapsed 0.94 → 0.16 with grad_norm > 1k.
+# 1e-6 lets step 3+ recover; step 1 metrics from the cache-loaded model are
+# deterministic so they look identical across LR sweeps).
+LR=${LR:-1e-6}
 
 # Hardware: single H100 per run. GPU pinned by the caller.
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4}
@@ -61,14 +64,22 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 # Memory-fit knobs. ACTOR_PARAM_OFFLOAD MUST be False for BTT — the
 # Linear->BTT conversion at init requires the target Linear weights on CUDA
 # (param_offload=True leaves them on CPU and the conversion errors out).
+# Optimizer offload + lower GPU_MEMORY_UTILIZATION + halved
+# PPO_MAX_TOKEN_LEN_PER_GPU together give update_actor enough headroom to
+# materialise BTT dense weights and backward activations on a single H100
+# that is already sharing ~15 GiB with another user's job.
 MODEL_DTYPE=bfloat16
 ACTOR_PARAM_OFFLOAD=False
-ACTOR_OPTIM_OFFLOAD=False
+ACTOR_OPTIM_OFFLOAD=True
 REWARD_PARAM_OFFLOAD=True
-GPU_MEMORY_UTILIZATION=0.55
+GPU_MEMORY_UTILIZATION=0.40
 REWARD_MICRO_BATCH_SIZE_PER_GPU=8
 MINI_BATCH_SIZE=64
 VAL_N=4
+# NOTE: on_policy_distillation.sh unconditionally recomputes
+# PPO_MAX_TOKEN_LEN_PER_GPU=max(1024+MAX_RESP_LENGTH, 32768) at runtime, so
+# we override actor.ppo_max_token_len_per_gpu + rollout.max_num_batched_tokens
+# directly via EXTRA_HYDRA_ARGS below to halve activation memory.
 
 # ---- BTT compression ----
 # output_one_block + per-linear ratio = 0.36 → ~1.66B total params (target 1.7B):
@@ -110,7 +121,9 @@ CALIB_TEACHER_TEMPERATURE=1.0
 # fura.sh's verified-working config (commit 7a8a61c).
 EXTRA_HYDRA_ARGS="+data.apply_chat_template_kwargs.enable_thinking=False \
   actor_rollout_ref.actor.strategy=fsdp2 \
-  actor_rollout_ref.ref.strategy=fsdp2"
+  actor_rollout_ref.ref.strategy=fsdp2 \
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
+  actor_rollout_ref.rollout.max_num_batched_tokens=16384"
 ENABLE_THINKING=False
 
 set +a
