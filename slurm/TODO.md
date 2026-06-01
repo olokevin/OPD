@@ -55,7 +55,7 @@ will kill long-running CPU/GPU processes.
 
 ### Requirements
 
-all env, data goes to /pscratch/sd/y/yequan
+all env, data, huggingface, ckpt saving, etc. goes to /pscratch/sd/y/yequan, not home directory
 
 ## 1. Account & paths
 
@@ -139,10 +139,10 @@ the cache on a login node:
   8× A800 80GB setup. Requires:
   - `--nodes=2`, change `NNODES=2`.
   - Replace `ray start --head` (inside `on_policy_distillation.sh`)
-  with a head-vs-worker `srun` pattern. Probably cleanest to keep
-  the multi-node logic *outside* `on_policy_distillation.sh` —
-  write a `slurm/opd_train_2node.sbatch` that starts ray itself
-  and then calls a stripped-down launcher.
+    with a head-vs-worker `srun` pattern. Probably cleanest to keep
+    the multi-node logic *outside* `on_policy_distillation.sh` —
+    write a `slurm/opd_train_2node.sbatch` that starts ray itself
+    and then calls a stripped-down launcher.
 - [ ] **40 GB fallback (`--constraint=gpu`)** — would let the job land on
   more nodes / queue faster. Needs `ACTOR_PARAM_OFFLOAD=True` and
   lower `GPU_MEMORY_UTILIZATION` (~0.6). Untested.
