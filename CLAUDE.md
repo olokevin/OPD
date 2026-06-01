@@ -10,9 +10,27 @@ The codebase is **two vendored frameworks plus thin glue**:
 
 - `verl/` — fork of [verl](https://github.com/verl-project/verl) v0.7.0 used for OPD + RL training. **All OPD-specific algorithm code lives here**, not in a separate module.
 - `LlamaFactory/` — fork of [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) v0.9.5 used for SFT (cold-start checkpoints, off-policy distillation baselines).
-- Top-level `*.sh`, `scripts/`, `datasets/` — entry points and data plumbing that drive the two frameworks above.
+- `src/compress/` — **git submodule** ([olokevin/compress](https://github.com/olokevin/compress)) holding the model-compression code (BTT/BlockTT, SVD, structured layers, ZO grad estimators) used by the `compressed_opd` teacher-compression experiments.
+- Top-level `*.sh`, `scripts/`, `datasets/` — entry points and data plumbing that drive the frameworks above.
 
-The two frameworks use **different conda envs** (`verl` py3.12 vs `sft` py3.11) and should not share dependencies.
+The two training frameworks use **different conda envs** (`verl` py3.12 vs `sft` py3.11) and should not share dependencies.
+
+### `src/compress` is a git submodule — commit it separately
+
+`src/compress` is a nested git repo wired in as a submodule (`.gitmodules` → `git@github.com:olokevin/compress.git`). The rest of `src/` is gitignored; only the `src/compress` gitlink is tracked. This changes the commit workflow:
+
+- **Edits inside `src/compress` are NOT committed by the main repo.** `git add`/`git commit` from the OPD root only records the submodule's *commit pointer*, never its file changes. You must commit and push from inside the submodule first:
+  ```bash
+  cd src/compress
+  git add -A && git commit -m "..."   # commit in the submodule's own repo
+  git push origin master              # push BEFORE pinning, or clones fail to fetch the pinned SHA
+  cd ../..
+  git add src/compress                # stage the new pointer in OPD
+  git commit -m "compress: bump submodule"
+  ```
+- **Always push the submodule's commits before committing the bumped pointer in OPD** — the main repo pins a remote SHA, so an unpushed pointer breaks `git clone --recurse-submodules`.
+- **Clone with** `git clone --recurse-submodules ...`, or run `git submodule update --init --recursive` in an existing checkout.
+- A dirty submodule shows up in the OPD root as `modified: src/compress (modified content/new commits)` — that is the signal you have un-pinned submodule work to handle as above.
 
 ## Environment setup
 
