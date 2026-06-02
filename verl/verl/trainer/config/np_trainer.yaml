@@ -7,7 +7,8 @@ np:
   # core NP knobs
   sigma: 0.01
   n_sample: 8                      # perturbed copies scored per decode step
-  n_rollout: 8                     # rollouts for sequence-level grad estimation
+  n_rollout: 1                     # rollouts per prompt (kept for back-compat)
+  batch_size: 1                    # distinct prompts accumulated into ONE delta_W per update
   sample_method: bernoulli         # gaussian | bernoulli | uniform
   en_layerwise_perturbation: true  # false = perturb all matched layers at once
   perturb_method: forward          # forward (one-sided) | antithetic
@@ -18,7 +19,11 @@ np:
     - '^model\.layers\.\d+\.mlp\.down_proj$'   # vLLM-real names (see spec §4)
   lr: 1.0e-4
   token_agg: sum                   # sum | mean
-  update_clip: null                # delta_W / ||u||^2 safety (null = eps-floor only)
+  normalize_anp: false             # ANP per-sample 1/||u||^2 rescale. OFF by default:
+                                   # for Rademacher noise ||u||^2 == d_out, so it shrinks
+                                   # the whole update by 1/d_out (~1/2048) and forces an
+                                   # absurd lr. See scripts/zo_opd/results/ANALYSIS.md.
+  update_clip: null                # per-element |delta_W| clamp (null = none)
 
   # teacher scorer (v1, core)
   teacher_model_path: null         # required for loss_type=opd
@@ -37,6 +42,10 @@ np:
   eval_interval: 25
   eval_batch_size: 256
   gpu_memory_utilization: 0.7
+  teacher_gpu_memory_utilization: null   # falls back to gpu_memory_utilization
+  gpu_fraction: 1.0                       # <1 co-locates student+teacher on one GPU (fractional PG)
+  distributed_executor_backend: ray       # "uni" (in-process worker) required for fractional/co-located GPU
+  verify_update: true                     # per-step check that the weight moved + synced to all engines
   global_seed: 42
   verbose: false
   worker_extension_cls: "verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension"

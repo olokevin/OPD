@@ -16,15 +16,31 @@ def sample_scale(
     sigma: float,
     mode: str,                    # "average" | "grpo"
 ) -> torch.Tensor:
-    """Per-sample scalar weighting of u_q. Lower L is better (minimization)."""
+    """Per-sample scalar weighting of u_q. Lower L is better (minimization).
+
+    Both modes are one-sided finite differences and MUST keep the 1/sigma factor
+    so the scale carries the units of a directional derivative (dL/dy ~ (L_q-L0)/sigma).
+    Without 1/sigma the resulting delta_W is off the true-gradient scale by ~sigma,
+    which (combined with the dropped 1/sigma) is what made the old grpo path need an
+    absurd lr. See scripts/zo_opd/results/ANALYSIS.md.
+      - average: (L_q - L_clean) / sigma         (baseline = clean row's loss)
+      - grpo:    ((L_q - mean_q) / std_q) / sigma (z-scored advantage, then /sigma)
+                 keeps BOTH the grpo standardization (1/std) and the finite-
+                 difference scale (1/sigma).
+    """
     if mode == "average":
         if L_clean is None:
             raise ValueError("average mode requires L_clean baseline")
         return (L_q - float(L_clean)) / sigma
     if mode == "grpo":
+        # ((L_q - mean_q) / std_q) / sigma  -- BOTH scalings:
+        #   * 1/std   : grpo standardization (per-token, unit-variance advantage)
+        #   * 1/sigma : finite-difference scale (so the result has dL/dy units)
+        # Keeping both means the per-token weighting is the z-scored advantage but
+        # still carries the 1/sigma directional-derivative scale.
         mean = L_q.mean()
         std = L_q.std(unbiased=False) + 1e-8
-        return (L_q - mean) / std
+        return ((L_q - mean) / std) / sigma
     raise ValueError(f"unknown grad_estimate_sample mode: {mode!r}")
 
 

@@ -27,8 +27,8 @@ Ongoing — this is a living knowledge system, not a finite task. No fixed end s
 <!-- Update the Status cell + Next as each project moves. Keep to ONE line each. -->
 
 ### P1 compressed-opd
-- **Status:** in_progress — calibrated BTT 4B→~1.7B teacher compression landed (commit 15f9d45); FSDP2 forced (8240edc); LR lowered to 1e-6 + memory knobs for shared GPU (af170f5). New `eval_c4_ppl.py` (untracked) for C4 perplexity eval of compressed teacher.
-- **Next:** validate compressed teacher quality (C4 PPL) → confirm SFT-on-4B-generated step → run OPD with 4B teacher.
+- **Status:** SparseGPT path COMPLETE (2026-06-02). V2 (Qwen3-4B fresh-gen calib) finished 138 OPD steps mask-preserved → **MATH-500 51.0% greedy, +2.0pp** over pre-OPD 49.0%; Linear sparsity 64.00% preserved bit-exact through training. V1 (OpenThought3 cached calib) crashed at step 90 (transient Ray bug); 18 mid-evals show plateau 49-52% mean@4. Findings + scripts written to docs/results/compressed_opd.md, findings.md C6/P1.E. BTT path still in_progress separately (FSDP2, LR 1e-6, eval_c4_ppl.py untracked).
+- **Next:** (a) optional: rerun V1 OPD when GPU free to get a final-ckpt number; (b) BTT path C4 PPL gate + SFT → OPD.
 - **Open risks:** does the BTT-compressed 1.7B teacher retain enough signal to be a useful OPD reward model? PPL eval is the gate.
 
 ### P2 peft-opd
@@ -48,6 +48,7 @@ Ongoing — this is a living knowledge system, not a finite task. No fixed end s
 3. **SimpleRL-Zoo MATH settings** are the canonical train/eval config all math OPD runs must match (P1, P2, and P3 when on math).
 4. **Trainset-name routing bug** (`math-500k` → silent DAPO fallback) — affects every `*.sh` that sets `TRAIN_DATASET_NAME=math-500k`.
 5. **Single-GPU OPD step timing** ~6 min/step, ~13h/run — budget all three projects' runs against this.
+6. **verl actor Adam silently re-densifies sparse student models** (P1; any project that trains on a structurally-zero init). Patch: `SPARSEGPT_PRESERVE_MASK=1` + `sparsity_mask.py` + post-step `reapply_masks` hook in `dp_actor._optimizer_step`. Without it the model becomes dense in 1 step; with it sparsity is bit-exact preserved through 138 steps.
 
 ## Key Questions
 1. Does the BTT-compressed teacher (P1) retain enough quality (C4 PPL) to give useful OPD rewards?

@@ -626,6 +626,16 @@ class DataParallelPPOActor(BasePPOActor):
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
+        # SparseGPT preservation: zero gradients at pre-pruned positions BEFORE
+        # clip + step. Without this, grad_norm reflects the dense grad (clipped
+        # too aggressively) and Adam moments accumulate at masked positions.
+        # No-op unless SPARSEGPT_PRESERVE_MASK=1 attached masks at model build.
+        try:
+            from verl.workers.sparsity_mask import mask_gradients as _mask_grads
+            _mask_grads(self.actor_module)
+        except ImportError:
+            pass
+
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         elif isinstance(self.actor_module, FSDPModule):
@@ -642,6 +652,14 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
         else:
             self.actor_optimizer.step()
+            # SparseGPT preservation: re-zero masked weights after Adam step.
+            # Belt-and-braces — even with mask_gradients zeroing grads, FSDP1
+            # reduce-scatter / FSDP2 all-gather can introduce float noise.
+            try:
+                from verl.workers.sparsity_mask import reapply_masks as _reapply
+                _reapply(self.actor_module)
+            except ImportError:
+                pass
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)

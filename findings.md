@@ -42,6 +42,13 @@
 - The `on_policy_distillation.sh` case only matches `gsm8k|math-500`; `math-500k` hits the `*)` default → trains on `datasets/dapo-math-17k.parquet`, evals AIME25/AMC23/AIME24. **So those "math" runs were NOT on MATH.**
 - **Fix:** add a `MATH)` branch (train=`datasets/train_data/math-lv3to5/train.parquet` per C3, val=`datasets/test_data/MATH-500/test.parquet`) and set `TRAIN_DATASET_NAME=MATH` in the wrappers. **VERIFY this is applied repo-wide before trusting any "math" result.**
 
+### C6. verl's actor Adam silently re-densifies sparse student models  (P1, any "train on pruned model" scenario)
+- verl's `dp_actor._optimizer_step` does plain Adam — no mask awareness. On a SparseGPT-pruned (or any structured-zero) student, every zero-valued weight gets a nonzero update in step 1 (∂L/∂W on a zero weight is generally nonzero; Adam moments amplify even a small grad), and the model effectively becomes dense by ~step 5.
+- **Empirically verified 2026-06-01:** dense V1 run hit mean@4=56% at step 5 (an unrealistic +11pp gain "for free") — but at that point it was a 4.02B dense model, not a 1.7B-effective sparse student.
+- **Patch:** `verl/verl/workers/sparsity_mask.py` + 1-line hooks in `verl/verl/workers/fsdp_workers.py` (`attach_masks` after HF load, before FSDP wrap) and `verl/verl/workers/actor/dp_actor.py::_optimizer_step` (`reapply_masks` after `actor_optimizer.step()`). Env-gated by `SPARSEGPT_PRESERVE_MASK=1` (default off — no-op for other code paths).
+- **Caveat:** the companion `mask_gradients` call is a no-op under FSDP1/FSDP2 (the `Linear.weight` is a non-leaf tensor; the FlatParameter / DTensor is the leaf with the grad). The **post-step `reapply_masks` is the load-bearing fix** — it operates on `weight.data` directly and works under both FSDP versions. Side effect: grad_norm metric reflects the dense grad (slightly over-clipped), but correctness is preserved.
+- Verified bit-exact 64.00% Linear sparsity preserved through 138 OPD steps on the V2 student (final ckpt: 2.325B zeros / 3.633B Linear params, matching the snapshot).
+
 ### C5. Single-GPU OPD step timing (budget all runs against this)  (all)
 - Measured on free H100 NVL (95GB), Qwen3-1.7B actor + Qwen3-4B teacher, MATH lv3-5, MAX_RESP_LENGTH=3072, N_RESPONSES=8, MINI_BATCH_SIZE=64, gpu_mem_util 0.55:
 - `timing_s/step` ≈ **355–390s (~6 min/step)** → 138 steps ≈ **13–14h/run**.
@@ -71,6 +78,19 @@
 - **/data is 95–96% full (≈1.3T free of 28T)** — fine for 28GB but watch headroom.
 - **DONE 2026-05-31:** full 1.2M downloaded (120 shards, 27GB at `/data/yequan/datasets/OpenThoughts3-1.2M/data/`), filtered → **`/data/yequan/datasets/OpenThoughts3-1.2M-math.parquet`** = **850,000 math rows**, 130MB, 5 cols (prompt/data_source/ability/reward_model/extra_info). ground_truth (\boxed{}) on 321k/850k. Validated: `apply_chat_template` with local Qwen3-4B tokenizer works; 0 malformed in 5k sample.
 - **To run the README rollout, point `--input-parquet` at the ABSOLUTE path** `/data/yequan/datasets/OpenThoughts3-1.2M-math.parquet` (README uses the repo-relative `datasets/OpenThoughts3-1.2M-math.parquet`, which does NOT exist — the prepared file is under /data per user request). Note `vllm_rollout.py` ignores ground_truth/reward_model; only `prompt` is used.
+
+### P1.E — SparseGPT V1/V2 + OPD with mask preservation  (2026-06-02)
+- **Goal:** compress Qwen3-4B → 1.7B with SparseGPT under two calibration data variants (V1 = cached OpenThought3 dataset responses; V2 = fresh Qwen3-4B teacher generations at OPD-rollout settings T=0.6/top_p=1.0/max=3072), then OPD with original Qwen3-4B teacher + 1.7B sparse student.
+- **Pre-OPD:** V1 MATH-500 = 45.0% / C4 PPL 82.05; V2 = **49.0%** / C4 PPL 82.69 (V2 +4pp from matched-distribution calib).
+- **Mask preservation discovered mid-run:** see C6. Restart with `SPARSEGPT_PRESERVE_MASK=1`.
+- **Post-OPD (V2 only — V1 crashed at step 90, no ckpt):** V2 final ckpt = **MATH-500 51.0% greedy (+2.0pp)**, C4 PPL 82.67 (unchanged), Linear sparsity 64.00% preserved bit-exact.
+- **Saved students** (HF-format, drop-in for verl `model.path` or any HF loader):
+  - `/data/yequan/compressed_opd_v2/students/sparsegpt_v1_openthought3` (pre-OPD V1)
+  - `/data/yequan/compressed_opd_v2/students/sparsegpt_v2_qwen3_4b_gen` (pre-OPD V2)
+  - `/data/yequan/compressed_opd_v2/students/sparsegpt_v2_qwen3_4b_gen_OPD_step138` (post-OPD V2)
+- **V2 calibration jsonl:** `/data/yequan/compressed_opd_v2/calib/v2_qwen3_4b_gen.jsonl` (128 rows).
+- Scripts: `scripts/opd/math/compressed_opd/{build_sparsegpt_student,generate_v2_calib,eval_opd_ckpt}.py` + `opd_sparsegpt.sh`. Patch: `verl/verl/workers/sparsity_mask.py`.
+- Full write-up appended to `docs/results/compressed_opd.md` (section: "OPD on the SparseGPT-compressed student").
 
 ## P2 — peft-opd findings
 <!-- OPD under LoRA / QLoRA / FurA(BlockTT) / qFurA vs full FT. -->

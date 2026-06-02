@@ -18,9 +18,18 @@
 - SparseGPT OOM fix: --sparsegpt-mem-gb (default 8) chunks Hessian groups → low peak mem on shared GPU.
 - 6/6 tests pass.
 
-## Next
-- P4 RUN FULL MATRIX (baseline + 2 calib × 3 strategies, C4 PPL + MATH-500 acc).
-- P3 driver `scripts/opd/math/compressed_opd/compare_compression.py`:
+## DONE — full matrix complete (results/RESULTS.md, compare_final.json)
+| strategy | calib | C4 PPL | MATH-500 |
+|---|---|---|---|
+| uncompressed | — | 19.9 | 80.5% |
+| SparseGPT 64% | c4 | 34.5 | 0.0% (repetition collapse) |
+| SparseGPT 64% | openthought3 | 82.0 | 45.0% |
+| SVD_V2 all | c4 / ot3 | 4443 / 33464 | 0.0% / 0.0% |
+| SVD_V2 attn+Nystrom mlp | c4 / ot3 | 915 / 4980 | 0.0% / 0.0% |
+Key: calibration domain decides SparseGPT (math-calib survives, web-calib dies);
+one-shot SVD@0.36 needs recovery FT. Memory note saved.
+
+## (historical) driver `scripts/opd/math/compressed_opd/compare_compression.py`:
   - load Qwen/Qwen3-4B (non-thinking) base; for each (calib in {c4, openthought3}) ×
     (strategy in {sparsegpt~64%, svd_llm_v2 all, mixed svd_llm_v2 attn + nystrom mlp}):
     compress a fresh copy, eval C4 PPL (ppl_eval) + MATH-500 acc (HF generate + ttrl grader).

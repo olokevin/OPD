@@ -410,6 +410,17 @@ class WorkerExtension:
             torch.cuda.synchronize()
         return True
 
+    def layer_weight_norm(self, layer_name):
+        """Return the live ||W||_2 of the (possibly wrapped) layer's weight.
+
+        Used by the trainer to verify the NP update actually mutated the weight
+        in-place and that the SAME tensor is what the next vLLM decode reads
+        (we read wrapped.wrapped.weight -- the real nn.Linear param the forward uses).
+        """
+        import torch
+        w = self.np_modules[layer_name].wrapped.weight
+        return float(w.detach().float().norm().item())
+
     def run_capture_pass(self, prompt_token_ids, clean_tokens, layer_name, np_cfg):
         """Teacher-forced re-run of the committed sequence to capture x_t per response
         step. Returns list[Tensor[d_in]] (CPU), one per token in clean_tokens.
