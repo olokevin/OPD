@@ -214,3 +214,95 @@ PASS
 - Plan: `docs/superpowers/plans/2026-05-28-np-trainer.md` (16 tasks, all complete on `feat/np-trainer`)
 - ES sibling: `docs/wiki/ZO.md` §2
 - Paper: `arXiv:2604.13016` (token-level OPD theory)
+
+---
+
+## 8. V1 implementation, why it's slow, and the V2 plan (one wide forward per token)
+
+> **TL;DR.** V1 works and trains cleanly, but the student rollout is the bottleneck:
+> per decode token it runs a `(1+N)`-row **eager** forward (no CUDA graph), and it runs
+> that **once per prompt, serially** across the batch. Profiling shows **~99% of the time
+> is this forward**. V2 must (a) CUDA-graph the step forward and (b) batch **all prompts'
+> `(1+N)` rows into ONE wide forward per token** instead of `batch_size` sequential ones.
+
+### 8.1 What V1 actually does (per training step)
+
+For each active layer, for each of `batch_size` prompts **serially**:
+1. `run_np_decode` (one Ray RPC per *sequence*) hand-drives the decode token-by-token:
+   each token = a `(1+N)`-row forward (1 clean + `n_sample` perturbed), all rows querying
+   the same next position against the shared committed KV, perturbed rows write `slot=-1`.
+   Logits + `captured_u` + `captured_x` are saved per step; only the clean token advances.
+2. ONE teacher prefill over `prompt+clean_tokens` → per-position top-k logprobs (§3.2).
+3. `assemble_and_apply` builds δW from the per-token `(L_q, L_clean, u, x)` and applies it.
+
+Two structural facts make V1 correct but slow:
+- The perturbation is injected by an **eager Python forward hook** on `PerturbedLinear`
+  (`enforce_eager=True` is mandatory, so CUDA graphs are off for the whole forward).
+- The `(1+N)` rows are **one sequence with N throwaway twins** sharing the parent's KV —
+  not expressible to vLLM's scheduler, so the decode loop + `attn_metadata` are hand-built
+  (`np_worker_extension._np_step_forward` / `_np_build_attn_metadata`), bypassing the scheduler.
+
+### 8.2 V1.1 fix already shipped (commit `21534aa`, branch `np-fold-xcapture`)
+
+`x_t` is now captured **inside the same perturbed forward** (`PerturbedLinear` records the
+clean row's input in `perturb` mode), removing a redundant **second full-sequence re-decode**
+(`run_capture_pass`/`_capture_x`, now deleted). Student decode passes/seq: **2 → 1**.
+Validated end-to-end: update lands (chg≈16%, sync_ok=1), held-out KL 0.284→0.264.
+Estimator also switched to `(L_q−mean)/σ` (dropped the `1/std` that self-amplified to
+divergence; see `docs/results/zo_opd.md` §5–6).
+
+### 8.3 Why it's still slow — the profile (2026-06-03)
+
+Per-token timing inside `_np_step_forward` (`torch.cuda.synchronize` around each phase):
+
+```
+meta (attn_metadata build) = 0.31 ms/tok   (~1%)
+fwd  (the 1+N=65-row forward) = 13–20 ms/tok (~99%)
+```
+
+So the cost is the **eager 65-row forward itself**, run ~1024×/sequence × `batch_size`
+sequences. It is **not** the metadata build, **not** per-token Ray RPC (one RPC per
+sequence), **not** OMP thread oversubscription (thread caps measured ~0% gain).
+Two earlier hypotheses — caching `attn_metadata`, capping OMP threads — were measured and
+**abandoned** (≤2% each). Reference: full default config (BATCH 64 × 1024 tok + 200-prompt
+eval) ≈ **72 min/step**; that is dominated by this forward.
+
+### 8.4 V2 = CUDA-graphed, ONE wide forward per token across all prompts (required)
+
+The forward is 99% of the cost, so V2 attacks the forward directly on two axes:
+
+1. **Batch across prompts.** Today each step does `batch_size` sequential
+   `(1+N)`-row forwards. V2 packs **all active prompts** into one forward per token:
+   rows = `Σ_p (1 + N)` (or a shared clean + per-prompt perturbations), each prompt
+   attending its own shared-prefix KV. One wide launch replaces `batch_size` tiny ones —
+   far better GPU utilization at the same total FLOPs.
+2. **CUDA-graph the step forward.** Remove the per-token eager dispatch overhead by
+   capturing the step forward as a CUDA graph. The blocker is the eager perturbation hook
+   (`PerturbedLinear.forward` adds `σ·u` in Python) — V2 must express the perturbation as a
+   **graph-capturable op**: e.g. write the regenerated `u` (or its seeds→noise) into a
+   fixed pre-allocated buffer that the captured graph reads, with the rest of the forward
+   static (fixed row count, fixed positions slot, ragged handled via a fixed max width + mask).
+
+**Open design questions for the V2 session (start here):**
+- **Ragged batching:** prompts have different lengths and finish at different steps. Fixed
+  max-width graph + padding/masking, or bucket by length? How to retire finished prompts
+  without recapturing the graph.
+- **Graph capture vs. the hook:** what exactly is static (row layout, slot_mapping pattern,
+  block tables) vs. per-token dynamic (the `u` buffer, `q_pos`/seq_len, input ids). Likely a
+  single graph parameterized by input buffers updated in-place each token.
+- **KV/slot bookkeeping for the packed batch:** per-prompt `block_ids`, clean-row slot per
+  prompt, `-1` pads for all perturbed rows, built once and advanced cheaply.
+- **Stop handling:** EOS per prompt with a fixed-shape graph (mask + early-drop vs. run to
+  max and trim).
+- **Memory:** `Σ_p (1+N)` rows × hidden must fit alongside both vLLM engines on one GPU.
+
+**Invariants V2 must preserve (don't regress):**
+- σ=0 byte-equivalence vs stock greedy decode (§5 gate).
+- cos(NP δW, autograd) ≈ +0.41 at N=64 (§6).
+- Per-token `(L_q, L_clean, u, x)` semantics and the `(L_q−mean)/σ` estimator unchanged —
+  V2 is a **performance rewrite of the decode driver only**, not a math change.
+
+**Entry points for V2 work:** `np_worker_extension.py` →
+`run_np_decode` / `_np_step_forward` / `_np_build_attn_metadata` (the decode driver);
+`ray_trainer.py` `fit()` lines ~513–542 (the serial per-prompt loop to be replaced by one
+packed call). Keep `PerturbedLinear` semantics; change *how* the rows are assembled and run.

@@ -15,6 +15,36 @@ The codebase is **two vendored frameworks plus thin glue**:
 
 The two training frameworks use **different conda envs** (`verl` py3.12 vs `sft` py3.11) and should not share dependencies.
 
+## Knowledge system (`docs/`)
+
+`docs/` is an **LLM-maintained wiki** following the pattern in `docs/llm-wiki.md`: a persistent, interlinked markdown knowledge base that you (Claude) own and keep current, sitting between the raw repo/papers and any question asked about this project. Read `docs/llm-wiki.md` once for the philosophy; this section is the operational schema.
+
+**Layout:**
+
+| Dir | What lives there | Who owns it |
+|---|---|---|
+| `docs/index.md` | **Content catalog** — every wiki/results/aris/plans page with a one-line summary. **Read this first** when answering a question or deciding where new knowledge goes. | LLM (update every ingest) |
+| `docs/log.md` | **Chronological log** — append-only `## [YYYY-MM-DD] <op> \| <title>` entries for every ingest/query/lint. `grep '^## \[' docs/log.md \| tail -5` shows recent activity. | LLM (append every op) |
+| `docs/wiki/` | **Design docs** — how a subsystem works (architecture, invariants, knobs, file map). One page per subsystem (`compressed_opd`, `ZO`, `zo_np_trainer`). Stable; revise when the design changes. | LLM |
+| `docs/results/` | **Experiments & mid-conclusions** — what we ran and what we learned, per thread (`compressed_opd`, `zo_opd`, `fura_opd`). Append-mostly; each session adds a dated block. | LLM |
+| `docs/aris/{project_name}/` | **ARIS research threads** — agent-pipeline outputs (see subsection below). | ARIS skills + LLM |
+| `docs/plans/` | **Implementation specs** — step-by-step build plans for trainer changes (companion to wiki design docs). | LLM |
+| `docs/papers/` | **Reference PDFs** — read-only source of truth. Cite by filename; **never edit**. | human (curates) |
+
+**Workflow (the three operations from `docs/llm-wiki.md`):**
+
+- **Ingest** — when new findings, a finished experiment, or a design change land, file them into the right `wiki/` or `results/` page (create the page if missing), add/update its row in `docs/index.md`, link related pages with relative markdown links, and append one `docs/log.md` line. A single ingest may touch several pages — keep cross-references consistent.
+- **Query** — to answer a question about this project, read `docs/index.md` first to locate relevant pages, drill into them, then synthesize with citations to `docs/...` paths. **File substantial answers back** as a new/updated page (a comparison, an analysis, a discovered connection) so explorations compound instead of vanishing into chat history.
+- **Lint** — when asked to health-check, scan for contradictions between pages, stale claims newer results superseded, orphan pages with no inbound links, concepts that deserve their own page, and missing cross-references; report findings and propose fixes.
+
+**Conventions:** start each page with an H1 and a one-line/blockquote summary; prefer relative links between docs (`results/zo_opd.md`); keep `docs/index.md` and `docs/log.md` in sync with every change; convert relative dates to absolute (today is in the session context). The wiki is just a git repo of markdown — commit doc changes alongside the work they describe.
+
+This knowledge base and the auto-memory at `~/.claude/.../memory/` are complementary: **memory** holds short cross-session facts/preferences/gotchas; the **wiki** holds the durable, interlinked project knowledge. When a memory and a wiki page overlap, the wiki page is the fuller source — point the memory at it.
+
+### ARIS / agent-generated docs go under `docs/aris/{project_name}/`
+
+All docs produced by ARIS pipelines (idea-discovery, research-refine, experiment-plan, reviews, etc.) — `IDEA_REPORT.md`, `FINAL_PROPOSAL.md`, `EXPERIMENT_PLAN.md`, `DIAGNOSIS.md`, `MANIFEST.md`, and friends — live in **`docs/aris/{project_name}/`**, one subfolder per research thread (e.g. `docs/aris/reason_aware_compress/`). Do **not** scatter them at the repo root or in skill-default dirs like `idea-stage/` / `refine-logs/`; point those skills' output dirs at `docs/aris/{project_name}/` (or move their output there when done). `{project_name}` is a short kebab/snake-case slug for the thread. When an ARIS thread produces a durable result, also catalog its key pages in `docs/index.md` and log the ingest.
+
 ### `src/compress` is a git submodule — commit it separately
 
 `src/compress` is a nested git repo wired in as a submodule (`.gitmodules` → `git@github.com:olokevin/compress.git`). The rest of `src/` is gitignored; only the `src/compress` gitlink is tracked. This changes the commit workflow:
@@ -112,24 +142,23 @@ Generations land as JSONL alongside `grading_results.json`. Math benchmarks unde
 The OPD-specific logic is a **set of patches to verl**, not a separate package. When investigating or modifying OPD behavior, start here:
 
 - `verl/verl/trainer/ppo/core_algos.py` — registers the custom advantage estimators via `@register_adv_est(...)`:
+
   - `token_reward_direct` — pure token-level teacher-log-prob reward (the "OPD" estimator).
   - `token_reward_direct_plus_grpo` — combines token-level dense reward with GRPO outcome reward; weighted by `GRPO_OUTCOME_WEIGHT`.
   - `token_grpo` — token-level variant of GRPO.
   - `grpo` — stock GRPO, used by `grpo.sh`.
-  `ADV_ESTIMATOR` env var → `algorithm.adv_estimator` Hydra key picks one of these.
-
+    `ADV_ESTIMATOR` env var → `algorithm.adv_estimator` Hydra key picks one of these.
 - `verl/verl/workers/config/rollout.py`, `verl/verl/workers/fsdp_workers.py`, `verl/verl/workers/actor/dp_actor.py` — plumbing for the OPD-specific rollout/actor knobs `log_prob_top_k`, `top_k_strategy`, `reward_weight_mode`, `teacher_temperature`. These are passed as `+actor_rollout_ref.rollout.<key>=...` overrides in `on_policy_distillation.sh`.
-
 - `verl/verl/utils/reward_score/ttrl_math/` — custom math reward function (`reward_func` from `__init__.py`), pulled in via `custom_reward_function.path` / `.name`. Uses `math_normalize.py` + `grader.py` for answer extraction and equivalence checking.
 
 Key OPD knobs (full table in `README.md`):
 
-| Env var | Meaning |
-|---|---|
-| `LOG_PROB_TOP_K` | Top-K size for teacher-reward token set; `0` falls back to sampled-token OPD |
-| `TOP_K_STRATEGY` | `only_stu` / `only_tch` / `intersection` / `union` / `union-intersection` — how to pick the K tokens that get the teacher's log-prob |
-| `REWARD_WEIGHT_MODE` | `student_p` / `teacher_p` / `none` — how token rewards are reweighted |
-| `TEACHER_TEMPERATURE` | Temperature applied to teacher logits before computing log-probs |
+| Env var                 | Meaning                                                                                                                                         |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOG_PROB_TOP_K`      | Top-K size for teacher-reward token set;`0` falls back to sampled-token OPD                                                                   |
+| `TOP_K_STRATEGY`      | `only_stu` / `only_tch` / `intersection` / `union` / `union-intersection` — how to pick the K tokens that get the teacher's log-prob |
+| `REWARD_WEIGHT_MODE`  | `student_p` / `teacher_p` / `none` — how token rewards are reweighted                                                                    |
+| `TEACHER_TEMPERATURE` | Temperature applied to teacher logits before computing log-probs                                                                                |
 
 The teacher model is wired through verl's `reward_model.*` config — i.e. the "reward model" slot is repurposed to hold the **teacher LLM**, not a scalar RM. `reward_model.model.path=$REWARD_MODEL_PATH` in the launch scripts.
 
@@ -147,3 +176,75 @@ When adding a new train set, append its path to `TRAIN_DATASET` and a short iden
 - `lllyx/Qwen3-4B-Base-GRPO` — zero-RL student from `Qwen3-4B-Base` (produced by `grpo.sh`).
 
 The HF collection lives at `huggingface.co/collections/lllyx/rethinking-opd`.
+
+
+# Claude Code Guidelines
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes

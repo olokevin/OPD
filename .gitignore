@@ -18,7 +18,6 @@ logs/
 
 outputs/
 ref/
-src/
 *.whl
 
 output/

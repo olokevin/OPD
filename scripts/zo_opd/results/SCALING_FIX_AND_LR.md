@@ -139,4 +139,136 @@ no-ops (`weight_delta=0`), lr=1e-3 barely lands (weight_delta 7.6e-6). So the ef
 **~3e-3 … 3e-2**, the same regime as the previous scaling — the `1/std` inflation does not translate
 into a proportionally smaller usable LR because the bf16 floor is set by per-element magnitude, not norm.
 
-Round-2 sweep (wandb project `zo_opd_qwen4b_1p7b`): **3e-3 / 1e-2 / 3e-2**.
+### Round-2 result — `/std/σ` DIVERGES at every LR (wandb `zo_opd_qwen4b_1p7b`)
+Sweep 3e-3 / 1e-2 / 3e-2, held-out KL (lower=better; baseline ≈0.32):
+
+| LR | step 0 | step 8 | step 16 | verdict | wandb run |
+|---|---|---|---|---|---|
+| 3e-3 | 0.322 | 0.348 | 0.336 | rising — diverging slowly | kkov5iyk |
+| 1e-2 | 0.320 | 0.348 | 0.386 | rising — diverging | a4jmryc6 |
+| 3e-2 | 0.319 | 0.335 | **1.762** | **blown up (5.5×)** | h4hk3tex |
+
+The `dW_norm` **explodes monotonically for all three LRs** (57 → 768–884 by step 16) at nearly the
+same early rate — divergence is driven by the scaling, not the step size. Root cause: `1/std`
+amplifies low-signal tokens (perturbation barely moves their loss → `std → 0` → `1/std → ∞`); the
+`+1e-8` std floor doesn't bound it, so updates accumulate runaway noise. There is **no working LR**:
+below ~3e-3 the update is a bf16 no-op (weight_delta 7.6e-6), at ≥3e-3 it diverges — the window is empty.
+
+### Verdict: the `(L_q−mean)/σ` form (round 1, §4) is the one that trains
+Round-1 grpo `(L_q−mean)/σ` at **lr=3e-2** decreased held-out KL **monotonically** (0.335→0.322→0.319).
+Adding `1/std` back (this round) makes it diverge. **Recommendation: keep grpo = `(L_q−mean)/σ`
+(drop the `/std`), lr=3e-2.** The `/std` z-score is appropriate for outcome-level GRPO advantages but
+harmful as a *per-token* weight on a finite-difference gradient — it discards the token-importance
+signal and amplifies noise. If `/std` is required, it needs a hard floor (e.g. `std.clamp_min(0.05)`)
+or global (not per-token) standardization — untested here.
+
+Update-verification held throughout: `weight_delta>0`, `no-op=0`, `weight_sync_ok=1.0` every step for
+all three — the update mechanism is sound; the *scaling* is what diverges. Raw data:
+`scripts/zo_opd/results/lr_sweep_round2_stdsigma.txt`.
+
+### Round-3: scale lr down by σ=0.01 (user's correction) — the bf16 floor closes the window
+The user's point: with `/σ = /0.01 = ×100`, the lr should be `×0.01` to keep the effective step correct.
+That maps round-2's 3e-3/1e-2/3e-2 → **3e-5/1e-4/3e-4**. Mini-sweep result:
+
+| lr | weight_delta (first 4 steps) | outcome |
+|---|---|---|
+| 3e-5 | 0,0,0,0 | **bf16 no-op — never trains** |
+| 1e-4 | 0,0,0,7.6e-6 | essentially a no-op |
+| 3e-4 | 0,0,0 | **bf16 no-op** |
+
+So the σ-scaled LRs are mathematically correct for the *continuous* update but fall **below the bf16
+rounding floor** → the weight never changes → the `1/std`-shrinking feedback that drives `/std/σ` never
+starts. Combined with round-2 (3e-3 lands but slowly diverges; ≥1e-2 blows up), the **viable `/std/σ`
+window is a narrow sliver ~1e-3…2e-3** — just above the bf16 floor and just below divergence onset.
+
+### CORRECTION: my "/std/σ diverges at every LR" was WRONG — three measurement errors
+Three mistakes invalidated the earlier `/std/σ` verdict:
+
+0. **Mistook the en_layerwise round-robin for divergence.** Each step perturbs a DIFFERENT layer
+   (`en_layerwise_perturbation=true` → layer 0,1,2,3,… in turn), and each layer has its own natural δW
+   norm (layer0≈28, layer1≈38, layer2≈37, layer3≈46, layer4≈51…). The "dW growing 28→66" I read as a
+   runaway is just the round-robin walking into deeper layers with larger δW. PROOF: the dW sequence is
+   **identical at lr=2e-5 and lr=2e-3** (`28,38,37,46,51…`) — a 100× LR change can't both diverge and not,
+   so the sequence is layer-driven, not training-driven. Compare dW only at the SAME layer across cycles.
+
+
+1. **Wrong LR scale.** The `/std/σ` per-token *scale* is `1/σ = 100×` larger than `/std`, so the proper
+   LR is `÷100`: the analog of the good `/std @ 2e-3` is `/std/σ @ **2e-5**`, not 2e-3. The runs I called
+   "diverging" (1e-3/2e-3/.../3e-2) were applying a **100–1500× too-large** update — of course they blew up.
+   That is excessive-LR divergence, *not* an intrinsic `/std/σ` instability.
+2. **Wrong "no-op" metric.** I read `weight_delta = |‖W‖after − ‖W‖before|` (a NORM difference) and called
+   `≈0` a no-op. But the norm difference **badly under-reports element changes** — they partially cancel.
+   Switched the verification to `train/weight_changed_frac` (fraction of weight ELEMENTS that flip in bf16):
+   `apply_node_update` now returns it (`np_worker_extension.py:last_changed_frac`).
+
+### Corrected runs at lr=2e-5 / 6e-5 (wandb `a1rmd3vt` / `l0gsgnc6`)
+At step 0 both **land a real update, no no-op** (and dW_norm 27.9, bounded):
+
+| lr | weight_changed_frac (step 0) | dW_norm | baseline KL |
+|---|---|---|---|
+| 2e-5 | 0.10% of elements | 27.9 | 0.332 |
+| 6e-5 | 0.29% of elements | 27.9 | 0.303 |
+
+**Key reconciliation:** the *assembled* δW norm is ≈28 for the `/std`, `/σ`, AND `/std/σ` forms alike,
+because `assemble_layer_delta` with `token_agg=mean` normalizes the per-token scale away — the 100×
+per-token difference does **not** propagate to the assembled δW that updates the weight. So the
+bf16-effective LR is governed by `dW_norm≈28–57` and is similar across all three scalings. lr=2e-5 lands a
+*small* (~0.1%/step) valid update; the `/σ`-form's 3e-2 (dW~57, ~30%/step) trains faster simply because
+it is a larger step on the same-scale δW — the scaling choice mostly shifts which LR you pick, not whether
+it works. (KL/dW trend over the run is being collected; see wandb.)
+
+### Meaningful-update sweep (2e-4 / 6e-4 / 2e-3, batch=4 fast, wandb `ul4tt5n3`/`pz36he7i`/`6bjqk1a7`)
+LR→update-fraction on the real δW scale (dW≈40): lr=2e-4→3%/step, 6e-4→9–30%, 2e-3→23–57%. Held-out KL:
+
+| lr | KL step 0 | step 5 | step 10 | chg% (0→10) |
+|---|---|---|---|---|
+| 2e-4 | 0.3263 | **0.3148** ↓ | 0.3349 | 2.6→12% |
+| 6e-4 | 0.3166 | **0.3064** ↓ | 0.3449 | 7.5→31% |
+| 2e-3 | 0.3220 | 0.3239 | 0.3236 | 22→57% |
+
+**All LRs reduce KL by step 5 (`/std/σ` DOES train), then bounce at step 10** — the bounce is
+**batch=4 gradient noise** (only 4 prompts/step → high-variance δW that overshoots), not LR instability.
+The clean monotone `/σ`@3e-2 result (§4) used batch=8; the same descent needs batch ≥ 8 here too.
+
+## 8. FINAL bottom line
+- **`/std/σ` is trainable** — the user was right; my "no working LR / diverges" was wrong on THREE counts
+  (100× too-high LR, a norm-based no-op test that under-reports element changes, and reading the
+  en_layerwise round-robin's per-layer dW as a runaway). All three are fixed; verification now tracks
+  `train/weight_changed_frac`.
+- **Proper `/std/σ` LR ≈ 2e-4 – 6e-4** for a healthy ~3–30 %/step update (lr=2e-5 also works but is
+  ~0.1 %/step — valid but slow; lr ≥ 2e-3 over-flips ~50 %+/step and the KL stops improving).
+- **The assembled δW norm (~28–57) is invariant across `/std`, `/σ`, `/std/σ`** (token_agg=mean cancels
+  the per-token scale), so the bf16-effective LR is the same across forms — the scaling choice shifts
+  *which* LR you pick, not whether it trains.
+- **Held-out KL probe noise (~±0.03) dominates the per-step signal over <20 steps — LRs cannot be ranked
+  by it at this horizon.** The batch=8 runs oscillate inside a 0.31–0.35 band (= the noise amplitude):
+
+  | lr (batch=8) | step 0 | 5 | 10 | 15 | wandb |
+  |---|---|---|---|---|---|
+  | 2e-4 | 0.306 | 0.348 | 0.316 | 0.342 | `mt9un3ge` |
+  | 6e-4 | 0.336 | 0.322 | 0.318 | 0.335 | `bkbs4fms` |
+
+  Both wander, neither sustains a trend — `6e-4`'s step-10 dip (which I briefly called "the pick") bounced
+  back at step 15, i.e. it was noise. **Honest status: the KL signal is too noisy to choose an LR or even
+  confirm sustained descent here.** The *update* signal IS clean (chg% rises monotonically, no no-ops), so
+  the estimator + LR-scale are right; what's missing is a low-variance loss probe.
+
+### Status: proper `/std/σ` LR band = **2e-4 – 6e-4** (exact value not resolvable with this probe)
+What's solid: `/std/σ` lands valid updates in this band (3–30 %/step). What's NOT resolvable yet: which
+LR in the band trains best, because the greedy-decode KL probe has ~±0.03 run/step variance that swamps
+the signal over a 16-step run. To pick a final LR, EITHER (a) run ~100–200 steps at one LR so cumulative
+KL movement exceeds the noise, OR (b) replace the probe with a **deterministic teacher-forced NLL/KL on a
+larger fixed set** (no NP-decode nondeterminism). Suggested starting LR for a long run: **6e-4** (mid-band,
+~22 %/step), batch ≥ 8:
+```bash
+CUDA_VISIBLE_DEVICES=2 LR=6e-4 GRAD_ESTIMATE_SAMPLE=grpo BATCH_SIZE=8 N_SAMPLE=64 \
+  N_ROLLOUT=1 NUM_ITERATIONS=200 PROJECT_NAME=zo_opd_qwen4b_1p7b NP_LOGGER='["console","wandb"]' \
+  bash scripts/zo_opd/zo_np_train.sh
+```
+- **Cleanest demonstrated curve** remains `(L_q−mean)/σ` @ lr=3e-2 (§4: KL 0.335→0.322→0.319 monotone) —
+  its larger per-step effect sits above the probe noise. If a clean training curve matters more than the
+  exact scaling, that is the safer choice.
+
+All wandb runs in project **zo_opd_qwen4b_1p7b**:
+`(L_q−mean)/σ`: a4hk3tex(3e-2) etc. · `/std/σ`: a1rmd3vt(2e-5), l0gsgnc6(6e-5), ul4tt5n3(2e-4),
+pz36he7i(6e-4), 6bjqk1a7(2e-3), mt9un3ge(2e-4 b8), bkbs4fms(6e-4 b8).

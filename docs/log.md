@@ -1,0 +1,64 @@
+# Knowledge-base log
+
+Chronological, append-only record of knowledge-base activity: ingests, queries, lint passes.
+Companion to `index.md` (content catalog). See `CLAUDE.md` → **Knowledge system** for conventions.
+
+Entry format — one `##` header per event, so `grep '^## \[' log.md | tail -5` lists recent activity:
+
+```
+## [YYYY-MM-DD] <ingest|query|lint|design> | <short title>
+- what changed, which pages touched
+```
+
+---
+
+## [2026-05-26] design | verl + LlamaFactory PEFT (BlockTT/SVD/LoRA/QLoRA) specs
+- Filed design specs and implementation plans for integrating BlockTT/SVD finetuning into both frameworks (seeds of the `compressed_opd` thread).
+
+## [2026-05-27] design | ZO trainers (ES vs NP)
+- `wiki/ZO.md`: documented the two zeroth-order OPD trainers — Weight Perturbation (ES) and Node Perturbation (NP) — and their variance/memory/update-shape tradeoffs.
+
+## [2026-05-28] design | NP trainer spec + implementation plan
+- Approved design spec and step-by-step plan for the node-perturbation trainer.
+
+## [2026-05-29] design | NP trainer pages
+- `wiki/zo_np_trainer.md` + `plans/np_trainer.md`: NP internals (1+n_sample-wide perturbed vLLM decode, teacher reverse-KL, rank-1 δW) and the build plan. Branch `feat/np-trainer`.
+
+## [2026-05-31] ingest | compressed_opd session summary + C4-PPL audit
+- `wiki/compressed_opd.md`: full state of BTT-compressed Qwen3-4B→1.7B OPD workflow — launchers, calib cache, FSDP2 + BlockTT fixes, C4-PPL audit exposing the BTT-LLM-V2 gap.
+
+## [2026-06-02] ingest | reason_aware_compress ARIS thread (v1→v2, TRACER)
+- `aris/reason_aware_compress/`: idea-discovery → literature survey → TRACER proposal → experiment plan. Block 0 SER probe **falsified** the central thesis (steering subspace is best-preserved, not eroded) → pivot to M1/rank-deficiency. See MANIFEST for v1/v2 provenance.
+
+## [2026-06-02] ingest | compressed_opd + zo_opd results
+- `results/compressed_opd.md`: post-train compression table (SparseGPT/SVD_V2/Nystrom × C4/OpenThought3 calib vs C4-PPL + MATH-500); SparseGPT+math-calib = 45%, structured/one-shot SVD collapse to 0%.
+- `results/zo_opd.md`: ZO-NP OPD results — NP-vs-BP gradient scaling, LR search, self-amplifying divergence.
+
+## [2026-06-02] lint | knowledge-base scaffolding
+- Created `index.md` (content catalog) and `log.md` (this file); added the **Knowledge system** section to `CLAUDE.md` pointing future sessions at the wiki/results/aris layout and the ingest/query/lint workflow.
+
+## [2026-06-02] ingest | reason_aware_compress — re-promote ideas A/B/D after TRACER falsification
+- TRACER C2 (steering-subspace) falsified at Block 0 → re-promoted A (low-rank + sparse residual, M1), B (sequential re-linearized / SRC, M3), D (OPD bi-whitened SVD, M2) from ablations to first-class one-shot method candidates.
+- **Added Blocks A/B/D** to `aris/reason_aware_compress/EXPERIMENT_PLAN.md` (self-contained, launch-now; run order D→A→B; gating note on the in-flight subsystem ablation). Code-grounded the design against `src/compress` (Explore inventory): D needs no new core code (`collect_both_covariances_from_loader_opd` + `objective="combined"`); A needs `hybrid/lr_sparse.py` (~100 LoC); B needs `sequential/relinearized.py` loop + per-layer cov hook. Noted Nystrom-MLP has no SVD tail (A/D "+Patch" apply to the attention path).
+- Synced `IDEA_CANDIDATES.md` (v3 table + new active thesis, TRACER kept as audit trail), `EXPERIMENT_TRACKER.md` (D/A/B PENDING rows; subsystem ablation attn-only=3% partial), `index.md` (plan/results/tracker/candidates rows).
+
+## [2026-06-02] ingest | reason_aware_compress — A/B/D operating-point + trace-diff refinements
+- Set A/B/D **starting retain ratio = 0.8** (keep 80%; 0.36 is the fully-collapsed floor that hides method differences) with a sweep-down to find each method's cliff; **skip the last decoder layer's linears** (`model.layers.{N-1}.*`). Verified `skip_layers` is leaf-name-only (`name.split('.')[-1]`), so the drivers must add a `name.startswith("model.layers.{N-1}.")` filter — documented in the plan, not assumed free.
+- Added **Block T (reasoning-trace diff)**: 5 fixed dense-correct MATH probes, greedy, dense-vs-compressed trace per method, first-divergence + failure-mode tagging → qualitative inspiration on *how* compression bends reasoning. Reuses `eval_math500`'s prompt-build+greedy-generate; new `trace_diff.py` returns per-example `(problem, text, correct)`, writes `trace_probe_set.json` + `TRACE_DIFF.md`.
+- Updated `EXPERIMENT_PLAN.md` (operating-point section, all D/A/B cells re-anchored to 0.8-first, Block T, run-order, files-to-touch) and `EXPERIMENT_TRACKER.md` (Block-T row + 0.8 note).
+
+## [2026-06-02] ingest | reason_aware_compress — prune plan: drop long-context + subsystem split, apply operating point to Blocks 0/1/2
+- **Removed Block 3** (long-context × compression / RULER / M5) entirely. **Removed the attn-only/mlp-only subsystem split** (and its gating logic) — SA-* marked DROPPED in tracker (attn-only=3% partial kept for record).
+- Applied the **0.8-first, last-layer-skipped** operating point to **Blocks 0, 1, 2**; **Block 2** retain sweep set to **{0.8, 0.7, 0.6, 0.5}**. Block 0 marked DONE (falsified), Block 1 demoted to its surviving C1/C3 cells (C2 dropped).
+- Rewrote the plan header (was TRACER/steering claim) to the **M1/M2/M3 method-search** framing; reframed Block 4 headline + Block 5 robustness around the D/A/B candidates; cleaned dangling refs (`--max-context`, RULER, "2,3 run in parallel", "1–4 positive"). Synced `index.md` plan row.
+
+## [2026-06-03] ingest | nystrom_combined: trainability-aware joint-kernel MLP compression
+- Implemented `nystrom_combined` in `src/compress` (joint fwd+bwd Nystrom kernel K_joint=C̄f^½·C̄b·C̄f^½+λI per docs/plans/nystrom_combined.md): structured/nystrom.py, calibration.py collector, compress_model routing, tests/test_nystrom_combined.py (6/6 pass).
+- Validation: Llama-3-8B 60% MLP retain, C4 calib (n=128) → C4 PPL dense 9.45 / nystrom 19.38 / nystrom_combined 20.94. **Similar** (+8%); joint kernel does not hurt forward PPL (expected — payoff is under FT/OPD recovery).
+- Filed: results/compressed_opd.md (dated block), index.md row, src/compress/README.md "Structured MLP Compression (Nystrom)" section.
+
+## [2026-06-03] ingest | reason_aware_compress — A/B/D + Block-T drivers implemented, GPT-5 reviewed, deploying
+experiment-bridge: implemented Block D (`bi_whitened_svd.py`, M2 — no new core), Block A (`hybrid/lr_sparse.py` + `lr_sparse_residual.py`, M1 — LR+sparse residual), Block B (`sequential/relinearized.py` + `sequential_src.py`, M3 — depth-ordered re-linearization), Block T (`trace_diff.py`), and shared `compress_common.py` (last-layer skip via `drop_protected_stats`, MATH+C4 eval contract). GPT-5-high review: 1 CRITICAL (D3/B2 degenerate when teacher==student → fail-fast guard added; **user chose to skip D3/B2 this pass**) + 2 MAJOR (A2 upstream fixed via refinement Hessian pass; response-only masking documented). Deploying teacher-free cells D0/D1/D2, A0/A1/A2, B0/B1 at retain 0.8, last decoder layer dense, MATH/100 + C4 PPL. GPU 5 externally occupied (vLLM) → running on free GPU 7. See `EXPERIMENT_TRACKER.md` § "A/B/D drivers".
+
+## [2026-06-03] ingest | zo_np_trainer §8 — V1 throughput profiled (forward=99%), V2 plan (one wide forward/token)
+Profiled the NP student decode: per token meta=0.31ms (1%), the (1+N)=65-row eager forward=13-20ms (99%); the bottleneck is the eager forward run ~1024x/seq x batch_size serial sequences, NOT metadata/RPC/threads (OMP caps & metadata-caching both measured <2%, abandoned). Shipped V1.1 (commit 21534aa, branch np-fold-xcapture): folded x_t capture into the perturbed forward, deleted the redundant 2nd full-sequence re-decode (run_capture_pass/_capture_x) -> 2->1 decode passes/seq; estimator now (L_q-mean)/sigma (dropped 1/std). Wrote docs/wiki/zo_np_trainer.md §8 = concise V1->V2 guide: V2 must CUDA-graph ONE wide forward per token across ALL prompts (rows = Σ_p(1+N)), with the perturbation expressed as a graph-capturable buffer op; lists open design Qs (ragged batching, graph capture vs eager hook, packed KV/slot bookkeeping, stop handling, memory) and invariants to preserve (σ=0 byte-equiv, cos≈+0.41, math unchanged). Entry points: np_worker_extension.{run_np_decode,_np_step_forward,_np_build_attn_metadata}, ray_trainer.fit ~513-542.
