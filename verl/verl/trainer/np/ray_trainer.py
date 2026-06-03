@@ -50,12 +50,12 @@ class RayNPTrainer:
     """Node-Perturbation trainer using Ray for distributed execution.
 
     Per step, for each active layer:
-      1. n_rollout x run_np_decode on engine 0 -> (clean_tokens, candidate_logits, captured_u).
+      1. n_rollout x run_np_decode on engine 0 -> (clean_tokens, candidate_logits,
+         captured_u, captured_x). u_t AND x_t are captured in the SAME perturbed
+         forward (no separate capture re-decode).
       2. For each rollout: score per-step candidate logits against the teacher
          (TeacherScorer) -> (L_q_per_step, L_clean_per_step).
-      3. _capture_x: re-run the clean sequence in mode=capture to extract per-step
-         x_t into the active layer.
-      4. assemble_and_apply: build δW from (L_q, L_clean, u, x) and apply locally
+      3. assemble_and_apply: build δW from (L_q, L_clean, u, x) and apply locally
          on engine 0; broadcast the updated layer to all other engines.
     """
 
@@ -420,21 +420,6 @@ class RayNPTrainer:
 
     # --------------------------------------------------------- capture helper
 
-    def _capture_x(self, engine, prompt_ids, clean_tokens, layer_name, np_cfg):
-        """Re-run the fixed [prompt + clean response] once with mode=capture.
-
-        Thin wrapper around the worker-extension method `run_capture_pass`. The
-        engine replays the committed sequence one step at a time using
-        `_np_step_forward(..., n_sample=0)` (single clean row, no perturbed
-        companions) -- on each step the PerturbedLinear hook records the clean
-        row's input x_t for `layer_name`. Returns list[Tensor[d_in]] (CPU),
-        aligned with `clean_tokens`.
-        """
-        return ray.get(engine.collective_rpc.remote(
-            "run_capture_pass",
-            args=(prompt_ids, clean_tokens, layer_name, np_cfg),
-        ))[0]
-
     # ---------------------------------------------------------------- fit
 
     def fit(self):
@@ -507,6 +492,7 @@ class RayNPTrainer:
                 matched, step, cfg.en_layerwise_perturbation)
             dw_norms: Dict[str, float] = {}
             w_deltas: Dict[str, float] = {}
+            w_changed_fracs: Dict[str, float] = {}
             w_sync_ok: Dict[str, bool] = {}
             L_clean_means: List[float] = []
             for layer_name in active:
@@ -535,10 +521,13 @@ class RayNPTrainer:
                         L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
                         L_q_steps += L_q
                         L_clean_steps += L_clean
+                        # u_t and x_t are both captured inside run_np_decode (same
+                        # forward) -- no separate capture re-decode (see deleted
+                        # _capture_x / run_capture_pass). Aligned per step.
                         u_steps += [out["captured_u"][t]
                                     for t in range(len(out["candidate_logits"]))]
-                        x_steps += self._capture_x(
-                            self.engines[0], pid, out["clean_tokens"], layer_name, np_cfg)
+                        x_steps += [out["captured_x"][t]
+                                    for t in range(len(out["candidate_logits"]))]
 
                 if not L_q_steps:
                     continue  # nothing decoded this step
@@ -561,10 +550,14 @@ class RayNPTrainer:
                                              args=(layer_name, 0))
                     for e in self.engines
                 ])
-                # Verify: (1) engine-0 weight actually moved by ~lr*||dW|| direction,
-                # (2) every other engine now holds the SAME weight (broadcast worked,
-                # so the next run_np_decode on any engine reads the updated param).
+                # Verify: (1) the update LANDED -- measured by the fraction of weight
+                # ELEMENTS that changed (the norm difference badly under-reports this;
+                # a 20%-of-elements bf16 update can show ~0 norm delta), (2) every
+                # other engine now holds the SAME weight (broadcast worked, so the
+                # next run_np_decode on any engine reads the updated param).
                 if verify_update:
+                    w_changed_fracs[layer_name] = ray.get(
+                        self.engines[0].collective_rpc.remote("last_changed_frac"))[0]
                     norms = ray.get([
                         e.collective_rpc.remote("layer_weight_norm", args=(layer_name,))
                         for e in self.engines
@@ -585,10 +578,14 @@ class RayNPTrainer:
                 train_metrics[f"train/dW_norm/{k}"] = v
             for k, v in w_deltas.items():
                 train_metrics[f"train/weight_delta/{k}"] = v
+            for k, v in w_changed_fracs.items():
+                train_metrics[f"train/weight_changed_frac/{k}"] = v
             if L_clean_means:
                 train_metrics["train/L_clean_mean"] = float(np.mean(L_clean_means))
             if w_deltas:
                 train_metrics["train/weight_delta_mean"] = float(np.mean(list(w_deltas.values())))
+            if w_changed_fracs:
+                train_metrics["train/weight_changed_frac_mean"] = float(np.mean(list(w_changed_fracs.values())))
             if w_sync_ok:
                 all_synced = all(w_sync_ok.values())
                 train_metrics["train/weight_sync_ok"] = 1.0 if all_synced else 0.0
@@ -596,16 +593,17 @@ class RayNPTrainer:
                     print(f"[WARN step {step}] weight broadcast OUT OF SYNC across "
                           f"engines for {[k for k,v in w_sync_ok.items() if not v]} "
                           f"-- next rollout would use stale weights!")
-            # Sanity: a nonzero dW with a ~zero weight_delta means the update didn't land.
+            # A nonzero dW that changed ZERO weight elements = a true bf16 no-op.
+            # (weight_delta/norm is NOT used here -- it under-reports element changes.)
             for k, v in dw_norms.items():
-                if verify_update and v > 0 and w_deltas.get(k, 0.0) == 0.0:
-                    print(f"[WARN step {step}] dW_norm={v:.3e} for {k} but weight "
-                          f"did not change -- apply_node_update is a no-op?")
+                if verify_update and v > 0 and w_changed_fracs.get(k, 0.0) == 0.0:
+                    print(f"[WARN step {step}] dW_norm={v:.3e} for {k} but 0% of "
+                          f"weight elements changed -- true bf16 no-op (lr too small).")
             logger.log(data=train_metrics, step=step)
 
             progress_bar.set_postfix({
                 "dW": f"{max(dw_norms.values()) if dw_norms else 0:.3e}",
-                "wΔ": f"{train_metrics.get('train/weight_delta_mean', 0.0):.2e}",
+                "chg%": f"{100*train_metrics.get('train/weight_changed_frac_mean', 0.0):.1f}",
                 "L_clean": f"{train_metrics.get('train/L_clean_mean', 0.0):.3f}",
                 "time": f"{iter_time:.2f}s",
             }, refresh=False)

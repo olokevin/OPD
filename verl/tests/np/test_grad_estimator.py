@@ -10,14 +10,14 @@ def test_sample_scale_average_is_forward_difference():
     assert torch.allclose(s, torch.tensor([(2.0 - 1.0) / 0.5, (4.0 - 1.0) / 0.5]))
 
 
-def test_sample_scale_grpo_is_zscore_over_sigma():
-    # grpo: ((L_q - mean_q) / std_q) / sigma -- BOTH the z-score (1/std) and the
-    # finite-difference scale (1/sigma).
+def test_sample_scale_grpo_is_mean_centered_over_sigma():
+    # grpo: (L_q - mean_q) / sigma -- mean-centered advantage on the finite-
+    # difference scale. The 1/std z-scoring is DROPPED (it self-amplifies into
+    # divergence on low-signal tokens; see docs/results/zo_opd.md sec 5-6).
     L_q = torch.tensor([1.0, 2.0, 3.0])
     sigma = 0.1
     s = sample_scale(L_q, L_clean=None, sigma=sigma, mode="grpo")
-    std = L_q.std(unbiased=False) + 1e-8
-    assert torch.allclose(s, ((L_q - L_q.mean()) / std) / sigma, atol=1e-5)
+    assert torch.allclose(s, (L_q - L_q.mean()) / sigma, atol=1e-5)
 
 
 def test_accumulate_delta_w_rank1_outer_product_shape_and_value():

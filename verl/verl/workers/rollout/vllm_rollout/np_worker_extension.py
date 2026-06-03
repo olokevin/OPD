@@ -74,6 +74,12 @@ class PerturbedLinear(torch.nn.Module):
             return out
 
         if mode == "perturb" and self.name == st["layer"]:
+            # Capture the clean row's input x_t HERE, in the same forward that does
+            # the perturbation -- this is the rank-1 update's x_t and is identical to
+            # what a separate capture pass would record, so the redundant re-decode in
+            # run_capture_pass is unnecessary. (x[0] is the clean row; perturbations
+            # are added to y, not x, so the clean input is unperturbed.)
+            st["captured_x"][self.name] = x[0].detach().clone()
             sigma = float(st["sigma"])
             if sigma == 0.0:
                 return out
@@ -143,7 +149,7 @@ class WorkerExtension:
         # Prefill prompt (clean, normal KV write).
         state = self._np_prefill(model, device, list(prompt_token_ids))
 
-        clean_tokens, candidate_logits, captured_u = [], [], {}
+        clean_tokens, candidate_logits, captured_u, captured_x = [], [], {}, {}
         for t in range(max_tokens):
             st.update({
                 "mode": "perturb",
@@ -155,12 +161,15 @@ class WorkerExtension:
                 "n_sample": n_sample,
                 "sample_method": np_cfg["sample_method"],
                 "n_clean_rows": 1,
-                "captured_x": st.get("captured_x", {}),
+                "captured_x": {},
                 "captured_u": {},
             })
             logits = self._np_step_forward(model, device, state, n_sample)
             candidate_logits.append(logits.detach().to("cpu"))
             captured_u[t] = st["captured_u"].get(layer_name)
+            # x_t for the rank-1 update, captured in the SAME forward (no 2nd pass).
+            cx = st["captured_x"].get(layer_name)
+            captured_x[t] = cx.detach().to("cpu") if cx is not None else None
             next_tok = self._np_sample_clean(logits[0], sampling_params)
             clean_tokens.append(int(next_tok))
             if self._np_is_eos(next_tok, sampling_params):
@@ -171,7 +180,7 @@ class WorkerExtension:
         return {
             "clean_tokens": clean_tokens,
             "candidate_logits": candidate_logits,
-            "captured_x": st.get("captured_x", {}),
+            "captured_x": captured_x,
             "captured_u": captured_u,
         }
 
@@ -381,10 +390,22 @@ class WorkerExtension:
         if update_clip is not None:
             dw = dw.clamp_(-float(update_clip), float(update_clip))
         with torch.no_grad():
+            before = weight.detach().clone()
             weight.add_(dw, alpha=-float(lr))
+            # Fraction of weight ELEMENTS that actually changed in bf16. This is the
+            # true "did the update land" signal -- ||W||-norm-difference badly
+            # under-reports it (elementwise changes partially cancel in the norm),
+            # so a 20%-of-elements update can show ~0 norm delta and look like a
+            # no-op when it is a perfectly healthy bf16 update.
+            changed_frac = (weight != before).float().mean().item()
+        self._last_changed_frac = float(changed_frac)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         return float(dw.norm().item())   # return ||delta_W|| for the >0 assertion
+
+    def last_changed_frac(self):
+        """Fraction of weight elements changed by the most recent apply_node_update."""
+        return float(getattr(self, "_last_changed_frac", 0.0))
 
     def get_worker_ip(self):
         """Return the worker's IP address for NCCL initialization."""
@@ -420,46 +441,6 @@ class WorkerExtension:
         import torch
         w = self.np_modules[layer_name].wrapped.weight
         return float(w.detach().float().norm().item())
-
-    def run_capture_pass(self, prompt_token_ids, clean_tokens, layer_name, np_cfg):
-        """Teacher-forced re-run of the committed sequence to capture x_t per response
-        step. Returns list[Tensor[d_in]] (CPU), one per token in clean_tokens.
-
-        Mechanics: we re-decode the fixed `prompt_token_ids + clean_tokens` sequence
-        one response step at a time. For each step we flip np_state to mode=capture
-        (the PerturbedLinear hook records the row-0 input x_t and otherwise leaves
-        the forward untouched), call `_np_step_forward(..., n_sample=0)` -- a
-        single-row forward (rows = 1 + n_sample, with n_sample=0 -> one clean row,
-        no perturbed companions). slot_mapping is [clean_slot] only; no PAD_SLOT_ID
-        rows. Then we commit the already-known clean token and advance kv_cursor.
-        Returns the list of captured x_t (CPU) -- one per step in clean_tokens.
-
-        Note: n_sample=0 is supported by `_np_step_forward` as written -- the
-        perturbed-row branches (`[-1] * n_sample`, `[q_token] * n_sample`) collapse
-        to empty lists, so the resulting batch is a single clean row.
-        """
-        st = self._ensure_np_state()
-        mr = self.model_runner
-        model = mr.model
-        device = mr.device
-        x_per_step = []
-
-        # Prefill clean prompt KV. Use only the prompt -- the loop below replays
-        # clean_tokens one step at a time, writing each clean position's KV in row 0
-        # of `_np_step_forward` before advancing kv_cursor via `_np_commit_clean`.
-        state = self._np_prefill(model, device, list(prompt_token_ids))
-        for t, tok in enumerate(clean_tokens):
-            st.update({
-                "mode": "capture",
-                "layer": layer_name,
-                "n_clean_rows": 1,
-                "captured_x": {},
-            })
-            self._np_step_forward(model, device, state, n_sample=0)  # 1-row forward
-            x_per_step.append(st["captured_x"][layer_name].detach().to("cpu"))
-            self._np_commit_clean(state, tok)
-        st["mode"] = "off"
-        return x_per_step
 
     def assemble_and_apply(self, layer_name, L_q_steps, L_clean_steps, u_steps, x_steps,
                             sigma, sample_mode, normalize, token_agg, lr, update_clip):
