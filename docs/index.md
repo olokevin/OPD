@@ -17,7 +17,7 @@ How a subsystem works: architecture, invariants, knobs, file map. Stable; update
 |---|---|
 | [compressed_opd](wiki/compressed_opd.md) | BTT-compressed Qwen3-4B → ~1.7B student for OPD math: launchers, calib cache, FSDP2 + BlockTT fixes, C4-PPL audit. |
 | [ZO](wiki/ZO.md) | The two zeroth-order OPD trainers — Weight Perturbation (ES) vs Node Perturbation (NP); what's perturbed, variance scaling, memory, update shape. |
-| [zo_np_trainer](wiki/zo_np_trainer.md) | NP trainer internals: 1+n_sample-wide perturbed vLLM decode, teacher reverse-KL scoring, rank-1 δW accumulation. §8 = V1 throughput (forward is 99%) + **V2 LANDED §8.5: buffer-in-graph (`perturb_graph` + host `u_buf` + CUDA-graph capture/replay), branch `np-v2-cudagraph-rails`. ALL GPU gates PASS (σ=0 byte-equiv incl. graph capture, m1/m2 parity u-bit-identical, graphed≡V1); N-scaling: N≤16 ~free (8 rails=+19%), compute-bound past 32**. |
+| [zo_np_trainer](wiki/zo_np_trainer.md) | NP trainer internals: 1+n_sample-wide perturbed vLLM decode, teacher reverse-KL scoring, rank-1 δW accumulation. §8 = V1 throughput (forward is 99%). **§9 = V2 buffer-in-graph design + initial results (branch `np-v2-cudagraph-rails`): all GPU gates PASS (σ=0 incl. graph capture, m1/m2 parity u-bit-identical → graphed≡V1); throughput-vs-N (N≤16 ~free, +19% @ N=8; compute-bound past 32); cosine-vs-N (0.205/0.276/0.356/0.407 @ N=8/16/32/64)**. |
 
 ## Results — experiments & mid-conclusions (`docs/results/`)
 
