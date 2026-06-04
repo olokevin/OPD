@@ -338,9 +338,22 @@ per-token `seqused_k` is the mutated `seq_lens_gpu` tensor — exactly how vLLM 
 graphs (`gpu_model_runner.py:3057`). Adversarial review caught freezing `max_seqlen_k` too low as a
 blocker; fixed via `max_seq_len_override`.
 
-**Gates (CPU done; GPU pending the user, per spec M0→M3):** 38/38 CPU unit tests pass (incl. 6 new
-`test_perturb_graph.py`: `perturb_graph` row math, `x_buf` capture, σ=0 no-op, and `_np_fill_u_buf`
-bit-identical-to-V1). GPU gates to run: `check_decode_sigma0.py --driver graphed_{eager,cuda}` (σ=0
-byte-equiv), `check_graphed_parity.py --stage {m1,m2}` (u bit-identical, logits/x within bf16 tol),
-`bench_n_scaling.py` (the "N is free" premise). **M2's `torch.cuda.graph` capture of the hand-built
-attn_metadata is the one unverified-on-GPU risk** (spec §7.4 M0 spike).
+**Gates — ALL PASS (Qwen3-1.7B, GPU 6/7, FLASH_ATTN, 2026-06-03):**
+- 38/38 CPU unit tests (incl. 6 new `test_perturb_graph.py`: `perturb_graph` row math, `x_buf`
+  capture, σ=0 no-op, `_np_fill_u_buf` bit-identical-to-V1).
+- **σ=0 byte-equiv:** `graphed_eager` PASS, `graphed_cuda` PASS. The latter is the **M0 capture
+  spike** — `torch.cuda.CUDAGraph` capture of the hand-built `attn_metadata` **works**, no
+  "operation not permitted when stream is capturing"; the previously-unverified risk is cleared.
+- **Parity m1** (V1 vs eager+`u_buf`): u **bit-identical**, logits/x within rtol=1e-2 → noise
+  relocation is byte-correct. **Parity m2** (eager+`u_buf` vs graphed): same → by transitivity
+  **graphed ≡ V1**.
+- **N-scaling** (`graphed_cuda`, max_tokens=64): ms/tok = 10.3 / 12.3 / 13.6 / 17.0 / 23.7 at
+  N = 1 / 8 / 16 / 32 / 64 (rel 1.00 / 1.19 / 1.32 / 1.65 / 2.30×). **The "N is ~free" premise
+  holds for N≤16** (8 rails = +19% wall-time for 8× the gradient samples — the memory-bound free
+  lunch), then crosses into compute-bound (2.3× at N=64). Sweet spot **N≈8–16** = the `n_sample=8`
+  default. The experiment the superseded prompt-packing plan never ran.
+
+**Two bugs surfaced + fixed on GPU** (commit `01eb6bc`): (a) sharing one `graph_pool_handle` across
+captures tripped `CUDACachingAllocator use_count>0` once >1 graph is captured (bench) → each graph
+now owns its pool, prior graph released before the next capture; (b) a device-mismatch in the parity
+check script (V1 returns `captured_u` on GPU, graphed on CPU). Neither was a math/invariant bug.
