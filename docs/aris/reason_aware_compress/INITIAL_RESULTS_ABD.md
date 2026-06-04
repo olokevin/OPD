@@ -52,17 +52,35 @@ Success: B1 > B0 (accumulation matters); B2 ≥ B1 is the OPD-on-SRC claim (defe
 - **Reasoning-trace diff per ratio** (Block T, folded into the sweep): the 5 frozen dense-correct probes regenerated on each compressed model, first-divergence localized — **where does the trace break as the ratio drops.**
 - **D3** (OPD/teacher bi-whitened SVD) still running on GPU 2 with the real teacher (Keven16 RL-Math); B2 link will be skipped.
 
-## M4 — Forward-only ratio sweep + trace breakdown — RUNNING
-| ratio | nz | C4 PPL | MATH/100 | probes✓/5 | median first-div frac |
-|---|---|---|---|---|---|
-| 0.8 | — | — | — | — | — |
-| 0.7 | — | — | — | — | — |
-| 0.6 | — | — | — | — | — |
-| 0.5 | — | — | — | — | — |
-| 0.4 | — | — | — | — | — |
-| 0.36 | — | — | — | — | — |
+## M4 — Forward-only ratio sweep + trace breakdown — (0.36 running)
+SVD-V2 input-whitening attn + Nystrom MLP, last layer dense, OpenThought3 reasoning-trace calib (same as M1).
 
-> `div_frac` = fraction into the dense trace where the compressed trace first departs (1.0 = identical to the end). As ratio ↓, expect div_frac ↓ (breaks earlier) and probes✓ ↓.
+| ratio | nz | C4 PPL | MATH/100 | probes✓/5 | **median comp/dense trace len** | max comp_len |
+|---|---|---|---|---|---|---|
+| 0.8 | 3.32B | 52.1 | **72%** | 3/5 | **1.1×** | 2,580 |
+| 0.7 | 2.96B | 96.6 | **66%** | 4/5 | **1.1×** | 4,907 |
+| 0.6 | 2.61B | 223.8 | **37%** | 3/5 | **5.1×** | 5,349 |
+| 0.5 | 2.26B | 1,157 | 20% | 1/5 | **6.3×** | 6,774 |
+| 0.4 | 1.90B | 6,553 | 4% | 1/5 | **7.3×** | 8,197 |
+| 0.36 | — | — | — | — | — | dropped (cliff already established by 0.4; collapse = known 0.0%/4,980 ref) |
+
+### Where the reasoning trace breaks as the ratio drops — the mechanism
+**Sharp cliff at r\* ≈ 0.65** (between 0.7 and 0.6): above it traces stay ≈ dense length (1.1×) and accuracy holds (66–72%); below it traces **balloon 5–7×** while accuracy collapses (37→20→4%).
+
+The failure mode is **not an early wrong step** — inspecting the actual traces (e.g. probe pid=2, dense solves in 695 chars), the compressed model executes the **early arithmetic correctly** (`f(-2)=2`, `f(-1)=5/3`, … identical to dense), then **loses the ability to converge and close the reasoning** — it never computes the final sum / emits `\boxed{}`, instead spiraling into **repetition/rambling until the 2048-token cap** (comp_len 5k–8k vs dense <1k). This is the **RAC looping signature the plan's Block 2 predicted (length↑ while acc↓)**: compression raises the per-token error floor until the model crosses below self-correction/convergence capacity. The break is a *late-trace convergence failure*, not an *early-trace divergence*.
+
+> **Metric note**: the char-level `first_div` proxy is uninformative here (greedy decoding rephrases the opening — "find"→"evaluate" — so first_div≈0 everywhere from cosmetic wording, not reasoning). The discriminating signal is **trace-length blow-up + non-termination**, reported above.
+
+### Connection to M1 (the fix)
+The M1 headline (A2, +full-rank sparse residual) **holds 82% at the same 0.8 budget** where forward-only D0 gives 72% — and the sweep shows forward-only falls off a cliff below 0.65. The open follow-up (not yet run): does the M1 sparse residual **push the cliff r\* lower** (hold accuracy + bounded trace length to a lower ratio)? That is the "holds accuracy to a lower ratio than A0" causal-M1 claim — would re-run the sweep with the A2 method.
+
+## Summary (experiment-bridge complete, 2026-06-03)
+**Two clean, publishable findings at retain 0.8, last layer dense, MATH-500/100 + C4 PPL, reasoning-trace calib:**
+1. **M2 (objective) is null.** Bilateral CE-gradient SVD (D2 = OBD-LLM prior-art) ≈ plain input-whitened SVD (D0): 70% vs 73%. Backward-only whitening (D1) collapses to 0%. A better reconstruction *objective* is not the lever.
+2. **M1 (rank floor) is the headline.** Adding a small (~6% density) **full-rank** sparse residual to the low-rank attention factors (A2, fit against compressed-upstream activations) recovers MATH **72→82%** (**beats dense 4B 80.5%**) and PPL 52→42 at the **same budget** — and succeeds exactly where the earlier attention tail-rescue failed (0→4%, which only re-added *low-rank* tail). Ordering A2 ≥ A1 > A0 met. **The missing ingredient is the full-rank "escape edges", not a better objective.**
+3. **The cliff & failure mode** (forward-only sweep): plain structured compression holds ~dense accuracy to **r\*≈0.65**, then falls off (72/66/37/20/4% @ 0.8/0.7/0.6/0.5/0.4). Trace-diff shows the break is a **late-trace convergence failure** — the model does the early arithmetic right but can't *close* the reasoning, looping until the token cap (trace length 1.1×→7.3× as accuracy falls; the RAC length↑/acc↓ signature). Not an early wrong step.
+
+**Skipped per user**: Block B (M3 re-linearization, B1/B2), D3/B2 (OPD-teacher cells). Calibration stayed prompt+reasoning-traces (OpenThought3) throughout.
 
 ## Next
-→ collect the sweep + D3; fill tables; analyze the cliff + trace-break localization; then `/auto-review-loop`.
+→ `/auto-review-loop` on the M1 headline. Open follow-ups (not run): A2-method ratio sweep (does the sparse residual push r\* below 0.65? — the causal "holds to a lower ratio" claim), A3 budget-split, Block 4 headline table vs prior-art on AIME/AMC/Olympiad.

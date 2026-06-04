@@ -14,9 +14,11 @@ Run IDs map to `EXPERIMENT_PLAN.md` blocks. Status: PENDING / RUNNING / DONE / F
 | D0-sanity | D | D0 @0.8, MATH/16, 32-seq calib (pipeline check) | 7 | DONE | nz 3.316B, C4 PPL 55.7, **MATH 81.25%** | ✓ pipeline validated; @0.8 last-layer-skip baseline ≈ dense (80.5%) — full dynamic range |
 | **D0–D2** | D | OPD-weighted bi-whitened SVD (objective fix, M2) | 5 | DONE | D0 73%/52.1 · D1 0%/294 · D2 70%/52.1 | **M2 null**: D2(bilateral CE)≈D0(fwd-only), D1(bwd-only) collapses → objective not a separable lever → M1/Block A is the headline. **D3 deferred** (distinct teacher) |
 | **A0–A2** | A | Low-rank + sparse residual / +Patch (rank floor, M1) | 5 | DONE | A0 72%/52.1 · A1 80%/42.4 · **A2 82%/42.4** | **M1 HEADLINE**: A2≥A1>A0, full-rank sparse residual recovers 72→82% (beats dense 80.5%) at same budget — causal M1 confirm where tail-rescue failed. A3 sweep = nice-to-have |
-| **B0–B1** | B | Sequential re-linearized compression / SRC (accumulation, M3) | 5 | RUNNING | — | B0/B1 @0.8. **B2 deferred** (needs distinct teacher) |
-| T-probeset | T | Freeze 5 dense-correct MATH probes → `trace_probe_set.json` | 6 | DONE | 5 probes (pids 0–4), dense traces + gold frozen | reference for every per-method trace diff |
-| **T** | T | Reasoning-trace diff: dense vs compressed, per method/cell | — | PENDING | — | `generate_traces()` runs after D/A/B cells land (2 ratios/method) |
+| B0 | B | SRC dense-pass baseline (= D0) | 5 | DONE | 71%/52.1 | reproduces D0/A0 baseline |
+| B1–B2 | B | Sequential re-linearized (SRC, M3) | 5 | **SKIPPED (user)** | — | B1 killed mid-run; M3 not pursued this pass |
+| D3 | D | OPD-weighted bi-whitened SVD, real teacher (Keven16 RL-Math) | 2 | **SKIPPED (user)** | — | launched (teacher vocab/arch verified) then dropped per user; calibration stays prompt+reasoning-traces only |
+| T-probeset | T | Freeze 5 dense-correct MATH probes → `trace_probe_set.json` | 6 | DONE | 5 probes (pids 0–4) | reference for every trace diff |
+| **SWEEP** | 2/T | Forward-only ratio sweep + trace-diff, retain 0.8→0.4 | 5 | DONE | **72/66/37/20/4%** @ 0.8/0.7/0.6/0.5/0.4; **cliff r\*≈0.65** | trace-length blows up 1.1×→7.3× as acc falls → **late-trace convergence failure (RAC looping)**, not early divergence. 0.36 dropped. |
 
 > **A/B/D re-promotion (2026-06-02)**: TRACER C2 falsified → A/B/D (demoted only for prior-art-novelty) are now first-class one-shot method candidates attacking the live mechanisms M1/M2/M3. Self-contained, launch now. **Operating point: retain 0.8 first (last decoder layer's linears skipped), then sweep down (Block 2: 0.8/0.7/0.6/0.5).** Long-context block (old Block 3) and the attn-only/mlp-only subsystem split are **removed**. Block T trace-diff runs alongside each method for qualitative inspiration. See `EXPERIMENT_PLAN.md` § "Operating point & protocol" + "Blocks A/B/D".
 
