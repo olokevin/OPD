@@ -48,8 +48,10 @@ def _assert_parity(a, b, name_a, name_b, logit_rtol):
         f"different #tokens: {name_a}={len(ta)} {name_b}={len(tb)}")
 
     for t in range(n):
-        ua = a["captured_u"][t].float()
-        ub = b["captured_u"][t].float()
+        # V1 returns captured_u on GPU; the graphed driver returns it on CPU.
+        # Coerce both to CPU/float for a device-consistent bit-identity check.
+        ua = a["captured_u"][t].detach().cpu().float()
+        ub = b["captured_u"][t].detach().cpu().float()
         # u must be BIT-IDENTICAL (same seed -> same draw_noise). This is the
         # parity-by-construction guarantee; any mismatch is a seed/key bug.
         assert torch.equal(ua, ub), (

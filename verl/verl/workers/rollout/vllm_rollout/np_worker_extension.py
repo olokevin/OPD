@@ -443,20 +443,30 @@ class WorkerExtension:
 
         # Capture. The forward reads attn_meta from the forward-context global; the
         # captured graph records the kernel ops + tensor pointers (input buffers,
-        # u_buf inside PerturbedLinear, the persistent metadata tensors). Reuse a
-        # single per-worker graph mempool across prompts so per-prompt re-capture
-        # does not leak a fresh private pool each decode (the attention layer
-        # allocates its output tensor inside the captured region -- legal via the
-        # graph pool). M0 spike (spec §7.4) must confirm no in-forward host alloc
-        # trips "operation not permitted when stream is capturing".
-        if not hasattr(self, "_np_graph_pool"):
-            self._np_graph_pool = torch.cuda.graph_pool_handle()
+        # u_buf inside PerturbedLinear, the persistent metadata tensors). The
+        # attention layer allocates its output tensor inside the captured region --
+        # legal via the graph's private mempool. We do NOT share one pool across
+        # graphs: a prior graph is still alive (use_count>0) when the next prompt
+        # captures, and capturing into a pool a live graph holds trips
+        # CUDACachingAllocator's "use_count > 0" assert. Instead we explicitly
+        # release the PREVIOUS graph (freeing its pool) before capturing a new one,
+        # so each graph owns its own default pool and pools don't accumulate across
+        # prompts. M0 spike (spec §7.4): confirmed no in-forward host alloc trips
+        # "operation not permitted when stream is capturing".
+        prev = getattr(self, "_np_active_graph", None)
+        if prev is not None:
+            del prev
+            self._np_active_graph = None
+            import gc as _gc
+            _gc.collect()
+            torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.no_grad(), set_forward_context(
             attn_meta, self.model_runner.vllm_config, num_tokens=total,
             cudagraph_runtime_mode=CUDAGraphMode.NONE):
-            with torch.cuda.graph(graph, pool=self._np_graph_pool):
+            with torch.cuda.graph(graph):
                 hidden_buf = model(input_ids=input_ids_buf, positions=positions_buf)
+        self._np_active_graph = graph
 
         # Pre-fix the perturbed-row slots to PAD (-1) once: only the clean slot
         # (element 0) changes per token, so the replay loop avoids a per-token host
