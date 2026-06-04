@@ -306,3 +306,41 @@ The forward is 99% of the cost, so V2 attacks the forward directly on two axes:
 `run_np_decode` / `_np_step_forward` / `_np_build_attn_metadata` (the decode driver);
 `ray_trainer.py` `fit()` lines ~513–542 (the serial per-prompt loop to be replaced by one
 packed call). Keep `PerturbedLinear` semantics; change *how* the rows are assembled and run.
+
+### 8.5 V2 landed — buffer-in-graph (branch `np-v2-cudagraph-rails`)
+
+> The V2 *design* settled on **Path B (buffer-in-graph)**, NOT the earlier prompt-packing plan.
+> Spec: [`docs/superpowers/specs/2026-06-03-np-v2-cudagraph-rails.md`](../superpowers/specs/2026-06-03-np-v2-cudagraph-rails.md)
+> (the prompt-packing `2026-06-03-np-v2-design.md` is superseded). Goal: the 1+N rails of ONE
+> prompt's token run inside a CUDA-graphed forward, perturbation via a host-refilled buffer.
+
+**What was implemented (additive; V1 eager kept as the parity oracle):**
+
+- **`PerturbedLinear.perturb_graph` mode** — `y[1:1+N] += σ·u_buf` (fixed-shape, RNG-free,
+  alloc-free) + `x_buf.copy_(x[0])`. The noise is NOT drawn in-forward; the host fills `u_buf`
+  via `_np_fill_u_buf` (the *only* RNG, calling the SAME `noise_seed`+`draw_noise` as V1 → **u
+  bit-identical** → parity by construction).
+- **`run_np_decode_graphed(..., use_cuda_graph)`** — V2 driver, same return contract as
+  `run_np_decode`. `use_cuda_graph=False` = M1 (eager-with-`u_buf`, isolates the noise
+  relocation); `True` = M2 (`_np_capture_step`/`_np_replay_step`: capture the 1+N step once,
+  replay per token, refilling `input_ids`/`positions`/`slot_mapping[0]`/`seq_lens_gpu`/`u_buf`
+  in place; `compute_logits`+sampling stay eager).
+- **Config:** `np.decode_mode ∈ {eager, graphed}` (default `eager` = V1), `np.use_cuda_graph`.
+  `fit()` dispatches `run_np_decode_graphed` when `decode_mode=graphed`; `_heldout_kl` stays eager.
+
+**vLLM-0.11.0 facts the M2 graph relies on (verified vs source):** `FlashAttentionMetadataBuilder.build()`
+stores `slot_mapping`/`seq_lens`/`block_table`/`query_start_loc` **by reference** (mutate-in-place →
+kernel sees new values on replay); `set_forward_context` stashes attn_metadata in a global read at
+forward time (graph re-reads the same tensor storage); `compute_logits` stays outside the graph;
+`reshape_and_cache` skips `slot<0`. **Critical:** `max_seqlen_k` is a frozen Python int (sizes the
+kernel grid, can't be a graph input) → captured at the **cap** (`prompt_len+max_tokens`) while live
+per-token `seqused_k` is the mutated `seq_lens_gpu` tensor — exactly how vLLM captures its own decode
+graphs (`gpu_model_runner.py:3057`). Adversarial review caught freezing `max_seqlen_k` too low as a
+blocker; fixed via `max_seq_len_override`.
+
+**Gates (CPU done; GPU pending the user, per spec M0→M3):** 38/38 CPU unit tests pass (incl. 6 new
+`test_perturb_graph.py`: `perturb_graph` row math, `x_buf` capture, σ=0 no-op, and `_np_fill_u_buf`
+bit-identical-to-V1). GPU gates to run: `check_decode_sigma0.py --driver graphed_{eager,cuda}` (σ=0
+byte-equiv), `check_graphed_parity.py --stage {m1,m2}` (u bit-identical, logits/x within bf16 tol),
+`bench_n_scaling.py` (the "N is free" premise). **M2's `torch.cuda.graph` capture of the hand-built
+attn_metadata is the one unverified-on-GPU risk** (spec §7.4 M0 spike).

@@ -73,6 +73,28 @@ class PerturbedLinear(torch.nn.Module):
             st["captured_x"][self.name] = x[0].detach().clone()
             return out
 
+        if mode == "perturb_graph" and self.name == st["layer"]:
+            # V2 graph-capturable perturbation (spec §5.2). The noise is NOT drawn
+            # here -- the host has already filled the persistent buffer u_buf
+            # (st["u_buf"]) via _np_fill_u_buf before this forward. The op is a
+            # fixed-shape, RNG-free, allocation-free elementwise add on the
+            # perturbed-row block -- the only thing a captured CUDA graph records.
+            #   y[n_clean : n_clean+N] += sigma * u_buf      (u_buf is [N, d_out])
+            # x_t is written into the persistent x_buf (st["x_buf"]) so it survives
+            # past graph.replay() (a view into the transient activation would not).
+            # x_buf is always installed by run_np_decode_graphed (the only caller
+            # of perturb_graph mode); copy x[0] in place so it survives replay.
+            st["x_buf"].copy_(x[0])
+            sigma = st["sigma"]              # captured scalar (python float)
+            u_buf = st["u_buf"]              # [N, d_out], host-refilled, persistent
+            # In-place add on the perturbed-row slice. sigma==0 still adds 0*u_buf,
+            # which is exactly the no-op the sigma=0 gate expects -- and keeping the
+            # op unconditional means the captured graph is identical for sigma>0/=0
+            # (no data-dependent branch inside the captured region).
+            y[n_clean:n_clean + u_buf.shape[0]] = (
+                y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            return _repack(y, bias, was_tuple)
+
         if mode == "perturb" and self.name == st["layer"]:
             # Capture the clean row's input x_t HERE, in the same forward that does
             # the perturbation -- this is the rank-1 update's x_t and is identical to
@@ -183,6 +205,390 @@ class WorkerExtension:
             "captured_x": captured_x,
             "captured_u": captured_u,
         }
+
+    # ================================================================== V2 ===
+    # CUDA-graphed 1+N decode rails (spec docs/.../2026-06-03-np-v2-cudagraph-rails.md).
+    # The perturbation moves from in-forward RNG (perturb mode, above) to a
+    # host-refilled persistent buffer + a captured `y += sigma*u_buf` op
+    # (perturb_graph mode). Two sub-modes, selected by use_cuda_graph:
+    #   use_cuda_graph=False (M1): same eager step forward, but reads u_buf.
+    #                              Isolates the noise-relocation from graphing.
+    #   use_cuda_graph=True  (M2): the step forward is captured once and replayed
+    #                              per token; only buffers are refilled in place.
+    # V1's run_np_decode / _np_step_forward (perturb mode) are left UNTOUCHED as
+    # the parity oracle.
+
+    def _np_fill_u_buf(self, u_buf, np_cfg, layer_name, step, rollout, n_sample):
+        """Refill the persistent perturbation buffer for one token, on the host.
+
+        This is the ONLY place RNG runs in the V2 path, and it calls the SAME
+        noise_seed(...)+draw_noise(...) V1 calls in-forward (np_worker_extension
+        perturb mode, line ~91) with the SAME (global_seed, step, layer, rollout,
+        q) key -> the bytes written into u_buf are bit-identical to V1's u. Only
+        the *location* of the draw moved (host, before replay) -- the value did
+        not. This is the M1/M2 parity-by-construction guarantee (spec §3, §5.2).
+
+        u_buf: persistent [n_sample, d_out] device tensor (dtype = layer out dtype).
+        copy_ writes into it in place so the captured graph (which holds u_buf by
+        pointer) sees the new noise on the next replay.
+        """
+        d_out = u_buf.shape[1]
+        for q in range(n_sample):
+            seed = noise_seed(int(np_cfg["global_seed"]), int(step), layer_name,
+                              int(rollout), q)
+            u = draw_noise(seed, (d_out,), u_buf.device, u_buf.dtype,
+                           np_cfg["sample_method"])
+            u_buf[q].copy_(u)
+
+    def run_np_decode_graphed(self, prompt_token_ids, sampling_params, layer_name,
+                              np_cfg, rollout_idx, use_cuda_graph=False):
+        """V2 decode for ONE prompt. Same contract as run_np_decode (returns
+        clean_tokens / candidate_logits / captured_x / captured_u), but the
+        perturbation is applied via the host-refilled u_buf + perturb_graph op
+        instead of in-forward RNG. With use_cuda_graph=True the step forward is a
+        captured CUDA graph replayed per token."""
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+
+        state = self._np_prefill(model, device, list(prompt_token_ids))
+        # Largest seqused_k the decode reaches (prompt_len + max_tokens). Used to
+        # freeze FlashAttention's max_seqlen_k at capture (see _np_capture_step).
+        state["max_seq_len_cap"] = int(state["prompt_len"]) + max_tokens
+
+        # Resolve the perturbed layer's output width to size u_buf / x_buf.
+        wrapped = self.np_modules[layer_name]
+        weight = wrapped.wrapped.weight          # [d_out, d_in]
+        # draw_noise generates f32 then casts to buf_dtype, so buf_dtype is
+        # load-bearing for bit-identity with V1's in-forward draw (which used the
+        # layer's OUTPUT dtype y.dtype). For an unquantized linear, F.linear out
+        # dtype == weight.dtype, so weight.dtype is the right size. Guard against a
+        # quantized/packed weight (int dtype) where weight.dtype != y.dtype.
+        assert weight.is_floating_point(), (
+            f"perturb_graph needs the perturbed layer's weight to be floating "
+            f"(got {weight.dtype}); a quantized weight would size u_buf at the "
+            f"wrong dtype and break parity. Layer {layer_name!r}.")
+        d_out = int(weight.shape[0])
+        d_in = int(weight.shape[1])
+        buf_dtype = weight.dtype
+        u_buf = torch.zeros(n_sample, d_out, device=device, dtype=buf_dtype)
+        x_buf = torch.zeros(d_in, device=device, dtype=buf_dtype)
+
+        # Persistent per-prompt graph state (only used when use_cuda_graph).
+        graph_state = None
+
+        # np_state stays in perturb_graph mode for the whole decode; per-token we
+        # only change `step` and refill u_buf (no remode, so the captured graph's
+        # control flow is stable).
+        st.update({
+            "mode": "perturb_graph",
+            "layer": layer_name,
+            "sigma": sigma,
+            "n_clean_rows": 1,
+            "u_buf": u_buf,
+            "x_buf": x_buf,
+        })
+
+        clean_tokens, candidate_logits, captured_u, captured_x = [], [], {}, {}
+        try:
+            for t in range(max_tokens):
+                # Host noise refill for this token (the only RNG). sigma=0 still
+                # fills u_buf but the perturb_graph op adds 0*u_buf -> no-op.
+                self._np_fill_u_buf(u_buf, np_cfg, layer_name, t, rollout_idx,
+                                    n_sample)
+                st["step"] = t
+
+                if use_cuda_graph:
+                    logits, graph_state = self._np_replay_step(
+                        model, device, state, n_sample, graph_state)
+                else:
+                    logits = self._np_step_forward_graph(
+                        model, device, state, n_sample)
+
+                candidate_logits.append(logits.detach().to("cpu"))
+                # u_t for the rank-1 update: same noise just written to u_buf.
+                captured_u[t] = u_buf.detach().to("cpu").clone()
+                captured_x[t] = x_buf.detach().to("cpu").clone()
+                next_tok = self._np_sample_clean(logits[0], sampling_params)
+                clean_tokens.append(int(next_tok))
+                if self._np_is_eos(next_tok, sampling_params):
+                    break
+                self._np_commit_clean(state, next_tok)
+        finally:
+            st["mode"] = "off"
+            st["u_buf"] = None
+            st["x_buf"] = None
+
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
+    def _np_step_forward_graph(self, model, device, state, n_sample):
+        """Eager 1+n_sample step forward for the perturb_graph path (M1).
+
+        Identical row/KV/slot machinery to _np_step_forward (the V1 perturb path)
+        -- the ONLY difference is np_state is in perturb_graph mode, so the
+        PerturbedLinear reads u_buf instead of drawing noise. Kept separate from
+        _np_step_forward so V1's parity oracle is byte-for-byte untouched."""
+        block_ids = state["block_ids"]
+        block_size = state["block_size"]
+        prompt_len = state["prompt_len"]
+        q_pos = state["kv_cursor"]
+
+        if q_pos < prompt_len:
+            q_token = state["prompt_token_ids"][q_pos]
+        else:
+            q_token = state["committed_tokens"][q_pos - prompt_len]
+
+        query_lens = [1] * (1 + n_sample)
+        seq_lens = [q_pos + 1] * (1 + n_sample)
+        clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+        slot_mapping = [clean_slot] + [-1] * n_sample
+        positions = [q_pos] * (1 + n_sample)
+        input_ids = [q_token] * (1 + n_sample)
+
+        attn_meta, total = self._np_build_attn_metadata(
+            state, query_lens, seq_lens, slot_mapping, positions)
+        with torch.no_grad():
+            hidden = self._np_run_forward(
+                model, device, input_ids, positions, attn_meta, total)
+            logits = model.compute_logits(hidden)
+        return logits
+
+    # ------------------------------------------------- M2: capture / replay ---
+    # vLLM-0.11.0 ground truth (verified against source, see spec §5.6 + pointers):
+    #  - FlashAttentionMetadataBuilder.build() stores REFERENCES to the tensors in
+    #    CommonAttentionMetadata (flash_attn.py:235-239,344-351) -- no copy. So a
+    #    captured graph holds those tensors by pointer; mutating them in place (via
+    #    copy_) before replay() feeds the kernel new values.
+    #  - set_forward_context stashes attn_metadata in a python global read at
+    #    forward time (forward_context.py); the captured graph re-reads the SAME
+    #    tensor storage on replay (attention/layer.py:318-329).
+    #  - compute_logits stays OUTSIDE the graph (gpu_model_runner.py:2286-2331),
+    #    matching vLLM's own decode-graph split.
+    # Therefore: allocate persistent input buffers ONCE, build attn_metadata once
+    # from them, capture model(input_ids,positions) into hidden_buf, then per token
+    # copy_ new ids/positions/slot_mapping/seq_lens/u_buf into the SAME buffers and
+    # graph.replay(). One graph per prompt (its block_ids are prompt-specific); we
+    # could cache across same-length prompts later, but per-prompt capture keeps M2
+    # correct and simple (capture cost is amortized over max_tokens replays).
+
+    def _np_capture_step(self, model, device, state, n_sample, max_seq_len_cap):
+        """Allocate persistent step buffers, build attn_metadata from them once,
+        warm up, then capture one 1+n_sample step forward into a CUDA graph.
+        Returns a graph_state dict with the graph + the persistent buffers +
+        the attn_metadata (held by the graph by reference).
+
+        max_seq_len_cap: the LARGEST seqused_k the decode will reach
+        (prompt_len + max_tokens). FlashAttention's `max_seqlen_k` is a frozen
+        Python int that sizes the kernel's KV-iteration grid -- it CANNOT be a
+        graph input -- so we bake it at the cap and feed the true per-token
+        seqused_k through the seq_lens_gpu tensor (FA tolerates seqused_k <=
+        max_seqlen_k). This mirrors how vLLM captures its own decode graphs at the
+        padded maximum (build_for_cudagraph_capture). Capturing at the current
+        (small) q_pos instead would freeze max_seqlen_k too low and silently
+        truncate attention to the prompt -- the blocker this fixes."""
+        from vllm.config.compilation import CUDAGraphMode
+
+        block_ids = state["block_ids"]
+        block_size = state["block_size"]
+        q_pos = state["kv_cursor"]
+        R = 1 + n_sample
+
+        # Persistent input/output buffers (fixed shapes for the graph's life).
+        input_ids_buf = torch.zeros(R, dtype=torch.long, device=device)
+        positions_buf = torch.zeros(R, dtype=torch.long, device=device)
+
+        # Build attn_metadata ONCE. The kernel-bound max_seqlen_k is frozen at the
+        # CAP via max_seq_len_override, while seq_lens (the live per-token seqused_k
+        # tensor) and num_computed_tokens hold the TRUE token-0 length q_pos+1 -- so
+        # the warmup/capture run is numerically the real token-0 step. Per replay we
+        # mutate seq_lens_gpu / slot_mapping[0] / input_ids / positions in place;
+        # block_table is fixed (shared prefix). The kernel bounds attention by the
+        # live seqused_k, not the frozen max_seqlen_k (verified vs vLLM source +
+        # gpu_model_runner.py:3057 which captures decode graphs the same way).
+        clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+        slot_mapping = [clean_slot] + [-1] * n_sample
+        positions = [q_pos] * R
+        # TRUE token-0 seq_lens (q_pos+1) for seqused_k / num_computed_tokens; the
+        # frozen kernel-bound max_seqlen_k is overridden to the CAP so it stays
+        # large enough for every later token (seq_lens_gpu is mutated per replay).
+        attn_meta, total, meta_bufs = self._np_build_attn_metadata_persistent(
+            state, [1] * R, [q_pos + 1] * R, slot_mapping, positions,
+            max_seq_len_override=max_seq_len_cap)
+
+        # Seed the input buffers with the current step's values.
+        if q_pos < state["prompt_len"]:
+            q_token = state["prompt_token_ids"][q_pos]
+        else:
+            q_token = state["committed_tokens"][q_pos - state["prompt_len"]]
+        input_ids_buf.fill_(int(q_token))
+        positions_buf.fill_(int(q_pos))
+
+        # Warm up a few eager steps so cuBLAS workspaces / autotune settle before
+        # capture (vLLM does the same before its own capture).
+        for _ in range(3):
+            with torch.no_grad(), set_forward_context(
+                attn_meta, self.model_runner.vllm_config, num_tokens=total,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE):
+                _ = model(input_ids=input_ids_buf, positions=positions_buf)
+        torch.cuda.synchronize()
+
+        # Capture. The forward reads attn_meta from the forward-context global; the
+        # captured graph records the kernel ops + tensor pointers (input buffers,
+        # u_buf inside PerturbedLinear, the persistent metadata tensors). Reuse a
+        # single per-worker graph mempool across prompts so per-prompt re-capture
+        # does not leak a fresh private pool each decode (the attention layer
+        # allocates its output tensor inside the captured region -- legal via the
+        # graph pool). M0 spike (spec §7.4) must confirm no in-forward host alloc
+        # trips "operation not permitted when stream is capturing".
+        if not hasattr(self, "_np_graph_pool"):
+            self._np_graph_pool = torch.cuda.graph_pool_handle()
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), set_forward_context(
+            attn_meta, self.model_runner.vllm_config, num_tokens=total,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE):
+            with torch.cuda.graph(graph, pool=self._np_graph_pool):
+                hidden_buf = model(input_ids=input_ids_buf, positions=positions_buf)
+
+        # Pre-fix the perturbed-row slots to PAD (-1) once: only the clean slot
+        # (element 0) changes per token, so the replay loop avoids a per-token host
+        # alloc + full H2D copy and just writes element 0 in place.
+        meta_bufs["slot_mapping"][1:].fill_(-1)
+
+        return {
+            "graph": graph,
+            "input_ids_buf": input_ids_buf,
+            "positions_buf": positions_buf,
+            "hidden_buf": hidden_buf,
+            "meta_bufs": meta_bufs,   # {slot_mapping, seq_lens_gpu, seq_lens_cpu, qsl_*}
+            "attn_meta": attn_meta,
+            "total": total,
+        }
+
+    def _np_replay_step(self, model, device, state, n_sample, graph_state):
+        """Run one 1+n_sample step via CUDA-graph replay. Captures the graph on the
+        first call (graph_state is None). Per token: refill the persistent input +
+        metadata buffers in place, replay, compute_logits (eager) on hidden_buf."""
+        if graph_state is None:
+            graph_state = self._np_capture_step(
+                model, device, state, n_sample, state["max_seq_len_cap"])
+            # The capture run already produced hidden for the FIRST token's q_pos,
+            # but u_buf may have been refilled after capture; replay once so the
+            # returned logits reflect the current u_buf. Fall through to replay.
+
+        gs = graph_state
+        block_ids = state["block_ids"]
+        block_size = state["block_size"]
+        q_pos = state["kv_cursor"]
+
+        if q_pos < state["prompt_len"]:
+            q_token = state["prompt_token_ids"][q_pos]
+        else:
+            q_token = state["committed_tokens"][q_pos - state["prompt_len"]]
+
+        # Refill persistent inputs in place (no realloc -> pointers stable).
+        gs["input_ids_buf"].fill_(int(q_token))
+        gs["positions_buf"].fill_(int(q_pos))
+        clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+        mb = gs["meta_bufs"]
+        # Only the clean-row slot (element 0) changes per token; rows 1..N were
+        # fixed to PAD(-1) at capture (perturbed rows never write KV). Update
+        # element 0 in place -> no per-token host alloc + H2D copy in the hot loop.
+        mb["slot_mapping"][0].fill_(int(clean_slot))
+        # Live seqused_k for this token. max_seqlen_k stays frozen at the cap
+        # (sized for the whole decode at capture). seq_lens_cpu is NOT consumed by
+        # FLASH_ATTN+fast_build (only the use_cascade / aot-scheduler branches read
+        # it, both off here), so we mutate ONLY the load-bearing GPU tensor.
+        mb["seq_lens_gpu"].fill_(q_pos + 1)
+
+        gs["graph"].replay()
+        # Sync before the host reads hidden_buf via compute_logits / before
+        # captured_x reads x_buf. (Per-token full sync; if it dominates, batch the
+        # host reads -- spec §5.7 buffer-fill / overlap note.)
+        torch.cuda.synchronize()
+        logits = model.compute_logits(gs["hidden_buf"])
+        return logits, gs
+
+    def _np_build_attn_metadata_persistent(self, state, query_lens, seq_lens,
+                                           slot_mapping, positions_cpu,
+                                           max_seq_len_override=None):
+        """Like _np_build_attn_metadata but returns the persistent GPU tensors it
+        built (slot_mapping, seq_lens) so the caller can mutate them in place
+        across graph replays. The FlashAttention metadata builder stores these by
+        reference (verified, flash_attn.py:344-351), so mutating them feeds the
+        kernel new values without recapture.
+
+        max_seq_len_override: freeze FlashAttention's max_seqlen_k at this value
+        (the decode's CAP) while seq_lens / num_computed_tokens hold the TRUE
+        token-0 length. max_seqlen_k must be a frozen int (it sizes the kernel
+        grid, not a graph input); the live per-token seqused_k is the seq_lens GPU
+        tensor (verified: kernel bounds attention by seqused_k, not max_seqlen_k --
+        mirrors vLLM gpu_model_runner.py:3057 capturing at max_model_len)."""
+        from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+
+        mr = self.model_runner
+        device = mr.device
+        block_ids = state["block_ids"]
+
+        num_reqs = len(query_lens)
+        total_tokens = int(sum(query_lens))
+        max_query_len = int(max(query_lens))
+        max_seq_len = (int(max_seq_len_override) if max_seq_len_override is not None
+                       else int(max(seq_lens)))
+
+        qsl_np = np.zeros(num_reqs + 1, dtype=np.int32)
+        qsl_np[1:] = np.cumsum(np.asarray(query_lens, dtype=np.int32))
+        qsl_cpu = torch.from_numpy(qsl_np)
+        qsl_gpu = qsl_cpu.to(device)
+
+        sl_cpu = torch.from_numpy(np.asarray(seq_lens, dtype=np.int32))
+        sl_gpu = sl_cpu.to(device)
+
+        max_blocks = int(
+            mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+        bt = torch.zeros((num_reqs, max_blocks), dtype=torch.int32, device=device)
+        bt[:, : len(block_ids)] = torch.tensor(
+            block_ids, dtype=torch.int32, device=device)
+
+        slot_mapping_gpu = torch.tensor(
+            slot_mapping, dtype=torch.int64, device=device)
+        num_computed_tokens_cpu = torch.tensor(
+            [s - q for s, q in zip(seq_lens, query_lens)], dtype=torch.int32)
+
+        common = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu, query_start_loc_cpu=qsl_cpu,
+            seq_lens=sl_gpu, seq_lens_cpu=sl_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs, num_actual_tokens=total_tokens,
+            max_query_len=max_query_len, max_seq_len=max_seq_len,
+            block_table_tensor=bt, slot_mapping=slot_mapping_gpu, causal=True,
+        )
+
+        attn_metadata = {}
+        for group_id, _ in enumerate(mr.kv_cache_config.kv_cache_groups):
+            for attn_group in mr.attn_groups[group_id]:
+                meta = attn_group.get_metadata_builder().build(
+                    common_prefix_len=0, common_attn_metadata=common,
+                    fast_build=True)
+                for layer in attn_group.layer_names:
+                    attn_metadata[layer] = meta
+        meta_bufs = {
+            "slot_mapping": slot_mapping_gpu,
+            "seq_lens_gpu": sl_gpu,
+            "seq_lens_cpu": sl_cpu,
+            "qsl_gpu": qsl_gpu,
+            "qsl_cpu": qsl_cpu,
+            "block_table": bt,
+        }
+        return attn_metadata, total_tokens, meta_bufs
 
     # -- helpers (vLLM-0.11.0-specific, against gpu_model_runner internals) --
 

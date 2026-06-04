@@ -17,7 +17,7 @@ How a subsystem works: architecture, invariants, knobs, file map. Stable; update
 |---|---|
 | [compressed_opd](wiki/compressed_opd.md) | BTT-compressed Qwen3-4B → ~1.7B student for OPD math: launchers, calib cache, FSDP2 + BlockTT fixes, C4-PPL audit. |
 | [ZO](wiki/ZO.md) | The two zeroth-order OPD trainers — Weight Perturbation (ES) vs Node Perturbation (NP); what's perturbed, variance scaling, memory, update shape. |
-| [zo_np_trainer](wiki/zo_np_trainer.md) | NP trainer internals: 1+n_sample-wide perturbed vLLM decode, teacher reverse-KL scoring, rank-1 δW accumulation. §8 = V1 throughput (forward is 99%) + V2 plan (CUDA-graphed one-wide-forward-per-token). Branch `feat/np-trainer`. |
+| [zo_np_trainer](wiki/zo_np_trainer.md) | NP trainer internals: 1+n_sample-wide perturbed vLLM decode, teacher reverse-KL scoring, rank-1 δW accumulation. §8 = V1 throughput (forward is 99%) + **V2 LANDED §8.5: buffer-in-graph (`perturb_graph` mode + host-refilled `u_buf` + CUDA-graph capture/replay), branch `np-v2-cudagraph-rails`, 38/38 CPU tests, GPU gates pending**. |
 
 ## Results — experiments & mid-conclusions (`docs/results/`)
 
@@ -55,6 +55,8 @@ Step-by-step build plans for trainer changes (companion to wiki design docs).
 | Page | One-line summary |
 |---|---|
 | [np_trainer](plans/np_trainer.md) | Implementation plan for the Node-Perturbation trainer in the verl fork: config interfaces, modules, acceptance tests. |
+| [np-v2-cudagraph-rails (spec)](superpowers/specs/2026-06-03-np-v2-cudagraph-rails.md) | **Current V2 spec** — CUDA-graph the single-prompt 1+N decode step via a host-refilled `u_buf` (perturbation = captured `y += σ·u_buf`, RNG moves outside the graph). Path B (buffer-in-graph); keeps V1 eager as parity oracle. M0 capture spike → M1 noise-relocation → M2 graph → M3 N-scaling bench. |
+| [np-v2-design (spec, SUPERSEDED)](superpowers/specs/2026-06-03-np-v2-design.md) | ~~Prompt-packing-first V2 plan (`B_pack` across prompts)~~ — superseded 2026-06-03 by np-v2-cudagraph-rails (cross-prompt packing dropped; goal is graphing the 1+N step, not batching prompts). |
 
 ## Papers — reference PDFs (`docs/papers/`)
 

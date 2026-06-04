@@ -485,6 +485,12 @@ class RayNPTrainer:
         batch_size = int(cfg.get("batch_size", 1))
         normalize_anp = bool(cfg.get("normalize_anp", False))
         verify_update = bool(cfg.get("verify_update", True))
+        # V2 decode-driver selection (spec §6). Default 'eager' = V1 (parity oracle).
+        decode_mode = cfg.get("decode_mode", "eager")
+        use_cuda_graph = bool(cfg.get("use_cuda_graph", False))
+        if decode_mode not in ("eager", "graphed"):
+            raise ValueError(
+                f"np.decode_mode={decode_mode!r} must be 'eager' or 'graphed'.")
         progress_bar = tqdm(range(num_iterations), desc="NP Training")
         for step in progress_bar:
             t0 = time.time()
@@ -511,10 +517,16 @@ class RayNPTrainer:
                     pid = (prompt["prompt_token_ids"]
                            if isinstance(prompt, dict) else prompt)
                     for r in range(int(cfg.n_rollout)):
-                        out = ray.get(self.engines[0].collective_rpc.remote(
-                            "run_np_decode",
-                            args=(pid, sp, layer_name, np_cfg, r),
-                        ))[0]
+                        if decode_mode == "graphed":
+                            out = ray.get(self.engines[0].collective_rpc.remote(
+                                "run_np_decode_graphed",
+                                args=(pid, sp, layer_name, np_cfg, r, use_cuda_graph),
+                            ))[0]
+                        else:
+                            out = ray.get(self.engines[0].collective_rpc.remote(
+                                "run_np_decode",
+                                args=(pid, sp, layer_name, np_cfg, r),
+                            ))[0]
                         if not out["clean_tokens"]:
                             continue  # empty rollout -> no signal
                         full = list(pid) + list(out["clean_tokens"])

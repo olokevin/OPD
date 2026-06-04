@@ -28,6 +28,11 @@ def main():
     ap.add_argument("--n-sample", type=int, default=4)
     ap.add_argument("--prompt", default="What is 2+2? Answer:")
     ap.add_argument("--max-tokens", type=int, default=16)
+    ap.add_argument("--driver", choices=["v1", "graphed_eager", "graphed_cuda"],
+                    default="v1",
+                    help="v1=run_np_decode (eager, in-forward RNG); "
+                         "graphed_eager=run_np_decode_graphed use_cuda_graph=False; "
+                         "graphed_cuda=run_np_decode_graphed use_cuda_graph=True")
     args = ap.parse_args()
 
     wext = "verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension"
@@ -48,9 +53,20 @@ def main():
     llm.collective_rpc("install_perturb_layers", args=([args.layer],))
     np_cfg = dict(n_sample=args.n_sample, max_tokens=args.max_tokens, global_seed=42,
                   sigma=0.0, sample_method="gaussian")
-    out = llm.collective_rpc("run_np_decode",
-                             args=(prompt_ids, SamplingParams(temperature=0.0),
-                                   args.layer, np_cfg, 0))[0]
+    if args.driver == "v1":
+        out = llm.collective_rpc("run_np_decode",
+                                 args=(prompt_ids, SamplingParams(temperature=0.0),
+                                       args.layer, np_cfg, 0))[0]
+    else:
+        # V2 buffer-in-graph path: with sigma=0 the perturb_graph op adds 0*u_buf,
+        # so every perturbed row equals the clean row and the clean rollout must
+        # still match stock greedy generate() (spec §7.3). Exercises the same
+        # slot_mapping=[clean,-1xN] / shared-prefix KV routing under the new driver.
+        use_cuda = (args.driver == "graphed_cuda")
+        out = llm.collective_rpc(
+            "run_np_decode_graphed",
+            args=(prompt_ids, SamplingParams(temperature=0.0),
+                  args.layer, np_cfg, 0, use_cuda))[0]
     np_tokens = out["clean_tokens"]
 
     # Assertions.
@@ -59,7 +75,7 @@ def main():
     # width: each step's candidate logits must be [1+n_sample, vocab]
     for i, cl in enumerate(out["candidate_logits"]):
         assert cl.shape[0] == 1 + args.n_sample, f"step {i} width {cl.shape[0]} != {1+args.n_sample}"
-    print(f"PASS: sigma=0 matches greedy ({len(ref_tokens)} tokens); "
+    print(f"PASS [{args.driver}]: sigma=0 matches greedy ({len(ref_tokens)} tokens); "
           f"width=1+{args.n_sample} every step.")
 
 
