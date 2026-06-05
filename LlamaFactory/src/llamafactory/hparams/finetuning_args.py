@@ -601,6 +601,16 @@ class CompressArguments:
         default=1.0,
         metadata={"help": "SVD compression ratio in (0, 1] for svd_v2 modes."},
     )
+    skip_last_layers: int = field(
+        default=1,
+        metadata={
+            "help": (
+                "Number of trailing decoder layers left DENSE (never compressed) "
+                "for finetuning_type=svd_nystrom. Matches the reasoning-aware "
+                "compression operating point (the last layer feeds the LM head)."
+            )
+        },
+    )
 
 
 @dataclass
@@ -625,7 +635,7 @@ class FinetuningArguments(
         default="sft",
         metadata={"help": "Which stage will be performed in training."},
     )
-    finetuning_type: Literal["lora", "oft", "freeze", "full", "blocktt", "svd"] = field(
+    finetuning_type: Literal["lora", "oft", "freeze", "full", "blocktt", "svd", "svd_nystrom"] = field(
         default="lora",
         metadata={"help": "Which fine-tuning method to use."},
     )
@@ -720,7 +730,7 @@ class FinetuningArguments(
         self.use_ref_model = self.stage == "dpo" and self.pref_loss not in ["orpo", "simpo"]
 
         assert self.finetuning_type in [
-            "lora", "oft", "freeze", "full", "blocktt", "svd",
+            "lora", "oft", "freeze", "full", "blocktt", "svd", "svd_nystrom",
         ], "Invalid fine-tuning method."
         assert self.ref_model_quantization_bit in [None, 8, 4], "We only accept 4-bit or 8-bit quantization."
         assert self.reward_model_quantization_bit in [None, 8, 4], "We only accept 4-bit or 8-bit quantization."
@@ -765,7 +775,9 @@ class FinetuningArguments(
         # ---------------------------------------------------------------
         # BlockTT / SVD validators (CompressArguments)
         # ---------------------------------------------------------------
-        if self.finetuning_type in ("blocktt", "svd"):
+        # svd_nystrom shares the SVD-family calibration plumbing (calibrated SVD on
+        # self_attn) plus a Nystrom MLP path; it validates like "svd" here.
+        if self.finetuning_type in ("blocktt", "svd", "svd_nystrom"):
             # Reject co-use with GaLore / APOLLO / BAdam
             if self.use_galore or self.use_apollo or self.use_badam:
                 raise ValueError(
@@ -785,11 +797,11 @@ class FinetuningArguments(
                     "blocktt train_position must be one of small|large|both "
                     f"(got {self.train_position!r})."
                 )
-            if self.finetuning_type == "svd" and self.train_position not in (
+            if self.finetuning_type in ("svd", "svd_nystrom") and self.train_position not in (
                 "output", "input", "both",
             ):
                 raise ValueError(
-                    "svd train_position must be one of output|input|both "
+                    f"{self.finetuning_type} train_position must be one of output|input|both "
                     f"(got {self.train_position!r})."
                 )
 
@@ -829,23 +841,32 @@ class FinetuningArguments(
             # accepted up front.
             resolve_blocktt_rank(self.blocktt_rank, calib_mode=self.calib_mode)
 
-        # calib_mode is only meaningful when finetuning_type ∈ {blocktt, svd}
+        # calib_mode is only meaningful when finetuning_type ∈ {blocktt, svd, svd_nystrom}
         if self.calib_mode != "none":
-            if self.finetuning_type not in ("blocktt", "svd"):
+            if self.finetuning_type not in ("blocktt", "svd", "svd_nystrom"):
                 raise ValueError(
                     f"calib_mode={self.calib_mode!r} only valid with "
-                    "finetuning_type blocktt or svd."
+                    "finetuning_type blocktt, svd or svd_nystrom."
                 )
-            if self.calib_mode.startswith("svd_") and self.finetuning_type != "svd":
+            if self.calib_mode.startswith("svd_") and self.finetuning_type not in ("svd", "svd_nystrom"):
                 raise ValueError(
                     f"calib_mode={self.calib_mode!r} (an SVD mode) requires "
-                    "finetuning_type=svd."
+                    "finetuning_type=svd or svd_nystrom."
                 )
             if (not self.calib_mode.startswith("svd_")) and self.finetuning_type != "blocktt":
                 raise ValueError(
                     f"calib_mode={self.calib_mode!r} (a BTT mode) requires "
                     "finetuning_type=blocktt."
                 )
+
+        # svd_nystrom must be calibrated (forward svd_v2 or combined svd_v2_combined)
+        if self.finetuning_type == "svd_nystrom" and self.calib_mode not in (
+            "svd_v2", "svd_v2_combined",
+        ):
+            raise ValueError(
+                "finetuning_type=svd_nystrom requires calib_mode=svd_v2 (forward) "
+                f"or svd_v2_combined (forward+backward); got {self.calib_mode!r}."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         args = asdict(self)
