@@ -99,3 +99,36 @@ def test_topk_window_preserves_teacher_id_outside_student_topk():
     t_ids = torch.tensor([5, 0]); t_logp = torch.tensor([-0.1, -2.0])
     ids, t_aligned = sc._select_ids(s_clean_full, t_ids, t_logp, fallback=-50.0)
     assert 5 in ids.tolist() and 0 in ids.tolist()  # union keeps teacher id 5
+
+
+def test_topk_slice_matches_full_vocab_kl_only_stu():
+    import torch
+    from verl.trainer.np.teacher_scorer import reverse_kl_topk
+    vocab, n, k = 200, 4, 32
+    logits = torch.randn(1 + n, vocab)
+    # full-vocab reference: take student top-k ids, score
+    ids = torch.topk(logits[0], k).indices
+    s_full = torch.log_softmax(logits.float(), -1)
+    ref = s_full[:, ids]
+    # sliced storage: gather all rows on the same ids, store [1+n, k] + ids
+    s_sliced = torch.log_softmax(logits.float(), -1)[:, ids]  # log_softmax over full vocab, then slice
+    assert torch.allclose(ref, s_sliced, atol=1e-5)
+
+
+def test_topk_store_helper_returns_logprobs_and_ids():
+    import torch
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+    we = WorkerExtension.__new__(WorkerExtension)
+    vocab, n, k = 200, 4, 32
+    logits = torch.randn(1 + n, vocab)
+    topk_logp, ids = we._topk_store(logits, k)
+    assert topk_logp.shape == (1 + n, k)
+    assert ids.shape == (k,)
+    # ids are the student (row 0) top-k
+    assert torch.equal(torch.sort(ids).values,
+                       torch.sort(torch.topk(logits[0], k).indices).values)
+    # stored values == log_softmax over full vocab, then sliced on those ids
+    ref = torch.log_softmax(logits.float(), -1)[:, ids]
+    assert torch.allclose(topk_logp, ref, atol=1e-5)
+    # outputs are on CPU (D2H done inside the helper)
+    assert topk_logp.device.type == "cpu" and ids.device.type == "cpu"

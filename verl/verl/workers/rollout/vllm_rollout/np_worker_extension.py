@@ -189,6 +189,7 @@ class WorkerExtension:
         device = mr.device
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         # Prefill prompt (clean, normal KV write).
         state = self._np_prefill(model, device, list(prompt_token_ids))
@@ -209,7 +210,7 @@ class WorkerExtension:
                 "captured_u": {},
             })
             logits = self._np_step_forward(model, device, state, n_sample)
-            candidate_logits.append(logits.detach().to("cpu"))
+            candidate_logits.append(self._topk_store(logits, topk_store_k))
             captured_u[t] = st["captured_u"].get(layer_name)
             # x_t for the rank-1 update, captured in the SAME forward (no 2nd pass).
             cx = st["captured_x"].get(layer_name)
@@ -290,6 +291,7 @@ class WorkerExtension:
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
         sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         state = self._np_prefill(model, device, list(prompt_token_ids))
         # Largest seqused_k the decode reaches (prompt_len + max_tokens). Used to
@@ -350,7 +352,7 @@ class WorkerExtension:
                     logits = self._np_step_forward_graph(
                         model, device, state, n_sample)
 
-                candidate_logits.append(logits.detach().to("cpu"))
+                candidate_logits.append(self._topk_store(logits, topk_store_k))
                 # u_t for the rank-1 update: same noise just written to u_buf.
                 captured_u[t] = u_buf.detach().to("cpu").clone()
                 captured_x[t] = x_buf.detach().to("cpu").clone()
@@ -389,6 +391,7 @@ class WorkerExtension:
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
         sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         states = self._np_prefill_packed(model, device, list_of_prompt_ids)
         b_pack = len(states)
@@ -463,7 +466,7 @@ class WorkerExtension:
                 for i, p in enumerate(active_idx):
                     base = blocks[i]["clean"]
                     block = logits[base:base + 1 + n_sample]  # [1+N, vocab]
-                    candidate_logits[p].append(block.detach().to("cpu"))
+                    candidate_logits[p].append(self._topk_store(block, topk_store_k))
                     # u for this prompt = its N rows of u_buf.
                     captured_u[p][t] = u_buf[i * n_sample:(i + 1) * n_sample
                                              ].detach().to("cpu").clone()
@@ -1081,6 +1084,20 @@ class WorkerExtension:
                 model, device, input_ids, positions, attn_meta, total)
             logits = model.compute_logits(hidden)
         return logits
+
+    def _topk_store(self, logits, k):
+        """Store top-k log-probs (GPU-side log_softmax over FULL vocab) + ids.
+
+        log_softmax MUST be over the full vocab BEFORE slicing, else the
+        normalizer is wrong. ids come from the clean/student row (0); ALL rows
+        are gathered on those same ids -> [1+N, k] log-probs + [k] ids, both on
+        CPU. Replaces the full-vocab D2H copy in the decode drivers (the scorer
+        consumes top-k log-probs directly). k is clamped to the vocab size.
+        """
+        lp = torch.log_softmax(logits.float(), dim=-1)
+        k = min(int(k), lp.shape[-1])
+        ids = torch.topk(lp[0], k).indices
+        return lp[:, ids].to("cpu"), ids.to("cpu")
 
     def _np_sample_clean(self, logits_row0, sampling_params):
         """Sample / argmax the clean next token. Greedy when temperature==0."""
