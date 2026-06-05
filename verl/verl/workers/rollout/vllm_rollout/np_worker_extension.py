@@ -660,6 +660,65 @@ class WorkerExtension:
                     attn_metadata[layer] = meta
         return attn_metadata, total_tokens
 
+    def _np_build_attn_metadata_packed(self, per_row_block_ids, query_lens,
+                                       seq_lens, slot_mapping, positions_cpu):
+        """Packed attn_metadata: num_reqs = R rows, each row carrying its OWN
+        seq_len / block_table / slot. Generalizes _np_build_attn_metadata (which
+        assumed one shared block_ids for all 1+N rows) to B_pack prompts.
+
+        per_row_block_ids: list (len R) of that row's prompt's block_ids list.
+        query_lens/seq_lens/slot_mapping/positions_cpu: per-row arrays (len R).
+        Rows in the same prompt block carry identical block_ids + seq_len; rows of
+        different prompts differ. Returns (attn_metadata, total_tokens)."""
+        from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+
+        mr = self.model_runner
+        device = mr.device
+
+        num_reqs = len(query_lens)
+        total_tokens = int(sum(query_lens))
+        max_query_len = int(max(query_lens))
+        max_seq_len = int(max(seq_lens))
+
+        qsl_np = np.zeros(num_reqs + 1, dtype=np.int32)
+        qsl_np[1:] = np.cumsum(np.asarray(query_lens, dtype=np.int32))
+        qsl_cpu = torch.from_numpy(qsl_np)
+        qsl_gpu = qsl_cpu.to(device)
+
+        sl_cpu = torch.from_numpy(np.asarray(seq_lens, dtype=np.int32))
+        sl_gpu = sl_cpu.to(device)
+
+        max_blocks = int(
+            mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+        bt = torch.zeros((num_reqs, max_blocks), dtype=torch.int32, device=device)
+        for row, bids in enumerate(per_row_block_ids):
+            bt[row, : len(bids)] = torch.tensor(
+                bids, dtype=torch.int32, device=device)
+
+        slot_mapping_gpu = torch.tensor(
+            slot_mapping, dtype=torch.int64, device=device)
+        num_computed_tokens_cpu = torch.tensor(
+            [s - q for s, q in zip(seq_lens, query_lens)], dtype=torch.int32)
+
+        common = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu, query_start_loc_cpu=qsl_cpu,
+            seq_lens=sl_gpu, seq_lens_cpu=sl_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs, num_actual_tokens=total_tokens,
+            max_query_len=max_query_len, max_seq_len=max_seq_len,
+            block_table_tensor=bt, slot_mapping=slot_mapping_gpu, causal=True,
+        )
+
+        attn_metadata = {}
+        for group_id, _ in enumerate(mr.kv_cache_config.kv_cache_groups):
+            for attn_group in mr.attn_groups[group_id]:
+                meta = attn_group.get_metadata_builder().build(
+                    common_prefix_len=0, common_attn_metadata=common,
+                    fast_build=True)
+                for layer in attn_group.layer_names:
+                    attn_metadata[layer] = meta
+        return attn_metadata, total_tokens
+
     def _np_run_forward(self, model, device, input_ids, positions,
                         attn_metadata, num_input_tokens):
         """Run model forward under set_forward_context. Returns hidden_states."""
