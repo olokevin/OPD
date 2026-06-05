@@ -95,6 +95,45 @@ def test_perturb_graph_only_acts_on_matched_layer():
     assert torch.allclose(out[0], x @ base.w.t())
 
 
+def test_perturb_graph_packed_scatter_branch():
+    """Exercises the packed (pri set) branch of PerturbedLinear.forward on CPU:
+    perturbed rows are SCATTERED across prompt blocks and get +sigma*u_buf,
+    clean rows are untouched, and x_buf captures the clean rows' inputs.
+
+    2 prompts, n_sample=2 -> R=6 rows (prompt-major: prompt0's clean+2 perturbed,
+    then prompt1's). With an identity weight y == x, so the assertions read the
+    perturbation directly off the output."""
+    d = 4
+    b_pack, n_sample = 2, 2
+    base = FakeLinear(d, d)                      # identity weight -> y == x
+    # prompt-major row layout: [c0, p0a, p0b, c1, p1a, p1b]
+    clean_row_idx = torch.tensor([0, 3], dtype=torch.long)
+    perturbed_row_idx = torch.tensor([1, 2, 4, 5], dtype=torch.long)
+    # u_buf row i corresponds to perturbed_row_idx[i].
+    u_buf = torch.arange(1, 1 + 4 * d, dtype=torch.float32).reshape(4, d)
+    x_buf = torch.zeros(b_pack, d)               # [#active, d_in]
+    st = {
+        "mode": "perturb_graph", "layer": "L", "sigma": 2.0,
+        "n_clean_rows": 1, "u_buf": u_buf, "x_buf": x_buf,
+        "clean_row_idx": clean_row_idx,
+        "perturbed_row_idx": perturbed_row_idx,
+    }
+    pl = PerturbedLinear(base, name="L", np_state_ref=lambda: st)
+
+    # distinct per-row inputs so we can verify clean rows survive untouched.
+    x = torch.arange(6 * d, dtype=torch.float32, device="cpu").reshape(6, d)
+    out, _ = pl(x)
+
+    # (a) perturbed rows got + sigma*u_buf (row pri[i] += u_buf[i]).
+    for i, r in enumerate(perturbed_row_idx.tolist()):
+        assert torch.allclose(out[r], x[r] + 2.0 * u_buf[i]), f"row {r}"
+    # (b) clean rows are UNCHANGED by the perturbation (y == x there).
+    for r in clean_row_idx.tolist():
+        assert torch.allclose(out[r], x[r]), f"clean row {r} perturbed"
+    # (c) x_buf now holds the clean rows' inputs (x[clean_row_idx]).
+    assert torch.allclose(x_buf, x[clean_row_idx])
+
+
 def test_fill_u_buf_is_bit_identical_to_v1_in_forward_draw():
     """_np_fill_u_buf must produce the SAME bytes V1 draws in-forward for the
     same key. This is the M1 parity-by-construction guarantee."""

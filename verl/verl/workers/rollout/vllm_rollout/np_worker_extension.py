@@ -299,6 +299,11 @@ class WorkerExtension:
             "n_clean_rows": 1,
             "u_buf": u_buf,
             "x_buf": x_buf,
+            # Defensive: ensure the single-prompt path is taken even if a prior
+            # packed decode on this worker left these scatter indices behind
+            # (PerturbedLinear reads pri = st.get("perturbed_row_idx")).
+            "perturbed_row_idx": None,
+            "clean_row_idx": None,
         })
 
         clean_tokens, candidate_logits, captured_u, captured_x = [], [], {}, {}
@@ -375,11 +380,12 @@ class WorkerExtension:
         """One wide forward of R = (#active prompts)*(1+n_sample) rows.
 
         states: list of per-prompt state dicts (only ACTIVE prompts passed in).
-        u_buf:  [#active*n_sample, d_out] host-refilled perturbation buffer; row order
-                matches perturbed_row_idx (prompt-major: prompt0's N rows, then
-                prompt1's N, ...). x_buf: [#active, d_in] receives each prompt's
-                clean-row input. clean_row_idx/perturbed_row_idx: LongTensors of the
-                row positions in the packed batch (from _packed_row_blocks).
+        u_buf:  [#active*n_sample, d_out] host-refilled perturbation buffer;
+                row order matches perturbed_row_idx (prompt-major: prompt0's N
+                rows, then prompt1's N, ...).
+        x_buf:  [#active, d_in] receives each prompt's clean-row input.
+        clean_row_idx / perturbed_row_idx: LongTensors of the row positions in
+                the packed batch (from _packed_row_blocks).
 
         Returns [R, vocab] logits. Caller slices each prompt's clean row (row
         p*(1+n_sample)) for sampling and its N perturbed rows for L_q."""
