@@ -948,7 +948,10 @@ def _assign_rollout_ids(step, batch_size, n_rollout):
     """Stable per-(prompt,rollout) seed identity (spec §4.6). The serial loop
     seeds prompt b with rollout_idx = step*batch_size + b; packing must reproduce
     the SAME id per prompt so draw_noise is identical (parity-by-construction).
-    For n_rollout>1, each (prompt,rollout) slot gets a distinct id."""
+    For n_rollout==1 the id is simply step*batch_size + b.
+    For n_rollout>1, each (prompt b, rollout r) slot gets
+    (step*batch_size + b) * n_rollout + r — note this intentionally changes
+    absolute seed values vs n_rollout==1 to keep all slots globally distinct."""
     base = int(step) * int(batch_size)
     if int(n_rollout) <= 1:
         return [base + b for b in range(int(batch_size))]

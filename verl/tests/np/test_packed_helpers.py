@@ -1,4 +1,3 @@
-import pytest
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
     _packed_row_blocks,
     _assign_rollout_ids,
@@ -29,6 +28,6 @@ def test_assign_rollout_ids_matches_serial_global_index():
 def test_assign_rollout_ids_n_rollout_gt_1():
     # n_rollout>1: batch_size*n_rollout slots, each (prompt,rollout) a distinct id.
     ids = _assign_rollout_ids(step=0, batch_size=2, n_rollout=2)
-    # 2 prompts x 2 rollouts = 4 slots; ids must be distinct and stable.
-    assert len(ids) == 4
-    assert len(set(ids)) == 4
+    # (step*batch_size + b) * n_rollout + r:
+    # (0+0)*2+0, (0+0)*2+1, (0+1)*2+0, (0+1)*2+1
+    assert ids == [0, 1, 2, 3]
