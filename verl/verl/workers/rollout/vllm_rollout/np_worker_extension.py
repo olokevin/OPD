@@ -928,3 +928,32 @@ def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
     if token_agg == "mean":
         dw = dw / T
     return dw.to("cpu", dtype=torch.float32)
+
+
+def _packed_row_blocks(b_pack, n_sample):
+    """Row layout for a packed wave (spec §4.1). Each prompt p owns a contiguous
+    block of (1+n_sample) rows: row p*(1+n_sample) is its clean row, the next
+    n_sample are its perturbed rails. Returns a list (len b_pack) of
+    {"clean": int, "perturbed": [int, ...]}."""
+    width = 1 + int(n_sample)
+    blocks = []
+    for p in range(int(b_pack)):
+        base = p * width
+        blocks.append({"clean": base,
+                       "perturbed": list(range(base + 1, base + width))})
+    return blocks
+
+
+def _assign_rollout_ids(step, batch_size, n_rollout):
+    """Stable per-(prompt,rollout) seed identity (spec §4.6). The serial loop
+    seeds prompt b with rollout_idx = step*batch_size + b; packing must reproduce
+    the SAME id per prompt so draw_noise is identical (parity-by-construction).
+    For n_rollout>1, each (prompt,rollout) slot gets a distinct id."""
+    base = int(step) * int(batch_size)
+    if int(n_rollout) <= 1:
+        return [base + b for b in range(int(batch_size))]
+    ids = []
+    for b in range(int(batch_size)):
+        for r in range(int(n_rollout)):
+            ids.append((base + b) * int(n_rollout) + r)
+    return ids
