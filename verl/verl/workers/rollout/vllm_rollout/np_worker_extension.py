@@ -74,25 +74,33 @@ class PerturbedLinear(torch.nn.Module):
             return out
 
         if mode == "perturb_graph" and self.name == st["layer"]:
-            # V2 graph-capturable perturbation (spec §5.2). The noise is NOT drawn
-            # here -- the host has already filled the persistent buffer u_buf
-            # (st["u_buf"]) via _np_fill_u_buf before this forward. The op is a
-            # fixed-shape, RNG-free, allocation-free elementwise add on the
-            # perturbed-row block -- the only thing a captured CUDA graph records.
-            #   y[n_clean : n_clean+N] += sigma * u_buf      (u_buf is [N, d_out])
-            # x_t is written into the persistent x_buf (st["x_buf"]) so it survives
-            # past graph.replay() (a view into the transient activation would not).
-            # x_buf is always installed by run_np_decode_graphed (the only caller
-            # of perturb_graph mode); copy x[0] in place so it survives replay.
-            st["x_buf"].copy_(x[0])
-            sigma = st["sigma"]              # captured scalar (python float)
-            u_buf = st["u_buf"]              # [N, d_out], host-refilled, persistent
-            # In-place add on the perturbed-row slice. sigma==0 still adds 0*u_buf,
-            # which is exactly the no-op the sigma=0 gate expects -- and keeping the
-            # op unconditional means the captured graph is identical for sigma>0/=0
-            # (no data-dependent branch inside the captured region).
-            y[n_clean:n_clean + u_buf.shape[0]] = (
-                y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            # V2 graph-capturable perturbation (spec §5.2). The host has already
+            # filled the persistent buffer u_buf (st["u_buf"]) before this forward.
+            # The op is a fixed-shape, RNG-free, allocation-free elementwise add on
+            # the perturbed rows. Two row layouts:
+            #   single-prompt (pri is None): perturbed rows are the contiguous slice
+            #     [n_clean : n_clean+N]; one clean row x[0] -> x_buf. (V1/V2 graphed
+            #     driver, unchanged -- parity oracle.)
+            #   packed (pri set): perturbed rows are SCATTERED across prompt blocks
+            #     (st["perturbed_row_idx"]); each prompt's clean-row input is captured
+            #     into x_buf row-by-row via st["clean_row_idx"].
+            sigma = st["sigma"]              # python float
+            u_buf = st["u_buf"]              # [n_pert_rows, d_out] host-refilled
+            pri = st.get("perturbed_row_idx")
+            if pri is None:
+                # single-prompt path (unchanged). sigma==0 still adds 0*u_buf -> the
+                # no-op the sigma=0 gate expects; unconditional op keeps a captured
+                # graph identical for sigma>0/=0.
+                st["x_buf"].copy_(x[0])
+                y[n_clean:n_clean + u_buf.shape[0]] = (
+                    y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            else:
+                # packed path: x_buf holds one clean-input row per prompt; capture
+                # each prompt's clean-row input, and scatter-add u_buf to the
+                # perturbed rows. u_buf row i corresponds to pri[i].
+                cri = st["clean_row_idx"]    # LongTensor [b_pack] clean rows
+                st["x_buf"].copy_(x[cri])    # [b_pack, d_in]
+                y[pri] = y[pri] + sigma * u_buf
             return _repack(y, bias, was_tuple)
 
         if mode == "perturb" and self.name == st["layer"]:
@@ -356,6 +364,54 @@ class WorkerExtension:
 
         attn_meta, total = self._np_build_attn_metadata(
             state, query_lens, seq_lens, slot_mapping, positions)
+        with torch.no_grad():
+            hidden = self._np_run_forward(
+                model, device, input_ids, positions, attn_meta, total)
+            logits = model.compute_logits(hidden)
+        return logits
+
+    def _np_step_forward_packed(self, model, device, states, n_sample, u_buf,
+                                x_buf, clean_row_idx, perturbed_row_idx):
+        """One wide forward of R = (#active prompts)*(1+n_sample) rows.
+
+        states: list of per-prompt state dicts (only ACTIVE prompts passed in).
+        u_buf:  [#active*n_sample, d_out] host-refilled perturbation buffer; row order
+                matches perturbed_row_idx (prompt-major: prompt0's N rows, then
+                prompt1's N, ...). x_buf: [#active, d_in] receives each prompt's
+                clean-row input. clean_row_idx/perturbed_row_idx: LongTensors of the
+                row positions in the packed batch (from _packed_row_blocks).
+
+        Returns [R, vocab] logits. Caller slices each prompt's clean row (row
+        p*(1+n_sample)) for sampling and its N perturbed rows for L_q."""
+        width = 1 + n_sample
+        input_ids, positions, slot_mapping, seq_lens, query_lens = [], [], [], [], []
+        per_row_block_ids = []
+        for st_p in states:
+            block_ids = st_p["block_ids"]
+            block_size = st_p["block_size"]
+            prompt_len = st_p["prompt_len"]
+            q_pos = st_p["kv_cursor"]
+            if q_pos < prompt_len:
+                q_token = st_p["prompt_token_ids"][q_pos]
+            else:
+                q_token = st_p["committed_tokens"][q_pos - prompt_len]
+            clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+            # clean row writes KV; perturbed rows PAD(-1) -> reshape_and_cache skips.
+            input_ids += [q_token] * width
+            positions += [q_pos] * width
+            slot_mapping += [clean_slot] + [-1] * n_sample
+            seq_lens += [q_pos + 1] * width
+            query_lens += [1] * width
+            per_row_block_ids += [block_ids] * width
+
+        attn_meta, total = self._np_build_attn_metadata_packed(
+            per_row_block_ids, query_lens, seq_lens, slot_mapping, positions)
+
+        # np_state carries the scatter indices so PerturbedLinear adds noise to the
+        # right rows. u_buf/x_buf already installed by run_np_decode_packed.
+        st = self.np_state
+        st["clean_row_idx"] = clean_row_idx
+        st["perturbed_row_idx"] = perturbed_row_idx
         with torch.no_grad():
             hidden = self._np_run_forward(
                 model, device, input_ids, positions, attn_meta, total)
