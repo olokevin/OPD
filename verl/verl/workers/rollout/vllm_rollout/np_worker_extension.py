@@ -1205,6 +1205,29 @@ class WorkerExtension:
                                   device=self.device)
         return self.apply_node_update(layer_name, dw, lr, update_clip)
 
+    def assemble_all_layers_and_apply(self, layer_signals, L_q_steps, L_clean_steps,
+                                      sigma, sample_mode, normalize, token_agg,
+                                      lr, update_clip):
+        """One-RPC bundle of (assemble δW) + (apply δW locally) for ALL layers.
+
+        layer_signals: {name: {"u": u_steps, "x": x_steps}}. The shared loss
+        L_q_steps/L_clean_steps (one combined loss per (token, sample), scored on
+        the clean rollout) is passed ONCE and reused for every layer -- never
+        copied T×L times (the C-5 bug this design avoids). We detach the shared
+        L_q_steps once before the loop, batch-assemble every layer's δW with one
+        GPU reduce per layer (device=self.device), then apply each in-place.
+
+        Returns {name: ‖δW‖} (post-clip) so the trainer can log + assert >0 per layer.
+        """
+        L_q_dev = [lq.detach() if hasattr(lq, "detach") else torch.as_tensor(lq)
+                   for lq in L_q_steps]
+        dws = assemble_all_layers(L_q_dev, L_clean_steps, layer_signals,
+                                  sigma=sigma, sample_mode=sample_mode,
+                                  normalize=normalize, token_agg=token_agg,
+                                  device=self.device)
+        return {ln: float(self.apply_node_update(ln, dw, lr, update_clip))
+                for ln, dw in dws.items()}
+
 
 def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
                          sigma, sample_mode, normalize, token_agg, eps=1e-6,
@@ -1253,6 +1276,18 @@ def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
     if token_agg == "mean":
         dw = dw / T
     return dw.to("cpu", dtype=torch.float32)
+
+
+def assemble_all_layers(L_q_per_step, L_clean_per_step, layer_signals,
+                        sigma, sample_mode, normalize, token_agg, device=None):
+    """Batched assemble for ALL layers. layer_signals: {name: {"u":[...], "x":[...]}}.
+    L_q/L_clean are SHARED across layers (one combined loss per (token,sample)).
+    Returns {name: dW [d_out,d_in] on CPU}. Reuses assemble_layer_delta per layer."""
+    return {ln: assemble_layer_delta(L_q_per_step, L_clean_per_step,
+                                     sig["u"], sig["x"], sigma=sigma,
+                                     sample_mode=sample_mode, normalize=normalize,
+                                     token_agg=token_agg, device=device)
+            for ln, sig in layer_signals.items()}
 
 
 def _packed_row_blocks(b_pack, n_sample):
