@@ -90,16 +90,28 @@ class TeacherScorer:
         surfaced, but using the minimum prevents log-prob domination.
         See spec §3 and §4 (top_k_strategy).
 
-        New-path approximation (TOP-K TUPLE only): for `union` (and
-        `union-intersection`), a teacher id may fall OUTSIDE the stored student
-        window — its true student log-prob is then unavailable (the full-vocab
-        path had it). We use the per-row MIN of the stored student top-k logps
-        as that id's student log-prob (a calibrated floor, symmetric to how
-        teacher ids missing from the teacher surface are filled with the
-        teacher MIN). For `only_stu`/`intersection`/`only_tch` no such id can
-        occur (the scored set is a subset of the stored window, or the teacher
-        set is scored verbatim), so those strategies are EXACT vs the legacy
-        path. only_stu — the lossless production default — is exact.
+        New-path approximation (TOP-K TUPLE only): ANY scored teacher id that
+        falls OUTSIDE the stored student window (`store_k < vocab`) has its true
+        student log-prob unavailable (the full-vocab path read it directly). We
+        substitute the per-row MIN of the stored student top-k logps (`s_floor`)
+        for that id (a calibrated floor, symmetric to how teacher ids missing
+        from the teacher surface are filled with the teacher MIN). This affects:
+          - `union`: teacher ids outside the student top-`top_k` but still
+            outside the stored window.
+          - `only_tch`: teacher ids ranked below the student's top-`store_k`.
+          - `intersection`: only its empty-intersection fallback, which scores
+            the full teacher set and thus inherits the same `only_tch` floor.
+        Exactness vs the legacy full-vocab path:
+          - `only_stu` is ALWAYS bit-exact — its scored ids are the student
+            top-`top_k`, a strict subset of the stored window, so no id is ever
+            floored. This is the lossless production default.
+          - `only_tch` / `intersection`-fallback / `union` are exact ONLY when
+            the window covers the full vocab (`store_k >= vocab`); with a finite
+            window they use the `s_floor` approximation above for any
+            out-of-window id and can deviate (empirically rel-Frobenius ~0.2–0.3
+            for `only_tch` at small `store_k`).
+        When `store_k >= vocab` the window is the full vocab, no id is ever
+        out-of-window, and ALL strategies are exact.
         """
         if not candidate_logits:
             return [], []
@@ -179,13 +191,14 @@ class TeacherScorer:
         Returns (s_logp_sel [1+N, k'], t_aligned [k']) where the scored id set
         matches what _select_ids would produce, the teacher logps are aligned
         the same way (missing -> `fallback`), and the student logps are looked
-        up from the stored window (missing -> per-row `s_floor`, union only).
+        up from the stored window (any scored id outside the window -> per-row
+        `s_floor`; can happen for union, only_tch, or the intersection-fallback
+        whenever store_k < vocab — see score_rollout for the exactness scope).
 
         stored_ids are the student top-`topk_store_k` in DESCENDING student-logp
         order, so stored_ids[:top_k] IS the student top-`top_k` (== the
         torch.topk(s_full, top_k) set the legacy _select_ids computes).
         """
-        n_rows = topk_logp.shape[0]
         # Map stored id -> its column in topk_logp (student log-probs per row).
         stored_list = stored_ids.tolist()
         col_of = {int(i): j for j, i in enumerate(stored_list)}
@@ -217,7 +230,8 @@ class TeacherScorer:
             if j is not None:
                 s_cols.append(topk_logp[:, j])        # [1+N] exact student logp
             else:
-                # union teacher id outside the stored window -> per-row floor.
+                # scored id outside the stored window -> per-row floor
+                # (union / only_tch / intersection-fallback when store_k < vocab).
                 s_cols.append(s_floor)
             t_vals.append(t_map.get(i, fallback))
         s_logp_sel = torch.stack(s_cols, dim=1)       # [1+N, k']

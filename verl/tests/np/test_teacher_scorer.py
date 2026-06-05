@@ -169,3 +169,47 @@ def test_vectorized_score_matches_legacy_only_stu(weight_mode):
         rel = (Lq_new[t] - Lq_ref[t]).norm() / (Lq_ref[t].norm() + 1e-9)
         assert rel < 1e-4, f"step {t} weight={weight_mode} rel={rel:.2e}"
         assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
+
+
+@pytest.mark.parametrize("strategy", ["only_stu", "only_tch", "intersection", "union"])
+@pytest.mark.parametrize("weight_mode", ["student_p", "teacher_p", "none"])
+def test_vectorized_score_matches_legacy_full_window_all_strategies(strategy, weight_mode):
+    # FULL-WINDOW exactness: with store_k >= vocab the stored student window IS
+    # the full vocab, so NO scored teacher id is ever out-of-window and the
+    # s_floor approximation is never used. Therefore the vectorized tuple path
+    # must reproduce the legacy full-vocab per-token-loop result for ALL
+    # strategies (only_stu / only_tch / intersection / union) and all weight
+    # modes. This guards the id-set selection + teacher-alignment logic against
+    # future regressions. (At small store_k, only_stu stays exact while the
+    # others deviate — that is documented, not tested here.)
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+    torch.manual_seed(0)
+    T, n, vocab, top_k, store_k = 6, 4, 128, 8, 128  # store_k == vocab -> full window
+    we = WorkerExtension.__new__(WorkerExtension)
+    logits_steps = [torch.randn(1 + n, vocab) for _ in range(T)]
+
+    # Build teacher ids that include some WITHIN the student top-`top_k` and some
+    # genuinely OUTSIDE it (but inside store_k=vocab), so union/intersection have
+    # non-trivial content. All ids are in-window since store_k == vocab.
+    t_ids, t_logp = [], []
+    for s in logits_steps:
+        s_top = torch.topk(s[0], top_k).indices                  # student top-`top_k`
+        not_top = torch.tensor([i for i in range(vocab) if i not in set(s_top.tolist())])
+        inside = s_top[:4]                                        # 4 ids inside student top-k
+        outside = not_top[torch.randperm(not_top.numel())[:12]]  # 12 ids outside it
+        ids = torch.cat([inside, outside])
+        t_ids.append(ids)
+        t_logp.append(torch.log_softmax(torch.randn(ids.numel()), -1))
+
+    legacy_cl = [s.clone() for s in logits_steps]                  # full-vocab tensors
+    tuple_cl = [we._topk_store(s, store_k) for s in logits_steps]  # C1 tuples (full window)
+
+    sc_legacy = _fake_teacher_scorer(strategy, weight_mode, top_k, t_ids, t_logp)
+    sc_vec = _fake_teacher_scorer(strategy, weight_mode, top_k, t_ids, t_logp)
+    Lq_ref, Lc_ref = sc_legacy.score_rollout(None, legacy_cl)
+    Lq_new, Lc_new = sc_vec.score_rollout(None, tuple_cl)
+
+    for t in range(T):
+        rel = (Lq_new[t] - Lq_ref[t]).norm() / (Lq_ref[t].norm() + 1e-9)
+        assert rel < 1e-4, f"step {t} strat={strategy} weight={weight_mode} rel={rel:.2e}"
+        assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
