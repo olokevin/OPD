@@ -493,6 +493,12 @@ class RayNPTrainer:
             raise ValueError(
                 f"np.decode_mode={decode_mode!r} must be 'eager', 'graphed', "
                 f"or 'packed'.")
+        # Packed mode needs the rollout-id helper; import once (pure-Python, no
+        # GPU deps) rather than per-step inside the layer loop.
+        if decode_mode == "packed":
+            from verl.workers.rollout.vllm_rollout.np_worker_extension import (
+                _assign_rollout_ids,
+            )
         # Env-gated per-prompt boundary instrumentation (decode / score / assemble).
         # Removable: set NP_DEBUG_DECODE=1 only when diagnosing a stall.
         NP_DEBUG_DECODE = os.environ.get("NP_DEBUG_DECODE", "0") == "1"
@@ -518,9 +524,6 @@ class RayNPTrainer:
                 x_steps: List[Any] = []
 
                 if decode_mode == "packed":
-                    from verl.workers.rollout.vllm_rollout.np_worker_extension import (
-                        _assign_rollout_ids,
-                    )
                     all_pids = [
                         (prompts[(step * batch_size + b) % len(prompts)])
                         for b in range(batch_size)
@@ -557,6 +560,8 @@ class RayNPTrainer:
                         if NP_DEBUG_DECODE:
                             print(f"[npdbg s{step}] wave decode done "
                                   f"dt={time.time()-_tw:.2f}s", flush=True)
+                        if NP_DEBUG_DECODE:
+                            _tsw = time.time()
                         for pidx in range(len(wave_pids)):
                             if not out["clean_tokens"][pidx]:
                                 continue
@@ -571,6 +576,9 @@ class RayNPTrainer:
                                         for t in range(nT)]
                             x_steps += [out["captured_x"][pidx][t]
                                         for t in range(nT)]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step}] wave score done "
+                                  f"dt={time.time()-_tsw:.2f}s", flush=True)
                 else:
                     for b in range(batch_size):
                         prompt = prompts[(step * batch_size + b) % len(prompts)]
