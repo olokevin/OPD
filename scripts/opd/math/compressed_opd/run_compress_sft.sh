@@ -40,7 +40,12 @@ train_cell() {
   local out=$SFT_ROOT/$tag/${obj}_r0.7
   echo ">>> [train] $tag $obj on GPU $gpu -> $out"
   cd "$LF"
+  # FORCE_TORCHRUN=1 is required by llamafactory-cli for the DeepSpeed path
+  # (single-GPU torchrun on the one visible device). MASTER_PORT is per-GPU so two
+  # concurrent single-GPU runs don't collide on the default rendezvous port.
   CUDA_VISIBLE_DEVICES=$gpu \
+  FORCE_TORCHRUN=1 \
+  MASTER_PORT=$((29500 + gpu)) \
   WANDB_PROJECT=compress_sft_$tag \
   HF_HOME=$HF_HOME \
     "$SFT_CLI" train "examples/compress_train/$yaml" \
