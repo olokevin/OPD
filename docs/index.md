@@ -17,6 +17,7 @@ How a subsystem works: architecture, invariants, knobs, file map. Stable; update
 |---|---|
 | [compressed_opd](wiki/compressed_opd.md) | BTT-compressed Qwen3-4B → ~1.7B student for OPD math: launchers, calib cache, FSDP2 + BlockTT fixes, C4-PPL audit. |
 | [ZO](wiki/ZO.md) | The two zeroth-order OPD trainers — Weight Perturbation (ES) vs Node Perturbation (NP); what's perturbed, variance scaling, memory, update shape. |
+| [reasoning_aware_compress_calib](wiki/reasoning_aware_compress_calib.md) | Why one-shot structured compression collapses Qwen3-4B reasoning + the two levers that fix it: **M1 rank floor** (full-rank sparse residual, MATH 72→82% at fixed budget; M2 objective is null) and **sequence-reweighted full-seq calibration** (now the repo default). Failure = loss of *termination* before reasoning (looping cliff ~0.65). Synthesizes A/B/D + ratio-sweep + calib study. |
 | [zo_np_trainer](wiki/zo_np_trainer.md) | NP trainer internals: 1+n_sample-wide perturbed vLLM decode, teacher reverse-KL scoring, rank-1 δW accumulation. §8 = V1 throughput (forward is 99%). **§9 = V2 buffer-in-graph design + initial results (branch `np-v2-cudagraph-rails`): all GPU gates PASS (σ=0 incl. graph capture, m1/m2 parity u-bit-identical → graphed≡V1); throughput-vs-N (N≤16 ~free, +19% @ N=8; compute-bound past 32); cosine-vs-N (0.205/0.276/0.356/0.407 @ N=8/16/32/64)**. |
 
 ## Results — experiments & mid-conclusions (`docs/results/`)

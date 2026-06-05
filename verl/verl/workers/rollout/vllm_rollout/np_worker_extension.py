@@ -369,8 +369,8 @@ class WorkerExtension:
         wrapped = self.np_modules[layer_name]
         weight = wrapped.wrapped.weight          # [d_out, d_in]
         assert weight.is_floating_point(), (
-            f"perturb_graph needs a floating weight (got {weight.dtype}) for "
-            f"u_buf dtype parity. Layer {layer_name!r}.")
+            f"run_np_decode_packed: perturbed layer weight must be floating "
+            f"(got {weight.dtype}) for u_buf dtype parity. Layer {layer_name!r}.")
         d_out = int(weight.shape[0])
         d_in = int(weight.shape[1])
         buf_dtype = weight.dtype
@@ -386,6 +386,10 @@ class WorkerExtension:
             "layer": layer_name,
             "sigma": sigma,
             "n_clean_rows": 1,
+            "u_buf": None,
+            "x_buf": None,
+            "perturbed_row_idx": None,
+            "clean_row_idx": None,
         })
         try:
             for t in range(max_tokens):
@@ -396,6 +400,9 @@ class WorkerExtension:
                 blocks = _packed_row_blocks(n_active, n_sample)  # row layout for ACTIVE prompts
 
                 # Buffers sized to the active set this token.
+                # Buffers are re-allocated per token sized to the CURRENT active set
+                # (it shrinks as prompts hit EOS); re-alloc is simpler than remapping
+                # a fixed buffer across the active-set shrink boundary.
                 u_buf = torch.zeros(n_active * n_sample, d_out, device=device,
                                     dtype=buf_dtype)
                 x_buf = torch.zeros(n_active, d_in, device=device, dtype=buf_dtype)
@@ -406,6 +413,8 @@ class WorkerExtension:
                     dtype=torch.long, device=device)
                 st["u_buf"] = u_buf
                 st["x_buf"] = x_buf
+                st["clean_row_idx"] = clean_row_idx
+                st["perturbed_row_idx"] = perturbed_row_idx
 
                 # Refill u_buf: prompt-major, each active prompt's N rows seeded by
                 # ITS rollout_id (parity with serial). u_buf row (i*n_sample + q).
@@ -519,11 +528,9 @@ class WorkerExtension:
         attn_meta, total = self._np_build_attn_metadata_packed(
             per_row_block_ids, query_lens, seq_lens, slot_mapping, positions)
 
-        # np_state carries the scatter indices so PerturbedLinear adds noise to the
-        # right rows. u_buf/x_buf already installed by run_np_decode_packed.
-        st = self.np_state
-        st["clean_row_idx"] = clean_row_idx
-        st["perturbed_row_idx"] = perturbed_row_idx
+        # Scatter indices (clean_row_idx / perturbed_row_idx) and u_buf/x_buf are
+        # installed on np_state by the caller (run_np_decode_packed) before this
+        # forward; PerturbedLinear reads them to place the perturbation.
         with torch.no_grad():
             hidden = self._np_run_forward(
                 model, device, input_ids, positions, attn_meta, total)
