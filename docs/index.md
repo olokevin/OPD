@@ -27,6 +27,7 @@ What we ran and what we learned. Append-mostly; each session adds a dated block.
 | Page | One-line summary |
 |---|---|
 | [compressed_opd](results/compressed_opd.md) | Post-train compression of Qwen3-4B→1.7B one-shot: SparseGPT/SVD_V2/Nystrom × C4/OpenThought3 calib vs C4-PPL + MATH-500. SparseGPT+math-calib = 45%; structured + one-shot SVD collapse to 0%. **[2026-06-03]** `nystrom_combined` (joint fwd+bwd kernel) ≈ forward-only `nystrom` on Llama-3-8B 60%-MLP C4-PPL (20.94 vs 19.38, +8%). |
+| [compress_sft](results/compress_sft.md) | **Compress-then-train** (branch `compress_sft`): new LlamaFactory `finetuning_type: svd_nystrom` compresses in-process at model-init (SVD-attn + Nystrom-MLP, retain 0.7, seq-reweighted full-seq calib) keeping factors **trainable**, then SFT on OpenThoughts3; eval MATH-500@4096 + MMLU-Pro → wandb `compress_sft_{model}`. Qwen3-4B fwd+combined smoke PASS (intermediate_size 9728→6810, save/reload clean). OLMoE blocked: fused 3D experts on tfm 5.2 → fast-fail guard + follow-up. |
 | [zo_opd](results/zo_opd.md) | ZO-NP OPD runs (Qwen3-1.7B student): NP-vs-BP gradient scaling, LR search, self-amplifying divergence. |
 | [fura_opd](results/fura_opd.md) | _(placeholder — FurA/LoRA OPD results, empty)_ |
 
