@@ -429,3 +429,168 @@ model. **Not yet run:** a multi-iter end-to-end OPD training run on the graphed 
 assemble → apply → broadcast) to confirm the held-out KL trends down as it does on V1 — the natural next
 gate. The graph is captured **per prompt** (block_ids are prompt-specific); caching graphs across
 same-length prompts is a possible future optimization but is out of scope for the landed driver.
+
+---
+
+# V2.1 — packed multi-prompt decode (design + benchmark results)
+
+> **One line.** V2.1 decodes **`B_pack` prompts simultaneously in ONE wide forward** per token — each
+> prompt carries its own disjoint scratch-KV and its own `1+N` perturbation rails — to amortize V1's
+> fixed per-step overhead across prompts instead of running `batch_size` sequential `(1+N)`-row forwards.
+> It is a **tiling change only**: same `u`, same `δW` math, same per-token semantics as V1; V1 stays the
+> byte-for-byte parity oracle. Branch `np-v2-cudagraph-rails` (commits `b91615c..7cb1f23`).
+> **Negative result up front:** packing delivers the ~2.6× decode-throughput win it promised, but
+> zeroth-order NP is still **~14–38× slower than backprop OPD** for this model — the per-token eager
+> forward-count tax dominates and is not closable by tiling alone.
+
+### 10.1 The mechanism — `B_pack` prompts in one forward
+
+Instead of looping `batch_size` prompts serially (each a `(1+N)`-row step forward), V2.1 packs a **wave**
+of up to `pack_width` prompts into one wide forward per token. The wide row layout for `B_pack` prompts is
+`Σ_p (1 + N)` rows — one clean rail + `N` perturbed rails **per prompt** — all run in a single launch:
+
+```
+wave of B_pack prompts ──prefill (per-prompt)──► B_pack disjoint scratch-KV slabs
+                                                        │
+   one wide forward per token t:                        │
+     prompt p, clean rail 0:        y = W x_p           │
+     prompt p, perturbed rail q:    y + σ·u_p,q  (q=1..N)
+        ... stacked for all p in the wave ...           ├── Σ_p(1+N) logits, ONE fwd
+                                                        │
+   per-ROW attn-metadata routes each rail to its OWN    │
+   prompt's KV (no cross-prompt bleed); clean rails     │
+   write KV to their own slot, perturbed rails → slot −1│
+                                                        │
+   teacher scores each row; δW_p accumulated per prompt │
+   commit each prompt's clean token; advance one step   │
+```
+
+The autoregressive token loop is **unavoidable** (next token depends on the committed clean token), so
+packing widens each step rather than removing the loop. New code in
+`verl/verl/workers/rollout/vllm_rollout/np_worker_extension.py`:
+
+| Method | Role |
+| --- | --- |
+| `run_np_decode_packed` | the packed decode driver (Ray RPC, same per-prompt return contract as `run_np_decode`) |
+| `_np_prefill_packed` | per-prompt prefill into **disjoint** scratch-KV slabs (per-prompt prefix routing) |
+| `_np_build_attn_metadata_packed` | **per-row** attn-metadata so each rail attends only its own prompt's KV |
+| `_np_step_forward_packed` | the one wide `Σ_p(1+N)`-row step forward + per-prompt sampling/commit |
+| `PerturbedLinear` (scatter-add branch) | `y[perturbed rows] += σ·u_buf` via `scatter_add` over the packed row blocks |
+| `_packed_row_blocks(b_pack, n_sample)` / `_assign_rollout_ids(step, batch_size, n_rollout)` | row-block bookkeeping + per-wave rollout-id assignment |
+
+The wave loop lives in `verl/verl/trainer/np/ray_trainer.py` `fit()`: with `np.decode_mode=packed` it
+slices the active prompts into waves of `np.pack_width` (`for w0 in range(0, len(slot_pids), pack_width)`)
+and issues one `run_np_decode_packed` RPC per wave. Config knobs:
+`np.decode_mode ∈ {eager, graphed, packed}` (default `eager` = V1) and `np.pack_width` (default 8);
+launcher env var `PACK_WIDTH` (`scripts/zo_opd/opd_math_np.sh`). **The packed forward is still EAGER** —
+CUDA-graphing the packed forward (combining V2.1 tiling with the [§9](#9-v2--buffer-in-graph-decode-driver-design--initial-results) buffer-in-graph capture) was out of scope.
+
+### 10.2 Gates — PASS (GPU, Qwen3-1.7B)
+
+| Gate | Script | Result |
+| --- | --- | --- |
+| σ=0 per-prompt routing | `scripts/zo_opd/np_checks/check_packed_sigma0.py` | **PASS** — packed clean tokens match stock greedy for **every** prompt at `b_pack=2/4/8` (prefix routing correct, no cross-prompt KV bleed) |
+| serial-vs-packed parity | `scripts/zo_opd/np_checks/check_packed_parity.py` | **PASS** — serial (per-prompt graphed oracle) vs packed: `u` **bit-identical**, logits/x within `rtol=1e-2` at `b_pack=4/8` (δW direction identical to oracle; packing is a tiling change only) |
+| CPU unit (packed scatter branch) | `pytest verl/tests/np/` | **PASS** — packed `scatter_add` perturbation branch; **58/58** CPU tests |
+
+Together these establish that packing changes only *how rows are tiled*, not the per-token `(L_q, L_clean,
+u, x)` semantics or the assembled `δW` — so the §6/§9.4 cosine validity (cos = 0.407 @ N=64) transfers to
+V2.1 unchanged by construction.
+
+### 10.3 Throughput grid — packing win plateaus by batch≈8
+
+`scripts/zo_opd/np_checks/bench_packed_grid.py` (`scripts/zo_opd/results/packed_grid_1024.txt`),
+`pack_width=8`, `gpu_memory_utilization=0.55`, `max_tokens=1024`, **student decode only** (no
+teacher/assemble), Qwen3-1.7B, `model.layers.0.mlp.down_proj`, single GPU:
+
+```
+ batch  rails    s/step     tok/s   peakGB    SM%
+     1      8    13.842      74.0    48.93   31.8
+     2      8    18.460     110.9    48.93   27.9
+     4      8    26.255     156.0    48.94   23.8
+     8      8    42.145     194.4    48.96   20.6
+    16      8    89.291     183.5    48.96   22.1
+     1     16    21.839      46.9    48.93   29.8
+     2     16    27.981      73.2    48.94   23.7
+     4     16    42.676      96.0    48.96   21.1
+     8     16    72.184     113.5    49.01   19.1
+    16     16   147.812     110.8    49.01   20.0
+     1     64    43.069      23.8    48.96   22.5
+     2     64    70.263      29.1    49.00   18.8
+     4     64   131.785      31.1    49.08   17.5
+     8     64   246.688      33.2    49.25   17.7
+    16     64   607.732      27.0    49.25   17.8
+```
+
+**Observations (measured):**
+
+- tok/s **plateaus by batch ≈ 8** (single-GPU bound); packing buys **~2.6× tok/s** going batch 1→8 at
+  `rails=8` (74.0 → 194.4), shrinking to **~1.4×** at `rails=64` (23.8 → 33.2).
+- **SM% does NOT climb** with packing (it actually drifts *down*): decode is
+  memory-bandwidth / CPU-bound and never saturates the SMs. The win is **amortizing fixed per-step
+  overhead**, not higher GPU occupancy.
+- Peak memory is **~flat** (~49 GB) across the whole grid — dominated by the pre-reserved KV pool, not by
+  the packed rows.
+- `pack_width=16` pass (`packed_grid_1024_pw16.txt`): the `batch=16` cells hit the **packed-scratch-KV
+  ceiling** (16 × 2560 blocks > pool); `batch ≤ 8` fine. See [§10.5](#105-the-packed-scratch-kv-ceiling--operating-recommendation).
+
+### 10.4 NP packed vs BP-OPD — one update step (the negative result)
+
+ONE update step, `batch=64`, `max_tokens=1024`, greedy, Qwen3-1.7B student + Qwen3-4B teacher, single GPU.
+NP packed (`decode_mode=packed`, `pack_width=8` → 64 prompts in 8 waves of 8) vs standard verl BP-OPD
+(PPO `token_reward_direct`):
+
+| | NP packed | BP-OPD (`token_reward_direct`) |
+| --- | --- | --- |
+| one-step wall-clock | **864.93 s** | **62.15 s** (first step) / **22.57 s** (steady-state) |
+| throughput | ~75 tok/s (decode) | 1144 tok/s |
+
+**NP ratio: ~14× slower than BP first-step, ~38× slower than BP steady-state.**
+
+NP breakdown (865 s, **ONE layer** `model.layers.0.mlp.down_proj`, layerwise round-robin):
+decode **583.9 s** + teacher score **250.0 s** + assemble **31.0 s**. `dW=0.824`, **4.2%** of weight
+elements changed.
+
+BP breakdown (62.15 s, step 1, `perf/time_per_step`): gen **18.01 s** + compute_log_prob **5.35 s** +
+compute_rm_score (4B teacher) **30.89 s** + update_actor (FSDP bwd + Adam) **6.82 s**. 71 127 tokens →
+**1144 tok/s**.
+
+**Honest interpretation.** Packing is **correct** and gives the decode throughput win it promised
+(~2.6×). But zeroth-order NP is **not throughput-competitive with backprop** for this model, and this is a
+real property of the method, not a bug:
+
+- NP runs an **eager per-token Python loop** (GPU ~0%, worker ~64% CPU) that dominates the wall-clock.
+- BP's single backward updates **ALL layers** in 6.8 s; NP's 865 s estimates the gradient of **ONE layer**
+  via 65 536 forward evaluations (64 prompts × 1024 tokens × 1 step). **Per-layer-equivalent the gap is
+  far wider** than the 14–38× headline (BP gets every layer for that 6.8 s; NP gets one).
+- The packed forward is still **eager**; CUDA-graphing it is the main remaining lever, but even graphed it
+  would not close a 14–38× gap rooted in the zeroth-order **forward-count tax** (each layer's gradient
+  costs `n_sample` extra forward evaluations per token, vs one backward for all layers in BP).
+
+### 10.5 The packed-scratch-KV ceiling + operating recommendation
+
+Each packed prompt needs its own scratch-KV slab sized to the full generation length:
+
+```
+B_pack × ceil(max_model_len / block_size)  ≤  num_gpu_blocks
+```
+
+When the wave width × per-prompt block demand exceeds the reserved pool, prefill fails (the `pw16`
+`batch=16` cells above). `pack_width` **caps the per-wave width** independent of `batch_size`, so
+`batch > pack_width` simply runs **multiple waves** sequentially and always fits. Practical operating
+point (matches the throughput grid):
+
+- **`pack_width ≈ 8`** — captures essentially all of the packing win (tok/s plateaus by batch ≈ 8) while
+  staying under the scratch-KV ceiling.
+- Raise the **student `gpu_memory_utilization` to ~0.55** so the KV pool is large enough for 8 disjoint
+  scratch slabs at `max_tokens=1024` (the grid was run at 0.55; peak ~49 GB).
+
+### 10.6 Remaining levers
+
+- **Graph the packed forward** — combine V2.1 tiling with the [§9](#9-v2--buffer-in-graph-decode-driver-design--initial-results) buffer-in-graph capture so the
+  wide step is replayed instead of eagerly dispatched (the packed forward is currently eager).
+- **Async overlap** of teacher-scoring (250 s of the 865 s) with the next wave's decode — the two phases
+  are independent across waves.
+- **But the fundamental zeroth-order forward-count tax bounds the win**: NP pays `n_sample` extra forward
+  evaluations per token *per layer*, whereas BP pays one backward for *all* layers. Tiling and graphing
+  shrink the per-step constant; they do not change that asymptotic. The §10.4 negative result stands.
