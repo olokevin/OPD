@@ -138,6 +138,103 @@ def eval_math(model, tokenizer, *, device: str, limit: int,
     )
 
 
+def _first_correct_boxed_char(text: str, gold: str):
+    """Char index just past the first \\boxed{...} whose prefix grades correct,
+    or None. Reused for the 'relaxed' (contains-correct-answer) metric."""
+    import re
+    from verl.utils.reward_score.ttrl_math import compute_score
+    i = 0
+    while True:
+        m = re.search(r"\\boxed\s*{", text[i:])
+        if not m:
+            return None
+        j = i + m.end()
+        depth = 1
+        while j < len(text) and depth:
+            depth += (text[j] == "{") - (text[j] == "}")
+            j += 1
+        if compute_score(text[:j], str(gold)).get("acc", False):
+            return j
+        i = j
+
+
+@torch.no_grad()
+def eval_math_capture(model, tokenizer, *, device: str, limit: int,
+                      max_new_tokens: int = 2048, batch_size: int = 16,
+                      save_path: Optional[str] = None) -> dict:
+    """MATH-500 eval that CAPTURES every response and reports four metrics in one
+    generation pass:
+      - strict_acc        : ttrl_math on the full response (final-answer graded)
+      - relaxed_acc       : 'contains a correct answer' — ANY \\boxed{} grades
+                            correct anywhere in the response (pardons looping-past-answer)
+      - mean_gen_tokens   : mean #generated tokens (looping/blow-up signal)
+      - mean_tok_to_correct : mean #generated tokens up to the first correct \\boxed{}
+                            (over responses that reach it; isolates 'how far to the answer')
+    Same prompt/decoding as eval_math500 (chat template, enable_thinking=False,
+    greedy, dataset gold)."""
+    import pandas as pd
+    from verl.utils.reward_score.ttrl_math import compute_score
+
+    df = pd.read_parquet(REPO_ROOT / "datasets" / "test_data" / "MATH-500" / "test.parquet")
+    if limit > 0:
+        df = df.iloc[:limit]
+    prompts, gts = [], []
+    for _, row in df.iterrows():
+        messages = list(row["prompt"])
+        try:
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        except TypeError:
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+        prompts.append(text)
+        gts.append(str(row["reward_model"]["ground_truth"]))
+
+    model.eval()
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    records = []
+    n = len(prompts)
+    for i in range(0, n, batch_size):
+        bp, bg = prompts[i:i + batch_size], gts[i:i + batch_size]
+        enc = tokenizer(bp, return_tensors="pt", padding=True).to(device)
+        out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
+                             pad_token_id=tokenizer.pad_token_id)
+        gen = out[:, enc["input_ids"].shape[1]:]
+        for k in range(gen.shape[0]):
+            gen_ids = gen[k]
+            # strip right-padding for an honest generated-token count
+            keep = (gen_ids != tokenizer.pad_token_id).sum().item()
+            n_gen = int(keep)
+            txt = tokenizer.decode(gen_ids[:keep], skip_special_tokens=True)
+            strict = bool(compute_score(txt, bg[k]).get("acc", False))
+            fc_char = _first_correct_boxed_char(txt, bg[k])
+            relaxed = fc_char is not None
+            # tokens-to-first-correct: re-tokenize the correct prefix
+            tok_to_correct = None
+            if relaxed:
+                tok_to_correct = len(tokenizer(txt[:fc_char], add_special_tokens=False)["input_ids"])
+            records.append({"gold": bg[k], "n_gen_tokens": n_gen, "strict": strict,
+                            "relaxed": relaxed, "tok_to_correct": tok_to_correct,
+                            "response": txt})
+
+    strict_acc = sum(r["strict"] for r in records) / len(records)
+    relaxed_acc = sum(r["relaxed"] for r in records) / len(records)
+    mean_gen = sum(r["n_gen_tokens"] for r in records) / len(records)
+    reached = [r["tok_to_correct"] for r in records if r["tok_to_correct"] is not None]
+    mean_ttc = (sum(reached) / len(reached)) if reached else None
+    if save_path:
+        save_json({"strict_acc": strict_acc, "relaxed_acc": relaxed_acc,
+                   "mean_gen_tokens": mean_gen, "mean_tok_to_correct": mean_ttc,
+                   "n": len(records), "n_reached": len(reached),
+                   "records": records}, save_path)
+    return {"strict_acc": strict_acc, "relaxed_acc": relaxed_acc,
+            "mean_gen_tokens": mean_gen, "mean_tok_to_correct": mean_ttc,
+            "n_reached": len(reached), "n": len(records)}
+
+
 def eval_cell(model, tokenizer, *, device: str, math_limit: int,
               math_max_new_tokens: int = 2048, math_batch_size: int = 16,
               ppl_seqlen: int = 2048, skip_math: bool = False) -> dict:
@@ -162,10 +259,35 @@ def eval_cell(model, tokenizer, *, device: str, math_limit: int,
 # calibration loader (OpenThought3 math traces — the held-fixed calibration)
 # --------------------------------------------------------------------------- #
 def build_calib_loader(calib: str, tokenizer, *, num_seqs: int, max_length: int,
-                       batch_size: int, seed: int = 3):
-    """OpenThought3 (default, the held-fixed calibration) or C4."""
-    from layer_sensitivity import build_openthought3_loader
+                       batch_size: int, seed: int = 3, length: str = "full"):
+    """OpenThought3 (default, the held-fixed calibration) or C4.
+
+    length:
+      - "full"   : DEFAULT (2026-06-04) — full un-windowed sequences (one per
+                   conversation), pad+mask collated, paired with the new
+                   sequence-reweighted covariance collection. Beats the window
+                   scheme on reasoning (FULLSEQ_CALIB_RESULTS.md).
+      - "lt2048" : full sequences but only conversations < 2048 tokens (best
+                   strict-MATH variant in the tune).
+      - "window2048" : legacy 2048-token windows (the pre-2026-06-04 behavior;
+                   pass this + reweight="token" to reproduce old baselines).
+    For OpenThought3 only; C4 stays windowed (it is the prior-art PPL harness).
+    """
     if calib == "openthought3":
+        if length in ("full", "lt2048"):
+            from compress.loaders import build_fullseq_calib_loader
+            from layer_sensitivity import _openthought3_texts
+            path = REPO_ROOT / "datasets" / "OpenThought3-Qwen3-4B" / "data" / "train.jsonl"
+            texts = _openthought3_texts(tokenizer, path, n=num_seqs * 20)
+            # batch_size=1 for "full" (truncated to 4096): a 4096-token backward
+            # over a 4B model is the memory ceiling for the combined/bwd path;
+            # batching would OOM. lt2048 is short enough to batch.
+            bs = 4 if length == "lt2048" else 1
+            return build_fullseq_calib_loader(
+                tokenizer, texts, num_seqs=num_seqs, length_filter=length,
+                batch_size=bs)
+        # legacy windowed escape hatch
+        from layer_sensitivity import build_openthought3_loader
         return build_openthought3_loader(
             tokenizer, num_seqs=num_seqs, max_length=max_length,
             batch_size=batch_size,

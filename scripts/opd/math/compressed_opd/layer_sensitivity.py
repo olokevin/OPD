@@ -90,8 +90,23 @@ def _openthought3_texts(tokenizer, path: Path, n: int):
     return out
 
 
-def build_openthought3_loader(tokenizer, *, num_seqs, max_length, batch_size):
+def build_openthought3_loader(tokenizer, *, num_seqs, max_length, batch_size,
+                              length="full"):
+    """OpenThought3 calibration loader.
+
+    length="full" (DEFAULT, 2026-06-04) — full un-windowed sequences (pairs with
+    sequence-reweighted covariance collection; beats windowing on reasoning, see
+    FULLSEQ_CALIB_RESULTS.md). "lt2048" keeps only <2048-token conversations.
+    "window2048" = legacy 2048-token windows; pass it (+ reweight="token" in the
+    collector) to reproduce pre-2026-06-04 baselines.
+    """
     path = REPO_ROOT / "datasets" / "OpenThought3-Qwen3-4B" / "data" / "train.jsonl"
+    if length in ("full", "lt2048"):
+        from compress.loaders import build_fullseq_calib_loader
+        texts = _openthought3_texts(tokenizer, path, n=num_seqs * 20)
+        bs = 4 if length == "lt2048" else 1  # full truncated to 4096; bs=1 for bwd safety
+        return build_fullseq_calib_loader(
+            tokenizer, texts, num_seqs=num_seqs, length_filter=length, batch_size=bs)
     texts = _openthought3_texts(tokenizer, path, n=num_seqs * 12)
     return build_text_calib_loader(
         tokenizer, texts, num_seqs=num_seqs,

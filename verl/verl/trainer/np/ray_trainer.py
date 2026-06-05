@@ -491,6 +491,9 @@ class RayNPTrainer:
         if decode_mode not in ("eager", "graphed"):
             raise ValueError(
                 f"np.decode_mode={decode_mode!r} must be 'eager' or 'graphed'.")
+        # Env-gated per-prompt boundary instrumentation (decode / score / assemble).
+        # Removable: set NP_DEBUG_DECODE=1 only when diagnosing a stall.
+        NP_DEBUG_DECODE = os.environ.get("NP_DEBUG_DECODE", "0") == "1"
         progress_bar = tqdm(range(num_iterations), desc="NP Training")
         for step in progress_bar:
             t0 = time.time()
@@ -517,6 +520,10 @@ class RayNPTrainer:
                     pid = (prompt["prompt_token_ids"]
                            if isinstance(prompt, dict) else prompt)
                     for r in range(int(cfg.n_rollout)):
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} L={layer_name} b{b}/{batch_size} "
+                                  f"r{r}] decode start plen={len(pid)}", flush=True)
+                            _td = time.time()
                         if decode_mode == "graphed":
                             out = ray.get(self.engines[0].collective_rpc.remote(
                                 "run_np_decode_graphed",
@@ -527,10 +534,18 @@ class RayNPTrainer:
                                 "run_np_decode",
                                 args=(pid, sp, layer_name, np_cfg, r),
                             ))[0]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} b{b}] decode done "
+                                  f"ntok={len(out['clean_tokens'])} "
+                                  f"dt={time.time()-_td:.2f}s", flush=True)
+                            _ts = time.time()
                         if not out["clean_tokens"]:
                             continue  # empty rollout -> no signal
                         full = list(pid) + list(out["clean_tokens"])
                         L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} b{b}] score done "
+                                  f"dt={time.time()-_ts:.2f}s", flush=True)
                         L_q_steps += L_q
                         L_clean_steps += L_clean
                         # u_t and x_t are both captured inside run_np_decode (same
@@ -544,6 +559,12 @@ class RayNPTrainer:
                 if not L_q_steps:
                     continue  # nothing decoded this step
 
+                if NP_DEBUG_DECODE:
+                    print(f"[npdbg s{step} L={layer_name}] batch decode+score DONE; "
+                          f"assemble start nsig={len(L_q_steps)} "
+                          f"u_steps={len(u_steps)}", flush=True)
+                    _ta = time.time()
+
                 # Weight norm BEFORE the update (engine 0) for the propagation check.
                 w_before = (ray.get(self.engines[0].collective_rpc.remote(
                     "layer_weight_norm", args=(layer_name,)))[0]
@@ -555,6 +576,9 @@ class RayNPTrainer:
                           float(cfg.sigma), cfg.grad_estimate_sample, normalize_anp,
                           cfg.token_agg, float(cfg.lr), cfg.get("update_clip")),
                 ))[0]
+                if NP_DEBUG_DECODE:
+                    print(f"[npdbg s{step} L={layer_name}] assemble+apply DONE "
+                          f"dt={time.time()-_ta:.2f}s dW={dw:.3e}", flush=True)
                 dw_norms[layer_name] = dw
                 # Broadcast updated layer from engine 0 to all engines.
                 ray.get([

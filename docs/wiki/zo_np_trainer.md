@@ -318,7 +318,7 @@ The full design + GPU-validated initial results are in **[§9](#9-v2--buffer-in-
 
 ---
 
-## 9. V2 — buffer-in-graph decode driver (design + initial results)
+# V2 — buffer-in-graph decode driver (design + initial results)
 
 > **One line.** V2 turns V1's eager, hand-driven `(1+N)`-row decode into a **CUDA-graphed** step:
 > the model forward (incl. the perturbation) is captured once and **replayed** per token, with fresh
@@ -339,11 +339,11 @@ step forward is captured.
 
 ### 9.2 The mechanism (Path B)
 
-| Where | What runs | Why graph-safe |
-|---|---|---|
-| **Host, before each `replay()`** (`_np_fill_u_buf`) | `u_buf[q].copy_(draw_noise(noise_seed(global_seed, t, layer, rollout, q)))` — the **only** RNG | Same `seeding.py` call as V1 → **u bit-identical**; just relocated earlier in wall-clock |
-| **Inside the graph** (`PerturbedLinear.perturb_graph` mode) | `y[1:1+N] += σ·u_buf` (fixed shape, no RNG, no alloc) + `x_buf.copy_(x[0])` | Elementwise op on a persistent buffer the host refilled — a graph input, like `input_ids`/`slot_mapping` |
-| **Host, after `replay()`** | `compute_logits(hidden_buf)` + row-0 sampling | Sampling is data-dependent (decides the next token) → must stay eager; mirrors vLLM's own model-graphed/sampler-eager split |
+| Where                                                               | What runs                                                                                               | Why graph-safe                                                                                                               |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Host, before each `replay()`** (`_np_fill_u_buf`)       | `u_buf[q].copy_(draw_noise(noise_seed(global_seed, t, layer, rollout, q)))` — the **only** RNG | Same `seeding.py` call as V1 → **u bit-identical**; just relocated earlier in wall-clock                            |
+| **Inside the graph** (`PerturbedLinear.perturb_graph` mode) | `y[1:1+N] += σ·u_buf` (fixed shape, no RNG, no alloc) + `x_buf.copy_(x[0])`                       | Elementwise op on a persistent buffer the host refilled — a graph input, like `input_ids`/`slot_mapping`                |
+| **Host, after `replay()`**                                  | `compute_logits(hidden_buf)` + row-0 sampling                                                         | Sampling is data-dependent (decides the next token) → must stay eager; mirrors vLLM's own model-graphed/sampler-eager split |
 
 The `(1+N)` row layout, `slot_mapping=[clean, −1×N]` (perturbed rows write no KV), and shared-prefix
 KV are **unchanged from V1** — only *how the rows are run* changed (eager → captured). Config:
@@ -366,13 +366,13 @@ attention to the prompt (caught by adversarial review pre-GPU; fixed via `max_se
 
 `bench_n_scaling.py`, `graphed_cuda`, Qwen3-1.7B, `model.layers.0.mlp.down_proj`, max_tokens=64, GPU 7:
 
-| N (perturbed rails) | s/step | ms/tok | rel(N=1) |
-|---:|---:|---:|---:|
-| 1 | 0.658 | 10.28 | 1.00× |
-| **8** | 0.785 | 12.27 | **1.19×** |
-| 16 | 0.870 | 13.60 | 1.32× |
-| 32 | 1.086 | 16.97 | 1.65× |
-| 64 | 1.514 | 23.66 | 2.30× |
+| N (perturbed rails) | s/step | ms/tok |         rel(N=1) |
+| ------------------: | -----: | -----: | ---------------: |
+|                   1 |  0.658 |  10.28 |           1.00× |
+|         **8** |  0.785 |  12.27 | **1.19×** |
+|                  16 |  0.870 |  13.60 |           1.32× |
+|                  32 |  1.086 |  16.97 |           1.65× |
+|                  64 |  1.514 |  23.66 |           2.30× |
 
 **The premise holds in the low-N regime.** 8 rails cost **+19%** wall-time for 8× the perturbation
 FLOPs — the memory-bound free lunch (the rails ride resident weights+KV, adding compute on data already
@@ -385,12 +385,12 @@ loaded). It is *not* flat to N=64: by 64 the `(1+N)` GEMM has crossed into the c
 `model.layers.0.mlp.down_proj`, repeats=50, σ=1e-3, GPU 6. This is the **§6 validity check**, run
 across N to expose the quality/N trade-off:
 
-| N | cos(NP δW, autograd) |
-|---:|---:|
-| 8 | 0.205 |
-| 16 | 0.276 |
-| 32 | 0.356 |
-| 64 | **0.407** |
+|  N | cos(NP δW, autograd) |
+| -: | --------------------: |
+|  8 |                 0.205 |
+| 16 |                 0.276 |
+| 32 |                 0.356 |
+| 64 |       **0.407** |
 
 Cosine rises with N as a forward-difference NP estimator should (more samples → better direction
 estimate; ≈√(N·repeats) in the ideal limit, sub-√N here at fixed repeats=50). **Read 9.3 and 9.4
@@ -401,21 +401,20 @@ samples per layer per iteration (§6), so the per-token cosine is a lower bound 
 quality, not the operating SNR.
 
 **Why this number transfers to V2 unchanged:** `check_grad_cosine.py` is **decode-driver-independent**
-— it uses HF forward hooks, not the NP worker decode — so it validates the `sample_scale →
-accumulate_delta_w → outer(g_t, x_t)` math, which V2 does not touch. The V2 parity gates (§9.5) prove
+— it uses HF forward hooks, not the NP worker decode — so it validates the `sample_scale → accumulate_delta_w → outer(g_t, x_t)` math, which V2 does not touch. The V2 parity gates (§9.5) prove
 the graphed driver feeds that math **bit-identical `u`** and matching `x`, so the assembled δW direction
 is identical to V1's → cos = 0.407 is V2's number too, by construction.
 
 ### 9.5 Verification — all gates PASS (Qwen3-1.7B, GPU 6/7, FLASH_ATTN, 2026-06-03)
 
-| Gate | Script | Result |
-|---|---|---|
-| CPU unit suite (38, incl. 6 new) | `pytest verl/tests/np/` | **38/38** (`test_perturb_graph.py`: row math, `x_buf` capture, σ=0 no-op, `_np_fill_u_buf` bit-identical-to-V1) |
-| σ=0 byte-equiv, eager+`u_buf` | `check_decode_sigma0.py --driver graphed_eager` | **PASS** — matches greedy, width 1+N |
-| σ=0 byte-equiv, graphed (= **M0 capture spike**) | `check_decode_sigma0.py --driver graphed_cuda` | **PASS** — `torch.cuda.CUDAGraph` capture of hand-built `attn_metadata` works; the one unverified-on-GPU risk is cleared |
-| Parity M1 (V1 vs eager+`u_buf`) | `check_graphed_parity.py --stage m1` | **PASS** — u bit-identical, logits/x within rtol=1e-2 (noise relocation byte-correct) |
-| Parity M2 (eager+`u_buf` vs graphed) | `check_graphed_parity.py --stage m2` | **PASS** — same → by transitivity **graphed ≡ V1** |
-| Cosine validity | `check_grad_cosine.py` | **0.407** @ N=64 (§9.4) |
+| Gate                                              | Script                                            | Result                                                                                                                              |
+| ------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| CPU unit suite (38, incl. 6 new)                  | `pytest verl/tests/np/`                         | **38/38** (`test_perturb_graph.py`: row math, `x_buf` capture, σ=0 no-op, `_np_fill_u_buf` bit-identical-to-V1)        |
+| σ=0 byte-equiv, eager+`u_buf`                  | `check_decode_sigma0.py --driver graphed_eager` | **PASS** — matches greedy, width 1+N                                                                                         |
+| σ=0 byte-equiv, graphed (= **M0 capture spike**) | `check_decode_sigma0.py --driver graphed_cuda`  | **PASS** — `torch.cuda.CUDAGraph` capture of hand-built `attn_metadata` works; the one unverified-on-GPU risk is cleared |
+| Parity M1 (V1 vs eager+`u_buf`)                 | `check_graphed_parity.py --stage m1`            | **PASS** — u bit-identical, logits/x within rtol=1e-2 (noise relocation byte-correct)                                        |
+| Parity M2 (eager+`u_buf` vs graphed)            | `check_graphed_parity.py --stage m2`            | **PASS** — same → by transitivity **graphed ≡ V1**                                                                   |
+| Cosine validity                                   | `check_grad_cosine.py`                          | **0.407** @ N=64 (§9.4)                                                                                                      |
 
 **Two bugs surfaced + fixed on GPU** (commit `01eb6bc`), neither a math/invariant bug: (a) sharing one
 `graph_pool_handle` across captures tripped `CUDACachingAllocator use_count>0` once >1 graph is alive

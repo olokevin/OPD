@@ -79,14 +79,28 @@ Retain-ratio sweep **`r ∈ {0.8, 0.7, 0.6, 0.5}`**, **last decoder layer skippe
 
 ## Block A — Low-Rank + Sparse Residual (LR+OBS / "+Patch") (≈1.5 GPU-hr) [highest-ceiling for M1]
 
-**Mechanism**: M1 directly. `Ŵ = UV + S`: `UV` = structured low-rank at a *reduced* budget, `S` = SparseGPT/OBS-pruned residual of `R = W − UV` at the leftover budget, allocated by OPD-weighted residual energy. Restores the exact, full-rank "escape edges" that pure low-rank truncation kills — the mechanism SparseGPT (full-rank zeroing) keeps and SVD loses. The **total** stays at the block's retain ratio: at 0.8, split e.g. LR 0.74 + S 0.06; the split *fraction*, not the absolute budgets, is what A3 sweeps.
+**Mechanism**: M1 directly. `Ŵ = UV + S`: `UV` = structured low-rank at a *reduced* budget, `S` = SparseGPT/OBS-pruned residual of `R = W − UV` at the leftover budget, allocated by OPD-weighted residual energy. Restores the exact, full-rank "escape edges" that pure low-rank truncation kills — the mechanism SparseGPT (full-rank zeroing) keeps and SVD loses.
 
-- **Infra: SVD entry (`svd_compress_layer` / `svd_llm_v2_compress_model`) + SparseGPT (`SparseGPT.add_batch`/`fasterprune`, `sparsegpt_prune`) both exist.** **NEEDS WRITING**: a thin orchestrator `hybrid/lr_sparse.py` — after SVD, materialize `Ŵ_lowrank`, form `R = W − Ŵ_lowrank`, wrap `R` in a temp `nn.Linear`, run `SparseGPT` on it against the **compressed-upstream** activations, store `S` as a sparse residual added at forward. ~80–120 LoC; no new math.
+### How the LR and sparse parts are determined, and their ratios (as implemented in `hybrid/lr_sparse.py`)
+For one `(d_out, d_in)` attention linear at a **block retain ratio `ρ`** (e.g. 0.8), one knob `sparse_frac` ∈ [0,1] (the sparse part's *share of the retained budget*) splits the budget:
+
+- **Total retained budget** (effective/nonzero params kept) = `ρ · d_out · d_in`.
+- **Sparse part's share**: `ρ_S = sparse_frac · ρ`  → the residual keeps `ρ_S · d_out·d_in` **nonzeros**.
+- **Low-rank part's share**: `ρ_LR = (1 − sparse_frac) · ρ`.
+
+**Low-rank `UV`** — SVD-LLM-V2 input-whitened truncated SVD at ratio `ρ_LR`. The kept rank is the standard SVD-LLM budget formula
+`r = round( ρ_LR · d_out·d_in / (d_out + d_in) )`  (so `UV` costs `r·(d_out+d_in) ≈ ρ_LR·d_out·d_in` params). `Ŵ_lowrank = UV` is then materialized.
+
+**Sparse `S`** — form the **full-rank** residual `R = W − Ŵ_lowrank`, wrap it in a temp `nn.Linear`, and run **SparseGPT/OBS** to sparsity `s = 1 − ρ_S` (i.e. keep a fraction `ρ_S` of entries as nonzeros), pruning against the activation Hessian collected at this layer's input. `S` is stored as a (structurally dense, mostly-zero) full-rank residual added at forward: `y = UV·x + S·x`.
+
+**Budget bookkeeping (important).** The combined **nonzero** footprint is `(ρ_LR + ρ_S)·d_out·d_in = ρ·d_out·d_in` — iso-budget vs A0's pure SVD at `ρ`. (The *stored* `S` matrix is dense, so `params_total` rises but `params_nonzero` is the budget metric — every cell reports both; see `compress_common.count_params`.) **Default `sparse_frac = 0.075`** → at `ρ = 0.8`: LR `ρ_LR = 0.74`, sparse `ρ_S = 0.06` (the "LR 0.74 + S 0.06" split). The split *fraction* `sparse_frac`, not the absolute budgets, is what **A3** sweeps. The last decoder layer is left dense throughout (operating-point protocol).
+
+- **Infra: SVD entry (`svd_compress_layer` / `svd_llm_v2_compress_model`) + SparseGPT (`SparseGPT.add_batch`/`fasterprune`, `sparsegpt_prune`) both exist.** **WRITTEN**: `src/compress/hybrid/lr_sparse.py` (`LRPlusSparse` module + `lr_sparse_compress_attn`) — after SVD, materialize `Ŵ_lowrank`, form `R = W − Ŵ_lowrank`, wrap `R` in a temp `nn.Linear`, run `SparseGPT` on it against the **compressed-upstream** activations, store `S` as a sparse residual added at forward. For A2 the residual is **re-fit against the true deployed `UV+S` prefix** via a refinement Hessian pass (`refine_passes=1`), per GPT-5 review.
 - **Cells @ iso-param, retain 0.8 first then sweep down, last layer skipped, MATH/100 + PPL**:
-  - **A0** = pure SVD-V2 at the block ratio (= D0) — the no-patch baseline.
-  - **A1** = LR + sparse-residual (≈¾:¼ of the *compressed* budget to S, i.e. small S), residual fit against **dense** activations (cheap baseline).
-  - **A2** = same split, residual fit against **compressed-upstream** activations (the real claim; **synergy with B** — fits R against B's already-compressed prefix).
-  - **A3** = budget-split *fraction* sweep at fixed total (S taking {⅓, ¼, ⅛} of the compressed-away mass) to find where the full-rank tail earns its params.
+  - **A0** = pure SVD-V2 at the block ratio (= D0) — the no-patch baseline (`sparse_frac = 0`).
+  - **A1** = LR + sparse-residual at `sparse_frac = 0.075` (LR 0.74 + S 0.06 of the budget at ρ=0.8 — small S), residual fit against **dense** activations (cheap baseline).
+  - **A2** = same split, residual fit against **compressed-upstream** activations + `refine_passes=1` (re-fit R against the deployed `UV+S` prefix — the real claim).
+  - **A3** = budget-split *fraction* sweep at fixed total: `sparse_frac ∈ {0.125, 0.075, 0.0375}` (≈ S taking ⅓, ¼, ⅛ of the *compressed-away* mass `1−ρ`) to find where the full-rank tail earns its params.
   - **Scope note**: applies cleanly to the **attention SVD path**; Nystrom-MLP is neuron-subsampling (no SVD residual) — for MLP, the "+Patch" is a SparseGPT residual on the *reconstructed* MLP weights, flagged as a separate sub-cell A-MLP.
 - **Trace-diff** (Block T): A0 vs A2 at the ratio where A2 first beats A0 — do the restored full-rank edges fix a *specific* failure in the trace (e.g. a dropped backtrack, a botched arithmetic step)?
 - **Success**: across the sweep A2 ≥ A1 and A2 holds dense-level accuracy to a *lower* ratio than A0 → the full-rank escape edges are the missing ingredient (M1 confirmed *causally*, succeeding where attention tail-rescue's 0→4% failed because that test only re-added **low-rank** tail, not **full-rank** sparse edges). **Reviewer-risk control**: keep `S` small and **ablate it** (A0 vs A2) so the claim stays "we fixed *structured* compression", not "a sparse tail did the work".
