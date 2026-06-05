@@ -215,6 +215,82 @@ def test_vectorized_score_matches_legacy_full_window_all_strategies(strategy, we
         assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
 
 
+@pytest.mark.parametrize("strategy", ["only_stu", "only_tch", "intersection", "union"])
+@pytest.mark.parametrize("weight_mode", ["student_p", "teacher_p", "none"])
+def test_score_rollout_offwindow_teacher_id_survives_wide_window(strategy, weight_mode):
+    # C-1 LANDMINE, end-to-end. The prior full-window test sets store_k == vocab so
+    # nothing is ever out of window; the _select_ids window test exercises the
+    # selection logic in isolation. This one closes the gap: a WIDE-but-FINITE
+    # window (store_k=512, vocab=1024) with teacher ids that sit OUTSIDE the
+    # student top-`top_k` (=8) but INSIDE the stored 512-window. The decision
+    # `topk_store_k >= 512` exists precisely so union/intersection still SEE these
+    # ids; if the stored window were narrowed below their student-rank they would
+    # silently vanish and union/intersection would degrade to only_stu.
+    #
+    # We pick teacher ids by RANK in the student clean-row (row 0) distribution via
+    # argsort, so the geometry is deterministic and explicit: rank 2 is inside the
+    # top-8, ranks 20 and 100 are outside the top-8 but well inside the top-512.
+    # Asserts:
+    #   (a) the vectorized tuple path == legacy full-vocab path within rel-Frob
+    #       1e-4 for ALL strategies/modes -- EXACT here because every scored id
+    #       (incl. the rank-20/100 teacher ids) is inside the 512-window, so the
+    #       s_floor out-of-window approximation never fires (no flooring).
+    #   (b) union's per-step L_q DIFFERS from only_stu's on the SAME tuple inputs,
+    #       proving the rank-20/100 teacher ids were actually scored (union didn't
+    #       collapse to only_stu).
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+    torch.manual_seed(0)
+    T, n, vocab, top_k, store_k = 6, 4, 1024, 8, 512  # top-8 < 512-window < vocab
+    we = WorkerExtension.__new__(WorkerExtension)
+    logits_steps = [torch.randn(1 + n, vocab) for _ in range(T)]
+
+    # Teacher ids chosen by student clean-row RANK: {2 (in top-8), 20, 100}.
+    # argsort(descending) maps rank -> vocab id deterministically. The off-top-8
+    # ranks 20/100 are the C-1 ids: outside the student top-8, inside the 512-window.
+    rank_picks = torch.tensor([2, 20, 100])
+    t_ids, t_logp = [], []
+    for s in logits_steps:
+        order = torch.argsort(s[0], descending=True)   # order[r] = id at student-rank r
+        ids = order[rank_picks]
+        s_top8 = set(torch.topk(s[0], top_k).indices.tolist())
+        s_win = set(torch.topk(s[0], store_k).indices.tolist())
+        # Guard the geometry the test depends on: rank 2 in top-8; ranks 20/100
+        # outside top-8 but inside the 512-window (so they are scored from the
+        # window exactly, never floored).
+        assert ids[0].item() in s_top8
+        assert ids[1].item() not in s_top8 and ids[1].item() in s_win
+        assert ids[2].item() not in s_top8 and ids[2].item() in s_win
+        t_ids.append(ids)
+        t_logp.append(torch.log_softmax(torch.randn(ids.numel()), -1))
+
+    legacy_cl = [s.clone() for s in logits_steps]                  # full-vocab tensors
+    tuple_cl = [we._topk_store(s, store_k) for s in logits_steps]  # C1 tuples (512-window)
+
+    sc_legacy = _fake_teacher_scorer(strategy, weight_mode, top_k, t_ids, t_logp)
+    sc_vec = _fake_teacher_scorer(strategy, weight_mode, top_k, t_ids, t_logp)
+    Lq_ref, Lc_ref = sc_legacy.score_rollout(None, legacy_cl)
+    Lq_new, Lc_new = sc_vec.score_rollout(None, tuple_cl)
+
+    # (a) Exact parity: the rank-100 teacher id is inside the 512-window, so the
+    # windowed lookup must reproduce the full-vocab result with no flooring.
+    for t in range(T):
+        rel = (Lq_new[t] - Lq_ref[t]).norm() / (Lq_ref[t].norm() + 1e-9)
+        assert rel < 1e-4, f"step {t} strat={strategy} weight={weight_mode} rel={rel:.2e}"
+        assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
+
+    # (b) Only when union ADDS the off-top-8 teacher ids does its loss diverge from
+    # only_stu (whose scored set is exactly the student top-8). Run both on the
+    # SAME tuple inputs; a non-trivial per-step difference proves the rank-20/100
+    # teacher ids were scored, i.e. union did NOT degrade to only_stu.
+    if strategy == "union":
+        sc_stu = _fake_teacher_scorer("only_stu", weight_mode, top_k, t_ids, t_logp)
+        Lq_stu, _ = sc_stu.score_rollout(None, tuple_cl)
+        max_diff = max((Lq_new[t] - Lq_stu[t]).abs().max().item() for t in range(T))
+        assert max_diff > 1e-4, (
+            f"union collapsed to only_stu (weight={weight_mode} max|diff|={max_diff:.2e}) "
+            "-- the off-window teacher ids were NOT scored")
+
+
 # ---------------------------------------------------------------------------
 # C3: batched teacher prefill (score_wave) parity with serial score_rollout.
 # ---------------------------------------------------------------------------
