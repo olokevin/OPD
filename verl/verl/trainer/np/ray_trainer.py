@@ -488,9 +488,11 @@ class RayNPTrainer:
         # V2 decode-driver selection (spec §6). Default 'eager' = V1 (parity oracle).
         decode_mode = cfg.get("decode_mode", "eager")
         use_cuda_graph = bool(cfg.get("use_cuda_graph", False))
-        if decode_mode not in ("eager", "graphed"):
+        pack_width = int(cfg.get("pack_width", 8))
+        if decode_mode not in ("eager", "graphed", "packed"):
             raise ValueError(
-                f"np.decode_mode={decode_mode!r} must be 'eager' or 'graphed'.")
+                f"np.decode_mode={decode_mode!r} must be 'eager', 'graphed', "
+                f"or 'packed'.")
         # Env-gated per-prompt boundary instrumentation (decode / score / assemble).
         # Removable: set NP_DEBUG_DECODE=1 only when diagnosing a stall.
         NP_DEBUG_DECODE = os.environ.get("NP_DEBUG_DECODE", "0") == "1"
@@ -515,46 +517,101 @@ class RayNPTrainer:
                 u_steps: List[Any] = []
                 x_steps: List[Any] = []
 
-                for b in range(batch_size):
-                    prompt = prompts[(step * batch_size + b) % len(prompts)]
-                    pid = (prompt["prompt_token_ids"]
-                           if isinstance(prompt, dict) else prompt)
-                    for r in range(int(cfg.n_rollout)):
+                if decode_mode == "packed":
+                    from verl.workers.rollout.vllm_rollout.np_worker_extension import (
+                        _assign_rollout_ids,
+                    )
+                    all_pids = [
+                        (prompts[(step * batch_size + b) % len(prompts)])
+                        for b in range(batch_size)
+                    ]
+                    all_pids = [
+                        (p["prompt_token_ids"] if isinstance(p, dict) else p)
+                        for p in all_pids
+                    ]
+                    rollout_ids_full = _assign_rollout_ids(
+                        step, batch_size, int(cfg.n_rollout))
+                    # n_rollout>1: expand prompts to (prompt,rollout) slots.
+                    if int(cfg.n_rollout) > 1:
+                        slot_pids, slot_rids = [], []
+                        for b in range(batch_size):
+                            for r in range(int(cfg.n_rollout)):
+                                slot_pids.append(all_pids[b])
+                                slot_rids.append(
+                                    rollout_ids_full[b * int(cfg.n_rollout) + r])
+                    else:
+                        slot_pids, slot_rids = all_pids, rollout_ids_full
+
+                    for w0 in range(0, len(slot_pids), pack_width):
+                        wave_pids = slot_pids[w0:w0 + pack_width]
+                        wave_rids = slot_rids[w0:w0 + pack_width]
                         if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} L={layer_name} b{b}/{batch_size} "
-                                  f"r{r}] decode start plen={len(pid)}", flush=True)
-                            _td = time.time()
-                        if decode_mode == "graphed":
-                            out = ray.get(self.engines[0].collective_rpc.remote(
-                                "run_np_decode_graphed",
-                                args=(pid, sp, layer_name, np_cfg, r, use_cuda_graph),
-                            ))[0]
-                        else:
-                            out = ray.get(self.engines[0].collective_rpc.remote(
-                                "run_np_decode",
-                                args=(pid, sp, layer_name, np_cfg, r),
-                            ))[0]
+                            print(f"[npdbg s{step} L={layer_name} "
+                                  f"wave {w0}-{w0+len(wave_pids)}/{len(slot_pids)}] "
+                                  f"packed decode start", flush=True)
+                            _tw = time.time()
+                        out = ray.get(self.engines[0].collective_rpc.remote(
+                            "run_np_decode_packed",
+                            args=(wave_pids, sp, layer_name, np_cfg, wave_rids),
+                        ))[0]
                         if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} b{b}] decode done "
-                                  f"ntok={len(out['clean_tokens'])} "
-                                  f"dt={time.time()-_td:.2f}s", flush=True)
-                            _ts = time.time()
-                        if not out["clean_tokens"]:
-                            continue  # empty rollout -> no signal
-                        full = list(pid) + list(out["clean_tokens"])
-                        L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
-                        if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} b{b}] score done "
-                                  f"dt={time.time()-_ts:.2f}s", flush=True)
-                        L_q_steps += L_q
-                        L_clean_steps += L_clean
-                        # u_t and x_t are both captured inside run_np_decode (same
-                        # forward) -- no separate capture re-decode (see deleted
-                        # _capture_x / run_capture_pass). Aligned per step.
-                        u_steps += [out["captured_u"][t]
-                                    for t in range(len(out["candidate_logits"]))]
-                        x_steps += [out["captured_x"][t]
-                                    for t in range(len(out["candidate_logits"]))]
+                            print(f"[npdbg s{step}] wave decode done "
+                                  f"dt={time.time()-_tw:.2f}s", flush=True)
+                        for pidx in range(len(wave_pids)):
+                            if not out["clean_tokens"][pidx]:
+                                continue
+                            full = (list(wave_pids[pidx])
+                                    + list(out["clean_tokens"][pidx]))
+                            L_q, L_clean = self.scorer.score_rollout(
+                                full, out["candidate_logits"][pidx])
+                            L_q_steps += L_q
+                            L_clean_steps += L_clean
+                            nT = len(out["candidate_logits"][pidx])
+                            u_steps += [out["captured_u"][pidx][t]
+                                        for t in range(nT)]
+                            x_steps += [out["captured_x"][pidx][t]
+                                        for t in range(nT)]
+                else:
+                    for b in range(batch_size):
+                        prompt = prompts[(step * batch_size + b) % len(prompts)]
+                        pid = (prompt["prompt_token_ids"]
+                               if isinstance(prompt, dict) else prompt)
+                        for r in range(int(cfg.n_rollout)):
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} L={layer_name} b{b}/{batch_size} "
+                                      f"r{r}] decode start plen={len(pid)}", flush=True)
+                                _td = time.time()
+                            if decode_mode == "graphed":
+                                out = ray.get(self.engines[0].collective_rpc.remote(
+                                    "run_np_decode_graphed",
+                                    args=(pid, sp, layer_name, np_cfg, r, use_cuda_graph),
+                                ))[0]
+                            else:
+                                out = ray.get(self.engines[0].collective_rpc.remote(
+                                    "run_np_decode",
+                                    args=(pid, sp, layer_name, np_cfg, r),
+                                ))[0]
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] decode done "
+                                      f"ntok={len(out['clean_tokens'])} "
+                                      f"dt={time.time()-_td:.2f}s", flush=True)
+                                _ts = time.time()
+                            if not out["clean_tokens"]:
+                                continue  # empty rollout -> no signal
+                            full = list(pid) + list(out["clean_tokens"])
+                            L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] score done "
+                                      f"dt={time.time()-_ts:.2f}s", flush=True)
+                            L_q_steps += L_q
+                            L_clean_steps += L_clean
+                            # u_t and x_t are both captured inside run_np_decode (same
+                            # forward) -- no separate capture re-decode (see deleted
+                            # _capture_x / run_capture_pass). Aligned per step.
+                            u_steps += [out["captured_u"][t]
+                                        for t in range(len(out["candidate_logits"]))]
+                            x_steps += [out["captured_x"][t]
+                                        for t in range(len(out["candidate_logits"]))]
 
                 if not L_q_steps:
                     continue  # nothing decoded this step
