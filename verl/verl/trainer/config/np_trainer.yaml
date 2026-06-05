@@ -12,8 +12,9 @@ np:
   sample_method: bernoulli         # gaussian | bernoulli | uniform
   en_layerwise_perturbation: true  # false = perturb all matched layers at once
   # --- V2 decode driver (spec docs/.../2026-06-03-np-v2-cudagraph-rails.md) ---
-  decode_mode: eager               # eager (V1, parity oracle) | graphed (V2 buffer-in-graph)
+  decode_mode: eager               # eager (V1) | graphed (V2 per-prompt graph) | packed (B_pack prompts/forward)
   use_cuda_graph: false            # graphed only: false = M1 eager-with-u_buf, true = M2 captured graph
+  pack_width: 8                    # packed only: prompts per wide forward (B_pack)
   perturb_method: forward          # forward (one-sided) | antithetic
   perturb_granularity: token       # token | rollout
   grad_estimate_sample: grpo       # average | grpo   (over n_sample, per-token)
