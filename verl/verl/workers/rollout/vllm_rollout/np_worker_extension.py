@@ -262,6 +262,20 @@ class WorkerExtension:
                            np_cfg["sample_method"])
             u_buf[q].copy_(u)
 
+    def _np_fill_u_buf_all_layers(self, u_buf_dict, np_cfg, matched_layers,
+                                  step, rollout, n_sample):
+        """Refill every matched layer's u_buf with independent noise per (layer,q),
+        seeded identically to V1's single-layer draw -> parity by construction."""
+        for layer_name in matched_layers:
+            buf = u_buf_dict[layer_name]
+            d_out = buf.shape[1]
+            for q in range(n_sample):
+                seed = noise_seed(int(np_cfg["global_seed"]), int(step),
+                                  layer_name, int(rollout), q)
+                u = draw_noise(seed, (d_out,), buf.device, buf.dtype,
+                               np_cfg["sample_method"])
+                buf[q].copy_(u)
+
     def run_np_decode_graphed(self, prompt_token_ids, sampling_params, layer_name,
                               np_cfg, rollout_idx, use_cuda_graph=False):
         """V2 decode for ONE prompt. Same contract as run_np_decode (returns

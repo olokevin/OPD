@@ -1,5 +1,7 @@
 import torch
 from verl.workers.rollout.vllm_rollout.np_worker_extension import PerturbedLinear
+from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+from verl.trainer.np.seeding import noise_seed, draw_noise
 
 
 class _FakeLinear(torch.nn.Module):
@@ -56,3 +58,16 @@ def test_clean_and_perturbed_rows_disjoint_invariant():
     y0, _ = pl0(x)
     assert torch.allclose(y0[0], torch.zeros(4))  # clean row untouched
     assert (y0[1:] != 0).any()                     # perturbed rows changed
+
+
+def test_fill_u_buf_all_layers_independent_per_layer():
+    we = WorkerExtension.__new__(WorkerExtension)
+    u = {"L0": torch.zeros(2, 6), "L1": torch.zeros(2, 6)}
+    cfg = dict(global_seed=42, sample_method="gaussian")
+    we._np_fill_u_buf_all_layers(u, cfg, ["L0", "L1"], step=0, rollout=0, n_sample=2)
+    # bit-identical to the per-layer seed formula
+    exp = draw_noise(noise_seed(42, 0, "L0", 0, 0), (6,), torch.device("cpu"),
+                     torch.float32, "gaussian")
+    assert torch.equal(u["L0"][0], exp)
+    # different layer -> different seed -> different noise
+    assert not torch.equal(u["L0"][0], u["L1"][0])
