@@ -22,7 +22,9 @@ s_merged_to: frozen
 calib_source: traces
 calib_traces_path: /home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl
 calib_num_seqs: 128
-deepspeed: examples/deepspeed/ds_z2_config.json
+# NO deepspeed: single-GPU. DeepSpeed ZeRO-2 corrupts the SVDCompressedLinear
+# custom params (U_r/V_r) -> loss 49->NaN; plain single-GPU bf16 trains cleanly
+# (loss ~0.5 decreasing) and ~8x faster (1.5 vs 11.8 s/it).
 flash_attn: sdpa              # FA2 not installed in sft env; SDPA = memory-efficient attn
 enable_liger_kernel: false   # disabled: caused illegal-mem-access on the Nystrom-shrunk MLP
 
