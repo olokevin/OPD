@@ -1,12 +1,13 @@
 # reasoning_aware_compress_calib: what fixes one-shot structured compression of reasoning LLMs
 
 > Goal: understand *why* one-shot structured low-rank compression (SVD-LLM-V2 attn
+>
 > + Nystrom MLP) collapses Qwen3-4B's math reasoning, and which levers recover it.
-> Two independent levers landed: **(1) the rank floor** — a small full-rank sparse
-> residual restores the "escape edges" pure low-rank truncation kills (MATH 72→82%
-> at fixed budget); **(2) the calibration format** — sequence-reweighted full-length
-> covariances beat the legacy 2048-token-window/token-pooled scheme and push the
-> compression cliff lower (now the repo default).
+>   Two independent levers landed: **(1) the rank floor** — a small full-rank sparse
+>   residual restores the "escape edges" pure low-rank truncation kills (MATH 72→82%
+>   at fixed budget); **(2) the calibration format** — sequence-reweighted full-length
+>   covariances beat the legacy 2048-token-window/token-pooled scheme and push the
+>   compression cliff lower (now the repo default).
 
 This page synthesizes the A/B/D mechanism search, the forward-only ratio sweep +
 reasoning-trace diff, and the full-sequence-calibration study. Source results:
@@ -37,6 +38,7 @@ dense — it feeds the LM head directly); bf16, 1×H100.
 **0.0% / 4,980**.
 
 ### Eval contract
+
 MATH-500, greedy (`do_sample=False`, `max_new_tokens=2048`), Qwen3 non-thinking
 chat template (`enable_thinking=False`), graded by `ttrl_math.compute_score`
 against the **dataset gold** (`reward_model.ground_truth`, never a model output).
@@ -46,6 +48,7 @@ Companion metric: C4 sliding-window PPL (seqlen 2048, seed 0). Driver
 metrics below.
 
 ### Calibration data
+
 `datasets/OpenThought3-Qwen3-4B/data/train.jsonl` — each row = a **user math
 problem + the full reasoning response rolled out by the uncompressed Qwen3-4B**,
 rendered with the *same* chat template (`add_generation_prompt=False` so the
@@ -75,11 +78,12 @@ All at retain 0.8, last layer dense, MATH-500/100 + C4 PPL, reasoning-trace cali
 (2048-window/token-pooled — the format current at the time).
 
 ### Block D — objective (M2): **NULL**
-| Cell | Attn objective | C4 PPL | MATH/100 |
-|---|---|---|---|
-| D0 | forward-only (input whitening) | 52.1 | **73%** |
-| D1 | backward-only (CE grad) | 294 | **0%** |
-| D2 | bilateral (input + CE grad) = OBD-LLM-style | 52.1 | **70%** |
+
+| Cell | Attn objective                              | C4 PPL | MATH/100      |
+| ---- | ------------------------------------------- | ------ | ------------- |
+| D0   | forward-only (input whitening)              | 52.1   | **73%** |
+| D1   | backward-only (CE grad)                     | 294    | **0%**  |
+| D2   | bilateral (input + CE grad) = OBD-LLM-style | 52.1   | **70%** |
 
 **D0 ≈ D2 ≫ D1.** Adding the CE-gradient (bilateral, the OBD-LLM prior-art
 baseline) gives **no gain** over plain input-whitened SVD (70 vs 73, within noise).
@@ -91,16 +95,17 @@ a fail-fast guard now blocks it. The CE-bilateral null makes a large OPD-gradien
 effect unlikely.)
 
 ### Block A — rank floor (M1): **THE HEADLINE**
+
 `Ŵ = UV + S`: low-rank SVD at a reduced budget + a SparseGPT/OBS-pruned **full-rank**
 residual of `R = W − UV` at the leftover budget; total stays at the retain ratio.
 (`src/compress/hybrid/lr_sparse.py`, `LRPlusSparse`; budget split via `sparse_frac`,
 default 0.075 → LR 0.74 + S 0.06 at ρ=0.8.)
 
-| Cell | System | C4 PPL | MATH/100 |
-|---|---|---|---|
-| A0 | pure SVD-V2 (= D0 baseline) | 52.1 | 72% |
-| A1 | + sparse residual, fit vs **dense** acts | 42.4 | 80% |
-| A2 | + sparse residual, fit vs **compressed-upstream** acts (refine_passes=1) | 42.4 | **82%** |
+| Cell | System                                                                        | C4 PPL | MATH/100      |
+| ---- | ----------------------------------------------------------------------------- | ------ | ------------- |
+| A0   | pure SVD-V2 (= D0 baseline)                                                   | 52.1   | 72%           |
+| A1   | + sparse residual, fit vs**dense** acts                                 | 42.4   | 80%           |
+| A2   | + sparse residual, fit vs**compressed-upstream** acts (refine_passes=1) | 42.4   | **82%** |
 
 **A2 ≥ A1 > A0** (the plan's success criterion). A small (~6% density) **full-rank**
 sparse residual jumps MATH **72→82%** (*beats dense 4B 80.5%*) and drops PPL 52→42,
@@ -110,6 +115,7 @@ tail): the missing ingredient is **full-rank escape edges**, not more low-rank. 
 confirmed causally.
 
 ### Block B — accumulation (M3): baseline only
+
 B0 (dense-pass = D0) reproduced the 71% baseline; B1/B2 (sequential
 re-linearization, `src/compress/sequential/relinearized.py`) were **skipped per
 user direction** — M3 not pursued this pass.
@@ -120,28 +126,29 @@ Plain forward-only SVD-V2+Nystrom across descending retain ratios
 (`ratio_sweep_trace.py`), with the 5 frozen dense-correct MATH probes regenerated
 on each compressed model.
 
-| ratio | C4 PPL | MATH/100 | trace len (med×dense) |
-|---|---|---|---|
-| 0.8 | 52.1 | **72%** | 1.1× |
-| 0.7 | 96.6 | **66%** | 1.1× |
-| 0.6 | 223.8 | **37%** | 5.1× |
-| 0.5 | 1,157 | 20% | 6.3× |
-| 0.4 | 6,553 | 4% | 7.3× |
+| ratio | C4 PPL | MATH/100      | trace len (med×dense) |
+| ----- | ------ | ------------- | ---------------------- |
+| 0.8   | 52.1   | **72%** | 1.1×                  |
+| 0.7   | 96.6   | **66%** | 1.1×                  |
+| 0.6   | 223.8  | **37%** | 5.1×                  |
+| 0.5   | 1,157  | 20%           | 6.3×                  |
+| 0.4   | 6,553  | 4%            | 7.3×                  |
 
 **Sharp cliff at r\* ≈ 0.65.** Above it, traces stay ~dense length and accuracy
 holds; below it, traces **balloon 5–7×** while accuracy collapses.
 
 ### Failure = loss of termination, not loss of reasoning
+
 The break is **not an early wrong step**. Splitting "did the model ever reach the
 correct answer" (relaxed/`reached✓`, any correct `\boxed{}` anywhere —
 `analyze_len_to_correct.py`) from "graded on the full output" (strict MATH) reveals
 **two cliffs**:
 
-| | r=0.7 | r=0.6 | r=0.5 |
-|---|---|---|---|
-| **reached** the correct answer (5 probes) | 4/5 | **4/5** | 1/5 |
-| **strict MATH** (full output) | 66% | **37%** | 20% |
-| trace blow-up | 1.1× | **5.1×** | 6.3× |
+|                                                 | r=0.7 | r=0.6           | r=0.5 |
+| ----------------------------------------------- | ----- | --------------- | ----- |
+| **reached** the correct answer (5 probes) | 4/5   | **4/5**   | 1/5   |
+| **strict MATH** (full output)             | 66%   | **37%**   | 20%   |
+| trace blow-up                                   | 1.1× | **5.1×** | 6.3× |
 
 - **Termination cliff ≈ 0.65**: at r=0.6 the model *still reaches the correct
   answer as often as at r=0.7* (reasoning intact) but strict accuracy halves —
@@ -173,24 +180,26 @@ turned out to be a second independent lever. Two axes
   long-trace tails.
 
 **Stage 1 @ retain 0.7 (strict MATH, pick-best):**
-| setting | strict | C4 PPL |
-|---|---|---|
-| **sequence · lt2048** | **71%** | 92.4 |
-| sequence · full | 69% | 98.7 |
-| token · full | 66% | 103.0 |
-| token · lt2048 | 65% | 355.2 |
+
+| setting                      | strict        | C4 PPL |
+| ---------------------------- | ------------- | ------ |
+| **sequence · lt2048** | **71%** | 92.4   |
+| sequence · full             | 69%           | 98.7   |
+| token · full                | 66%           | 103.0  |
+| token · lt2048              | 65%           | 355.2  |
 
 → **Sequence-reweighting is the dominant axis** (both sequence settings beat both
 token settings by +4–6pp); +5pp over the 2048-window baseline (66→71%). Full-length
 mainly helps PPL (token:full 103 vs token:lt2048 355).
 
 **Stage 2 — winner `sequence:lt2048` across the cliff vs the 2048-window sweep:**
-| ratio | full-seq seq·lt2048 | 2048-window | Δ |
-|---|---|---|---|
-| 0.7 | **71%** | 66% | +5 |
-| 0.6 | **47%** | 37% | +10 |
-| 0.5 | **36%** | 20% | +16 |
-| 0.4 | **13%** | 4% | +9 |
+
+| ratio | full-seq seq·lt2048 | 2048-window | Δ  |
+| ----- | -------------------- | ----------- | --- |
+| 0.7   | **71%**        | 66%         | +5  |
+| 0.6   | **47%**        | 37%         | +10 |
+| 0.5   | **36%**        | 20%         | +16 |
+| 0.4   | **13%**        | 4%          | +9  |
 
 **The gain grows as compression gets more aggressive** (peak +16pp at r=0.5,
 nearly doubling). And it **fixes the looping pathology**: at every ratio
@@ -199,9 +208,88 @@ nearly doubling). And it **fixes the looping pathology**: at every ratio
 a calibration change, it is **orthogonal to the M1 sparse-residual headline** and
 should stack (an apples-to-apples M1 × full-seq run is a follow-up).
 
-## 6. Status & key knobs
+## 6. How to run — entry points
+
+All drivers live in `scripts/opd/math/compressed_opd/`, run in the **`verl` conda
+env**, and share the env prefix (the eval grader needs `verl` on the path; ray needs
+the verl python):
+
+```bash
+PY=/home/yequan/miniconda3/envs/verl/bin/python
+ENV="CUDA_VISIBLE_DEVICES=<gpu> HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl"
+# run from the OPD repo root
+```
+
+Each driver takes `--cells`/`--ratios`, `--ratio`, `--math-limit`, `--out`, and
+emits a JSON of `{cell, math500_acc, c4_ppl, params_nonzero_B, ...}`. Operating
+point defaults (retain 0.8, last layer dense, OpenThought3 calib) are baked in;
+override via flags.
+
+| Experiment (§)                | Entry point                    | Cells / args                                                    | One-shot launcher              |
+| ------------------------------ | ------------------------------ | --------------------------------------------------------------- | ------------------------------ |
+| Block D — objective (§3)     | `bi_whitened_svd.py`         | `--cells D0 D1 D2 [D3]`                                       | `GPU=N bash run_abd.sh D`    |
+| Block A — rank floor (§3)    | `lr_sparse_residual.py`      | `--cells A0 A1 A2`, `--sparse-frac 0.075`, `--a3-sweep`   | `GPU=N bash run_abd.sh A`    |
+| Block B — accumulation (§3)  | `sequential_src.py`          | `--cells B0 B1 B2` (B2 needs `--teacher`)                   | `GPU=N bash run_abd.sh B`    |
+| Ratio sweep + trace diff (§4) | `ratio_sweep_trace.py`       | `--ratios 0.8 0.7 0.6 0.5 0.4`, `--probe-set …`            | —                             |
+| Trace probe set (§4)          | `trace_diff.py --mode build` | `--n-probes 5 --scan-limit 60` (run ONCE first)               | —                             |
+| Trace len-to-correct (§4)     | `analyze_len_to_correct.py`  | `--sweep-dir … --probe-set …` (CPU, post-hoc)               | —                             |
+| Full-seq calib study (§5)     | `fullseq_calib_sweep.py`     | `--stage tune --settings …` / `--stage sweep --setting …` | `bash run_fullseq.sh stage1` |
+
+### Canonical invocations
+
+**Block D / A / B** (the mechanism search, retain 0.8):
+
+```bash
+$ENV $PY scripts/opd/math/compressed_opd/bi_whitened_svd.py \
+    --cells D0 D1 D2 --ratio 0.8 --math-limit 100 \
+    --out scripts/opd/math/compressed_opd/results/blockD/bi_whitened_r0.8.json
+$ENV $PY scripts/opd/math/compressed_opd/lr_sparse_residual.py \
+    --cells A0 A1 A2 --ratio 0.8 --sparse-frac 0.075 --math-limit 100 \
+    --out scripts/opd/math/compressed_opd/results/blockA/lr_sparse_r0.8.json
+# or the chained launcher (D→A→B sequential on one GPU):
+GPU=5 bash scripts/opd/math/compressed_opd/run_abd.sh all
+```
+
+D3/B2 (OPD/teacher) require a **distinct** teacher (else fail-fast):
+`--teacher Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`.
+
+**Forward-only ratio sweep + trace diff** (§4) — build the probe set ONCE, then sweep:
+
+```bash
+$ENV $PY scripts/opd/math/compressed_opd/trace_diff.py --mode build --n-probes 5 \
+    --scan-limit 60 --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
+$ENV $PY scripts/opd/math/compressed_opd/ratio_sweep_trace.py \
+    --ratios 0.8 0.7 0.6 0.5 0.4 --math-limit 100 \
+    --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json \
+    --out-dir scripts/opd/math/compressed_opd/results/sweep
+# post-hoc termination-vs-reasoning metrics (CPU):
+PYTHONPATH=src:verl $PY scripts/opd/math/compressed_opd/analyze_len_to_correct.py \
+    --sweep-dir scripts/opd/math/compressed_opd/results/sweep \
+    --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
+```
+
+**Full-seq calibration study** (§5) — two stages (tune @0.7 → sweep the winner):
+
+```bash
+# stage 1: 4 settings (token/sequence × full/lt2048) @0.7, split GPU 2 & 3
+bash scripts/opd/math/compressed_opd/run_fullseq.sh stage1
+# stage 2: best setting at 0.6/0.5/0.4
+GPU=2 SET=sequence:lt2048 bash scripts/opd/math/compressed_opd/run_fullseq.sh stage2
+```
+
+### Shared infra (reused by every driver)
+
+- `compress_common.py` — `build_calib_loader` (calib format), `eval_cell` /
+  `eval_math_capture` (MATH + C4 PPL + relaxed/length metrics), `drop_protected_stats`
+  (last-layer skip), `load_model`/`count_params`.
+- `eval_math500` (`layer_sensitivity.py`) — the standing MATH-500 greedy eval.
+- Core compression: `compress_model_with_loader` (dispatcher) →
+  `collect_*` (calibration.py) → `svd_llm_v2_compress_model` / `nystrom_compress_model`.
+
+## 7. Status & key knobs
 
 **Headline takeaways**
+
 1. **M1 (rank floor) is the mechanism**; M2 (objective) is null; M3 not tested.
 2. The failure is **loss of termination before loss of reasoning** (looping cliff
    ~0.65, reasoning cliff ~0.55).
@@ -220,6 +308,7 @@ backward over the 4B OOMs 96GB). See
 [memory: calib-default-sequence-fullseq].
 
 **File map**
+
 - `scripts/opd/math/compressed_opd/` drivers: `bi_whitened_svd.py` (D),
   `lr_sparse_residual.py` (A), `sequential_src.py` (B), `ratio_sweep_trace.py`
   (cliff + trace diff), `fullseq_calib_sweep.py` (calib study),
