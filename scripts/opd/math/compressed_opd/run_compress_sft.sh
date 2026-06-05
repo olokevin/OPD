@@ -16,9 +16,12 @@ set -euo pipefail
 
 REPO=/home/yequan/Project/compression/OPD
 LF=$REPO/LlamaFactory
-SFT_CLI=/home/yequan/miniconda3/envs/sft/bin/llamafactory-cli
+SFT_BIN=/home/yequan/miniconda3/envs/sft/bin
+SFT_CLI=$SFT_BIN/llamafactory-cli
 VERL_PY=/home/yequan/miniconda3/envs/verl/bin/python
 export HF_HOME=${HF_HOME:-/data/yequan/huggingface}
+# llamafactory-cli spawns a bare `torchrun`; ensure it resolves to the sft env's
+# torchrun (py3.11 with llamafactory installed), NOT verl's torchrun (py3.12).
 
 OUT_ROOT=/data/yequan/compress_sft
 SFT_ROOT=$OUT_ROOT/sft
@@ -46,6 +49,7 @@ train_cell() {
   CUDA_VISIBLE_DEVICES=$gpu \
   FORCE_TORCHRUN=1 \
   MASTER_PORT=$((29500 + gpu)) \
+  PATH="$SFT_BIN:$PATH" \
   WANDB_PROJECT=compress_sft_$tag \
   HF_HOME=$HF_HOME \
     "$SFT_CLI" train "examples/compress_train/$yaml" \
