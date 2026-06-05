@@ -83,3 +83,19 @@ def test_select_ids_empty_intersection_falls_back_to_teacher():
     t_logp = torch.tensor([-2.0, -3.0, -4.0])
     ids, t_aligned = sc._select_ids(s_logp, t_ids, t_logp, fallback=-1e30)
     assert torch.equal(ids, t_ids) and torch.equal(t_aligned, t_logp)
+
+
+def test_topk_window_preserves_teacher_id_outside_student_topk():
+    # student top-1 is id 0; teacher's top id is 5 (outside student top-1).
+    # With strategy="union", the scored id set MUST include id 5.
+    # Pins the C-1 invariant: the decode-side top-k slice (C1) must keep a window
+    # wide enough (topk_store_k = max(log_prob_top_k, 512)) that _select_ids can
+    # still see teacher ids outside the student top-k, or union/intersection/
+    # teacher_p silently degrade to only_stu.
+    sc = TeacherScorer.__new__(TeacherScorer)
+    sc.top_k = 1; sc.top_k_strategy = "union"; sc.weight_mode = "none"
+    sc.teacher_temperature = 1.0
+    s_clean_full = torch.tensor([10.0, -1, -1, -1, -1, -1])  # student argmax=0
+    t_ids = torch.tensor([5, 0]); t_logp = torch.tensor([-0.1, -2.0])
+    ids, t_aligned = sc._select_ids(s_clean_full, t_ids, t_logp, fallback=-50.0)
+    assert 5 in ids.tolist() and 0 in ids.tolist()  # union keeps teacher id 5
