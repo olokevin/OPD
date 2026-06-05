@@ -45,12 +45,14 @@ class TeacherScorer:
     top-k set and call reverse_kl_topk per (token, sample). Returns L_t^(q).
     """
 
-    def __init__(self, teacher_engine, top_k, top_k_strategy, teacher_temperature, weight_mode):
+    def __init__(self, teacher_engine, top_k, top_k_strategy, teacher_temperature,
+                 weight_mode, teacher_batch_size=16):
         self.engine = teacher_engine
         self.top_k = int(top_k)
         self.top_k_strategy = top_k_strategy
         self.teacher_temperature = float(teacher_temperature)
         self.weight_mode = weight_mode
+        self.teacher_batch_size = int(teacher_batch_size)
 
     def score_rollout(self, prefix_token_ids, candidate_logits):
         """Score per-step candidate distributions into per-token reverse-KL losses.
@@ -115,12 +117,25 @@ class TeacherScorer:
         """
         if not candidate_logits:
             return [], []
-        if isinstance(candidate_logits[0], tuple):
-            return self._score_rollout_topk(prefix_token_ids, candidate_logits)
-
-        L_q_per_step, L_clean_per_step = [], []
         teacher_logp_by_pos, teacher_ids_by_pos = self._teacher_topk_logprobs(
             prefix_token_ids, len(candidate_logits))
+        return self._score_one(candidate_logits, teacher_logp_by_pos, teacher_ids_by_pos)
+
+    def _score_one(self, candidate_logits, teacher_logp_by_pos, teacher_ids_by_pos):
+        """Score one prompt's candidate logits given PRE-FETCHED teacher logprobs.
+
+        Pulled out of score_rollout so the batched path (score_wave) can pass
+        teacher logprobs fetched by a single batched generate call and reuse the
+        exact same scoring body. Auto-detects the C1 top-k tuple format vs the
+        legacy full-vocab format from candidate_logits[0], matching score_rollout.
+        """
+        if not candidate_logits:
+            return [], []
+        if isinstance(candidate_logits[0], tuple):
+            return self._score_rollout_topk(candidate_logits, teacher_logp_by_pos,
+                                            teacher_ids_by_pos)
+
+        L_q_per_step, L_clean_per_step = [], []
         for t, cl in enumerate(candidate_logits):
             s_full_logp = torch.log_softmax(cl.float(), dim=-1)  # [1+n_sample, vocab]
             t_ids = teacher_ids_by_pos[t]
@@ -136,18 +151,19 @@ class TeacherScorer:
             ]))
         return L_q_per_step, L_clean_per_step
 
-    def _score_rollout_topk(self, prefix_token_ids, candidate_logits):
+    def _score_rollout_topk(self, candidate_logits, teacher_logp_by_pos,
+                            teacher_ids_by_pos):
         """New path: candidate_logits is a list of (topk_logp [1+N, k], ids [k]).
 
         Mirrors the legacy full-vocab loop but (a) sources the student top-k from
         the stored window and (b) computes reverse-KL for all 1+N rows in ONE
         vectorized reduce per step instead of a per-row Python loop. The reduce
         is the row-batched form of reverse_kl_topk; see score_rollout docstring
-        for the union out-of-window student-logp approximation.
+        for the union out-of-window student-logp approximation. Teacher logprobs
+        are pre-fetched by the caller (score_rollout / score_wave) so the serial
+        and batched paths share this body.
         """
         L_q_per_step, L_clean_per_step = [], []
-        teacher_logp_by_pos, teacher_ids_by_pos = self._teacher_topk_logprobs(
-            prefix_token_ids, len(candidate_logits))
         for t, (topk_logp, stored_ids) in enumerate(candidate_logits):
             # topk_logp: [1+N, k] student rows' full-vocab log-softmax over stored_ids.
             t_ids = teacher_ids_by_pos[t]
@@ -274,25 +290,81 @@ class TeacherScorer:
                                  dtype=t_logp.dtype)
         return ids, t_aligned
 
-    def _teacher_topk_logprobs(self, prefix_token_ids, num_steps):
-        """Query the teacher engine for per-position top-k log-probs over the response.
+    def _sampling_params(self):
+        """The SamplingParams used to elicit per-position teacher prompt_logprobs.
 
-        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        Shared by the serial (_teacher_topk_logprobs) and batched (score_wave)
+        teacher generate calls so they can't drift.
         """
-        import ray
         from vllm import SamplingParams
+        return SamplingParams(temperature=self.teacher_temperature, max_tokens=1,
+                              prompt_logprobs=self.top_k)
 
-        sp = SamplingParams(temperature=self.teacher_temperature, max_tokens=1,
-                            prompt_logprobs=self.top_k)
-        out = self.engine.generate.remote({"prompt_token_ids": prefix_token_ids}, sp,
-                                          use_tqdm=False)
-        out = ray.get(out)[0]
-        # prompt_logprobs: list[dict[token_id -> Logprob]] aligned to prompt positions.
-        # The response region is the last num_steps positions of prefix_token_ids.
-        plp = out.prompt_logprobs[-num_steps:]
+    @staticmethod
+    def _parse_prompt_logprobs(request_output, num_steps):
+        """Parse one vLLM RequestOutput's prompt_logprobs into per-position lists.
+
+        prompt_logprobs: list[dict[token_id -> Logprob]] aligned to prompt
+        positions. The response region is the last num_steps positions.
+        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        Shared by the serial and batched teacher paths so their parse is identical.
+        """
+        plp = request_output.prompt_logprobs[-num_steps:]
         logp_by_pos, ids_by_pos = [], []
         for d in plp:
             ids = list(d.keys())
             logp_by_pos.append(torch.tensor([d[i].logprob for i in ids]))
             ids_by_pos.append(torch.tensor(ids, dtype=torch.long))
         return logp_by_pos, ids_by_pos
+
+    def _teacher_topk_logprobs(self, prefix_token_ids, num_steps):
+        """Query the teacher engine for per-position top-k log-probs over the response.
+
+        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        """
+        import ray
+
+        sp = self._sampling_params()
+        out = ray.get(self.engine.generate.remote(
+            {"prompt_token_ids": prefix_token_ids}, sp, use_tqdm=False))[0]
+        return self._parse_prompt_logprobs(out, num_steps)
+
+    def score_wave(self, list_of_prefixes, list_of_candidate_logits):
+        """Batched analogue of score_rollout over B prompts with ONE teacher
+        generate call per chunk instead of B serial calls.
+
+        vLLM's generate accepts a LIST of prompts and returns a list of
+        RequestOutputs in prompt order; we issue one batched generate per chunk
+        of at most self.teacher_batch_size prompts, parse each output with the
+        SAME _parse_prompt_logprobs helper the serial path uses, and score each
+        prompt with the SAME _score_one body score_rollout uses. The result is
+        per-prompt identical to calling score_rollout(prefix_i, cand_i) for each i.
+
+        Returns a list [(L_q_per_step, L_clean_per_step), ...], one tuple per prompt.
+        """
+        assert len(list_of_prefixes) == len(list_of_candidate_logits)
+        B = len(list_of_prefixes)
+        if B == 0:
+            return []
+
+        # Serial fallback: no batching benefit, just loop score_rollout per prompt.
+        if self.teacher_batch_size <= 1:
+            return [self.score_rollout(list_of_prefixes[i], list_of_candidate_logits[i])
+                    for i in range(B)]
+
+        import ray
+        sp = self._sampling_params()
+        results = [None] * B
+        for start in range(0, B, self.teacher_batch_size):
+            idxs = range(start, min(start + self.teacher_batch_size, B))
+            prompts = [{"prompt_token_ids": list_of_prefixes[i]} for i in idxs]
+            # ONE generate.remote per chunk over the list of prompts.
+            outs = ray.get(self.engine.generate.remote(prompts, sp, use_tqdm=False))
+            for out_i, i in zip(outs, idxs):
+                cand_i = list_of_candidate_logits[i]
+                if not cand_i:
+                    results[i] = ([], [])
+                    continue
+                logp_by_pos, ids_by_pos = self._parse_prompt_logprobs(out_i, len(cand_i))
+                results[i] = self._score_one(cand_i, logp_by_pos, ids_by_pos)
+        return results

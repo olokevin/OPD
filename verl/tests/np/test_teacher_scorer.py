@@ -213,3 +213,129 @@ def test_vectorized_score_matches_legacy_full_window_all_strategies(strategy, we
         rel = (Lq_new[t] - Lq_ref[t]).norm() / (Lq_ref[t].norm() + 1e-9)
         assert rel < 1e-4, f"step {t} strat={strategy} weight={weight_mode} rel={rel:.2e}"
         assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# C3: batched teacher prefill (score_wave) parity with serial score_rollout.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLogprob:
+    def __init__(self, lp):
+        self.logprob = lp
+
+
+class _FakeOut:
+    def __init__(self, prompt_logprobs):
+        self.prompt_logprobs = prompt_logprobs
+
+
+class _FakeGenerate:
+    """Mimics engine.generate; .remote(prompts, sp, use_tqdm=...) returns a list
+    of _FakeOut, one per prompt (dict input -> 1-element list, like vLLM).
+
+    Keyed by the prompt_token_ids tuple so a serial dict call for prompt i and
+    the batched list call see the SAME prompt_logprobs for prompt i.
+    """
+
+    def __init__(self, by_prefix):
+        self._by_prefix = by_prefix  # {tuple(prefix): _FakeOut}
+
+    def remote(self, prompts, sp, use_tqdm=False):
+        if isinstance(prompts, dict):
+            return [self._by_prefix[tuple(prompts["prompt_token_ids"])]]
+        return [self._by_prefix[tuple(p["prompt_token_ids"])] for p in prompts]
+
+
+class _FakeEngine:
+    def __init__(self, by_prefix):
+        self.generate = _FakeGenerate(by_prefix)
+
+
+def _build_wave_fixture(monkeypatch, top_k=8, store_k=64, strategy="union",
+                        weight_mode="student_p", B=3, vocab=128, n=4):
+    """Build B prompts, each with its own candidate_logits (C1 tuples) and a
+    deterministic per-prompt teacher prompt_logprobs surface. Returns
+    (scorer, prefixes, cand_list). Patches the module's ray.get to identity so
+    the fake .remote return value flows straight through.
+    """
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+
+    # _teacher_topk_logprobs and score_wave do `import ray` locally, so patching
+    # the real ray module's get makes the fake .remote return flow straight through.
+    import ray
+    monkeypatch.setattr(ray, "get", lambda x: x)
+
+    we = WorkerExtension.__new__(WorkerExtension)
+    torch.manual_seed(0)
+
+    prefixes, cand_list, by_prefix = [], [], {}
+    for i in range(B):
+        T = 3 + i  # vary number of steps per prompt
+        prefix = list(range(10 + i)) + list(range(50, 50 + T))  # unique per prompt
+        prefixes.append(prefix)
+        logits_steps = [torch.randn(1 + n, vocab) for _ in range(T)]
+        cand_list.append([we._topk_store(s, store_k) for s in logits_steps])
+
+        # Build prompt_logprobs: a list aligned to prompt positions; only the LAST
+        # T positions (the response region) are read. Pad the head with junk dicts.
+        plp = [None] * (len(prefix) - T)
+        for s in logits_steps:
+            t_ids = torch.randperm(vocab)[:16].tolist()
+            t_lp = torch.log_softmax(torch.randn(16), -1).tolist()
+            plp.append({tid: _FakeLogprob(lp) for tid, lp in zip(t_ids, t_lp)})
+        by_prefix[tuple(prefix)] = _FakeOut(plp)
+
+    engine = _FakeEngine(by_prefix)
+    scorer = TeacherScorer(teacher_engine=engine, top_k=top_k,
+                           top_k_strategy=strategy,
+                           teacher_temperature=1.0, weight_mode=weight_mode)
+    return scorer, prefixes, cand_list
+
+
+def _assert_wave_eq_serial(scorer, prefixes, cand_list):
+    wave = scorer.score_wave(prefixes, cand_list)
+    assert len(wave) == len(prefixes)
+    for i, prefix in enumerate(prefixes):
+        Lq_ref, Lc_ref = scorer.score_rollout(prefix, cand_list[i])
+        Lq_w, Lc_w = wave[i]
+        assert len(Lq_w) == len(Lq_ref) and len(Lc_w) == len(Lc_ref)
+        for t in range(len(Lq_ref)):
+            assert torch.allclose(Lq_w[t], Lq_ref[t], atol=1e-6), \
+                f"prompt {i} step {t} L_q mismatch"
+            assert abs(Lc_w[t] - Lc_ref[t]) < 1e-6, \
+                f"prompt {i} step {t} L_clean mismatch"
+
+
+@pytest.mark.parametrize("weight_mode", ["student_p", "teacher_p", "none"])
+@pytest.mark.parametrize("strategy", ["only_stu", "only_tch", "intersection", "union"])
+def test_score_wave_matches_serial_score_rollout(monkeypatch, strategy, weight_mode):
+    # ONE batched teacher generate over B prompts must yield per-prompt results
+    # element-equal to B serial score_rollout calls. The fake engine is keyed by
+    # prefix so the serial (dict) and batched (list) paths see identical teacher
+    # prompt_logprobs for each prompt.
+    scorer, prefixes, cand_list = _build_wave_fixture(
+        monkeypatch, strategy=strategy, weight_mode=weight_mode, B=3)
+    _assert_wave_eq_serial(scorer, prefixes, cand_list)
+
+
+def test_score_wave_chunking_transparent(monkeypatch):
+    # With teacher_batch_size=2 and 3 prompts the wave is processed in chunks
+    # (2 + 1) but the result still matches serial score_rollout per prompt.
+    scorer, prefixes, cand_list = _build_wave_fixture(monkeypatch, B=3)
+    scorer.teacher_batch_size = 2
+    _assert_wave_eq_serial(scorer, prefixes, cand_list)
+
+
+def test_score_wave_serial_fallback(monkeypatch):
+    # teacher_batch_size <= 1 -> serial fallback (loop score_rollout per prompt),
+    # still matches serial score_rollout per prompt.
+    scorer, prefixes, cand_list = _build_wave_fixture(monkeypatch, B=3)
+    scorer.teacher_batch_size = 1
+    _assert_wave_eq_serial(scorer, prefixes, cand_list)
+
+
+def test_teacher_batch_size_default_is_16():
+    sc = TeacherScorer(teacher_engine=None, top_k=8, top_k_strategy="union",
+                       teacher_temperature=1.0, weight_mode="none")
+    assert sc.teacher_batch_size == 16
