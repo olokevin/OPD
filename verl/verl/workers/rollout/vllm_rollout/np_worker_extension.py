@@ -143,6 +143,20 @@ class PerturbedLinear(torch.nn.Module):
         return out
 
 
+def _alloc_layer_buffers(np_modules, n_sample, device):
+    """Allocate per-layer u_buf [n_sample, d_out] and x_buf [d_in] dicts for the
+    all-layer perturbation mode. Shapes are read from each wrapped linear's
+    weight [d_out, d_in]. Buffers are zero-initialized on `device` (the noise
+    refill / forward overwrites them)."""
+    u_buf, x_buf = {}, {}
+    for name, wrapped in np_modules.items():
+        w = wrapped.wrapped.weight
+        d_out, d_in = w.shape[0], w.shape[1]
+        u_buf[name] = torch.zeros(n_sample, d_out, device=device, dtype=w.dtype)
+        x_buf[name] = torch.zeros(d_in, device=device, dtype=w.dtype)
+    return u_buf, x_buf
+
+
 class WorkerExtension:
     def _ensure_np_state(self):
         if not hasattr(self, "np_state"):
@@ -182,7 +196,17 @@ class WorkerExtension:
 
     def run_np_decode(self, prompt_token_ids, sampling_params, layer_name,
                       np_cfg, rollout_idx):
-        """Custom decode for ONE prompt. See module docstring + spec §2."""
+        """Custom decode for ONE prompt. See module docstring + spec §2.
+
+        `layer_name` is EITHER a `str` (single-layer V1 path, the parity oracle)
+        OR a `list[str]`/`tuple[str]` (all-layer eager path). In the all-layer
+        case every matched layer is perturbed in ONE forward with its own
+        per-(layer, q) noise, and `captured_u`/`captured_x` are returned as
+        per-layer dicts `{layer: {t: tensor}}` (vs the single-layer `{t: tensor}`)."""
+        if isinstance(layer_name, (list, tuple)):
+            return self._run_np_decode_all_layers(
+                prompt_token_ids, sampling_params, list(layer_name), np_cfg,
+                rollout_idx)
         st = self._ensure_np_state()
         mr = self.model_runner
         model = mr.model
@@ -222,6 +246,78 @@ class WorkerExtension:
             self._np_commit_clean(state, next_tok)
 
         st["mode"] = "off"
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
+    def _run_np_decode_all_layers(self, prompt_token_ids, sampling_params,
+                                  layer_names, np_cfg, rollout_idx):
+        """All-layer eager decode for ONE prompt: perturb every layer in
+        `layer_names` in ONE forward per token (perturb_all_layers mode), each
+        layer with its own per-(layer, q) noise drawn into a per-layer u_buf and
+        its own clean-row input captured into a per-layer x_buf. Same per-prompt
+        output contract as run_np_decode, but captured_u/captured_x are
+        per-layer dicts: {layer: {t: tensor}}."""
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
+
+        state = self._np_prefill(model, device, list(prompt_token_ids))
+
+        # Per-layer u_buf/x_buf dicts, allocated ONCE and reused across steps
+        # (refilled per step). PerturbedLinear (perturb_all_layers branch) reads
+        # st["u_buf"][self.name] / writes st["x_buf"][self.name] by reference, so
+        # these exact dicts must stay installed for the whole decode.
+        subset = {ln: self.np_modules[ln] for ln in layer_names}
+        u_buf, x_buf = _alloc_layer_buffers(subset, n_sample, device)
+        st.update({
+            "mode": "perturb_all_layers",
+            "sigma": sigma,
+            "n_clean_rows": 1,
+            "u_buf": u_buf,
+            "x_buf": x_buf,
+            # Defensive: ensure the contiguous (non-scatter) perturb_all_layers
+            # path; a prior packed decode could have left these behind.
+            "perturbed_row_idx": None,
+            "clean_row_idx": None,
+        })
+
+        clean_tokens, candidate_logits = [], []
+        captured_u = {ln: {} for ln in layer_names}
+        captured_x = {ln: {} for ln in layer_names}
+        try:
+            for t in range(max_tokens):
+                st["sigma"] = sigma
+                st["n_clean_rows"] = 1
+                # Refill ALL layers' noise BEFORE the forward (the only RNG site);
+                # the forward reads u_buf and writes x_buf for every layer.
+                self._np_fill_u_buf_all_layers(
+                    st["u_buf"], np_cfg, layer_names, t, rollout_idx, n_sample)
+                logits = self._np_step_forward(model, device, state, n_sample)
+                candidate_logits.append(self._topk_store(logits, topk_store_k))
+                # Capture per-layer u (just refilled) and x (just written by the
+                # forward), one CPU clone each, per layer per step.
+                for ln in layer_names:
+                    captured_u[ln][t] = st["u_buf"][ln].detach().to("cpu").clone()
+                    captured_x[ln][t] = st["x_buf"][ln].detach().to("cpu").clone()
+                next_tok = self._np_sample_clean(logits[0], sampling_params)
+                clean_tokens.append(int(next_tok))
+                if self._np_is_eos(next_tok, sampling_params):
+                    break
+                self._np_commit_clean(state, next_tok)
+        finally:
+            st["mode"] = "off"
+            st["u_buf"] = None
+            st["x_buf"] = None
+
         return {
             "clean_tokens": clean_tokens,
             "candidate_logits": candidate_logits,
@@ -383,7 +479,20 @@ class WorkerExtension:
         (disjoint scratch slices) and its own noise (seeded by rollout_ids[p], so
         identical to what the serial loop drew for that prompt -> parity). A prompt
         that hits EOS is marked inactive and dropped from the next forward; its
-        captured signals stop at its EOS token."""
+        captured signals stop at its EOS token.
+
+        Single-layer only. The all-layer packed path needs a scattered-row,
+        per-layer-dict form of PerturbedLinear's perturb_graph branch
+        (st["u_buf"][name][pri] / st["x_buf"][name][cri]); that scatter extension
+        is added in Stage E (run_np_decode_packed_graphed). Until then a list
+        `layer_name` is rejected here rather than silently single-layered."""
+        # all-layer packed path: see Stage E (run_np_decode_packed_graphed).
+        if isinstance(layer_name, (list, tuple)):
+            raise NotImplementedError(
+                "run_np_decode_packed is single-layer only; the all-layer packed "
+                "path (scattered per-layer u_buf/x_buf) is added in Stage E "
+                "(run_np_decode_packed_graphed). Use run_np_decode (eager) for "
+                "the all-layer path, or pass a single layer name here.")
         st = self._ensure_np_state()
         mr = self.model_runner
         model = mr.model

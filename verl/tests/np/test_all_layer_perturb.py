@@ -60,6 +60,16 @@ def test_clean_and_perturbed_rows_disjoint_invariant():
     assert (y0[1:] != 0).any()                     # perturbed rows changed
 
 
+def test_alloc_layer_buffers_shapes():
+    import torch
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import _alloc_layer_buffers
+    class W:  # fake wrapped linear with weight [d_out,d_in]
+        def __init__(s, o, i): s.wrapped = type("x", (), {"weight": torch.zeros(o, i)})()
+    mods = {"L0": W(64, 48), "L1": W(32, 96)}
+    u, x = _alloc_layer_buffers(mods, n_sample=8, device=torch.device("cpu"))
+    assert u["L0"].shape == (8, 64) and x["L1"].shape == (96,)
+
+
 def test_fill_u_buf_all_layers_independent_per_layer():
     we = WorkerExtension.__new__(WorkerExtension)
     u = {"L0": torch.zeros(2, 6), "L1": torch.zeros(2, 6)}
