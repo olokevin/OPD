@@ -132,3 +132,40 @@ def test_topk_store_helper_returns_logprobs_and_ids():
     assert torch.allclose(topk_logp, ref, atol=1e-5)
     # outputs are on CPU (D2H done inside the helper)
     assert topk_logp.device.type == "cpu" and ids.device.type == "cpu"
+
+
+def _fake_teacher_scorer(strategy, weight_mode, top_k, teacher_ids_by_pos, teacher_logp_by_pos):
+    from verl.trainer.np.teacher_scorer import TeacherScorer
+    sc = TeacherScorer.__new__(TeacherScorer)
+    sc.top_k = top_k; sc.top_k_strategy = strategy; sc.weight_mode = weight_mode
+    sc.teacher_temperature = 1.0
+    sc._teacher_topk_logprobs = lambda prefix, n_steps: (teacher_logp_by_pos, teacher_ids_by_pos)
+    return sc
+
+
+@pytest.mark.parametrize("weight_mode", ["student_p", "teacher_p", "none"])
+def test_vectorized_score_matches_legacy_only_stu(weight_mode):
+    # Parity oracle: the new tuple-fed (C1) vectorized path must reproduce the
+    # legacy full-vocab per-token-loop result for only_stu (lossless production
+    # default — the scored id set is the student top-k, a subset of the stored
+    # window, so there is NO approximation).
+    from verl.workers.rollout.vllm_rollout.np_worker_extension import WorkerExtension
+    torch.manual_seed(0)
+    T, n, vocab, top_k, store_k = 6, 4, 128, 8, 64
+    we = WorkerExtension.__new__(WorkerExtension)
+    logits_steps = [torch.randn(1 + n, vocab) for _ in range(T)]
+    # teacher: random ids + logps per position
+    t_ids = [torch.randperm(vocab)[:16] for _ in range(T)]
+    t_logp = [torch.log_softmax(torch.randn(16), -1) for _ in range(T)]
+    legacy_cl = [s.clone() for s in logits_steps]                  # full-vocab tensors
+    tuple_cl = [we._topk_store(s, store_k) for s in logits_steps]  # C1 tuples
+
+    sc_legacy = _fake_teacher_scorer("only_stu", weight_mode, top_k, t_ids, t_logp)
+    sc_vec = _fake_teacher_scorer("only_stu", weight_mode, top_k, t_ids, t_logp)
+    Lq_ref, Lc_ref = sc_legacy.score_rollout(None, legacy_cl)
+    Lq_new, Lc_new = sc_vec.score_rollout(None, tuple_cl)
+
+    for t in range(T):
+        rel = (Lq_new[t] - Lq_ref[t]).norm() / (Lq_ref[t].norm() + 1e-9)
+        assert rel < 1e-4, f"step {t} weight={weight_mode} rel={rel:.2e}"
+        assert abs(Lc_new[t] - Lc_ref[t]) < 1e-4 * (abs(Lc_ref[t]) + 1e-6)
