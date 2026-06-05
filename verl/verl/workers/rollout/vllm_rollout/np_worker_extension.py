@@ -343,6 +343,112 @@ class WorkerExtension:
             "captured_u": captured_u,
         }
 
+    def run_np_decode_packed(self, list_of_prompt_ids, sampling_params, layer_name,
+                             np_cfg, rollout_ids):
+        """Packed decode for B_pack prompts simultaneously (spec §4). Same per-prompt
+        output contract as run_np_decode_graphed, but returns LISTS indexed by prompt:
+          clean_tokens[p], candidate_logits[p], captured_x[p], captured_u[p].
+
+        All prompts share one wide forward per token; each keeps its own prefix KV
+        (disjoint scratch slices) and its own noise (seeded by rollout_ids[p], so
+        identical to what the serial loop drew for that prompt -> parity). A prompt
+        that hits EOS is marked inactive and dropped from the next forward; its
+        captured signals stop at its EOS token."""
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+
+        states = self._np_prefill_packed(model, device, list_of_prompt_ids)
+        b_pack = len(states)
+
+        # Resolve the perturbed layer's output / input widths to size buffers.
+        wrapped = self.np_modules[layer_name]
+        weight = wrapped.wrapped.weight          # [d_out, d_in]
+        assert weight.is_floating_point(), (
+            f"perturb_graph needs a floating weight (got {weight.dtype}) for "
+            f"u_buf dtype parity. Layer {layer_name!r}.")
+        d_out = int(weight.shape[0])
+        d_in = int(weight.shape[1])
+        buf_dtype = weight.dtype
+
+        # Per-prompt outputs.
+        clean_tokens = [[] for _ in range(b_pack)]
+        candidate_logits = [[] for _ in range(b_pack)]
+        captured_u = [{} for _ in range(b_pack)]
+        captured_x = [{} for _ in range(b_pack)]
+
+        st.update({
+            "mode": "perturb_graph",
+            "layer": layer_name,
+            "sigma": sigma,
+            "n_clean_rows": 1,
+        })
+        try:
+            for t in range(max_tokens):
+                active_idx = [p for p in range(b_pack) if states[p]["active"]]
+                if not active_idx:
+                    break
+                n_active = len(active_idx)
+                blocks = _packed_row_blocks(n_active, n_sample)  # row layout for ACTIVE prompts
+
+                # Buffers sized to the active set this token.
+                u_buf = torch.zeros(n_active * n_sample, d_out, device=device,
+                                    dtype=buf_dtype)
+                x_buf = torch.zeros(n_active, d_in, device=device, dtype=buf_dtype)
+                clean_row_idx = torch.tensor([blk["clean"] for blk in blocks],
+                                             dtype=torch.long, device=device)
+                perturbed_row_idx = torch.tensor(
+                    [r for blk in blocks for r in blk["perturbed"]],
+                    dtype=torch.long, device=device)
+                st["u_buf"] = u_buf
+                st["x_buf"] = x_buf
+
+                # Refill u_buf: prompt-major, each active prompt's N rows seeded by
+                # ITS rollout_id (parity with serial). u_buf row (i*n_sample + q).
+                for i, p in enumerate(active_idx):
+                    for q in range(n_sample):
+                        seed = noise_seed(int(np_cfg["global_seed"]), int(t),
+                                          layer_name, int(rollout_ids[p]), q)
+                        u = draw_noise(seed, (d_out,), device, buf_dtype,
+                                       np_cfg["sample_method"])
+                        u_buf[i * n_sample + q].copy_(u)
+
+                active_states = [states[p] for p in active_idx]
+                logits = self._np_step_forward_packed(
+                    model, device, active_states, n_sample, u_buf, x_buf,
+                    clean_row_idx, perturbed_row_idx)  # [R, vocab]
+
+                # Per active prompt: slice its (1+N) block, sample, capture, advance.
+                for i, p in enumerate(active_idx):
+                    base = blocks[i]["clean"]
+                    block = logits[base:base + 1 + n_sample]  # [1+N, vocab]
+                    candidate_logits[p].append(block.detach().to("cpu"))
+                    # u for this prompt = its N rows of u_buf.
+                    captured_u[p][t] = u_buf[i * n_sample:(i + 1) * n_sample
+                                             ].detach().to("cpu").clone()
+                    captured_x[p][t] = x_buf[i].detach().to("cpu").clone()
+                    next_tok = self._np_sample_clean(block[0], sampling_params)
+                    clean_tokens[p].append(int(next_tok))
+                    if self._np_is_eos(next_tok, sampling_params):
+                        states[p]["active"] = False
+                    else:
+                        self._np_commit_clean(states[p], next_tok)
+        finally:
+            st["mode"] = "off"
+            for k in ("u_buf", "x_buf", "perturbed_row_idx", "clean_row_idx"):
+                st[k] = None
+
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
     def _np_step_forward_graph(self, model, device, state, n_sample):
         """Eager 1+n_sample step forward for the perturb_graph path (M1).
 
