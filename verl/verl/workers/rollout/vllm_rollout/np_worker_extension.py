@@ -73,6 +73,20 @@ class PerturbedLinear(torch.nn.Module):
             st["captured_x"][self.name] = x[0].detach().clone()
             return out
 
+        if mode == "perturb_all_layers":
+            # Every matched layer perturbs with ITS OWN buffer slice and captures
+            # ITS OWN clean-row input, all in this one forward. u_buf/x_buf are
+            # dicts keyed by layer name (pinned by the caller / graph capture).
+            # Perturbation is added to OUTPUT y, never input x, so the clean row
+            # (index 0) stays the genuine unperturbed input at this layer.
+            u_buf = st["u_buf"][self.name]          # [n_sample, d_out]
+            x_buf = st["x_buf"][self.name]          # [d_in]
+            sigma = st["sigma"]
+            x_buf.copy_(x[0])
+            y[n_clean:n_clean + u_buf.shape[0]] = (
+                y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            return _repack(y, bias, was_tuple)
+
         if mode == "perturb_graph" and self.name == st["layer"]:
             # V2 graph-capturable perturbation (spec §5.2). The host has already
             # filled the persistent buffer u_buf (st["u_buf"]) before this forward.
