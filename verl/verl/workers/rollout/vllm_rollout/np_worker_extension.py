@@ -726,6 +726,69 @@ class WorkerExtension:
             self.np_state["mode"] = prev_mode
         return state
 
+    def _np_prefill_packed(self, model, device, list_of_prompt_ids):
+        """Prefill B_pack prompts, each into its OWN disjoint high-indexed scratch-KV
+        slice. Returns a list of per-prompt state dicts (same shape as _np_prefill's
+        state, plus 'active': True). Fails fast if the B_pack slices don't fit the
+        GPU block pool.
+
+        Each prompt p gets blocks_per_prompt = ceil(max_model_len/block_size) blocks,
+        carved from the TOP of the pool downward and disjoint across prompts:
+          prompt 0: [num_gpu_blocks - 1*bpp, num_gpu_blocks)
+          prompt 1: [num_gpu_blocks - 2*bpp, num_gpu_blocks - 1*bpp)
+          ...
+        so no two prompts' clean rows ever write the same KV slot."""
+        mr = self.model_runner
+        block_size = int(mr.cache_config.block_size)
+        num_gpu_blocks = int(mr.cache_config.num_gpu_blocks)
+        max_blocks = int(
+            mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+
+        b_pack = len(list_of_prompt_ids)
+        blocks_per_prompt = min(
+            (int(mr.max_model_len) + block_size - 1) // block_size, max_blocks)
+        # Fail fast rather than corrupt KV (spec §4.2).
+        assert b_pack * blocks_per_prompt <= num_gpu_blocks, (
+            f"packed scratch KV does not fit: b_pack={b_pack} x "
+            f"blocks_per_prompt={blocks_per_prompt} = {b_pack*blocks_per_prompt} "
+            f"> num_gpu_blocks={num_gpu_blocks}. Lower pack_width or max_tokens.")
+
+        states = []
+        for p, prompt_token_ids in enumerate(list_of_prompt_ids):
+            hi = num_gpu_blocks - p * blocks_per_prompt
+            lo = hi - blocks_per_prompt
+            block_ids = list(range(lo, hi))
+            prompt_len = len(prompt_token_ids)
+            state = {
+                "prompt_token_ids": list(prompt_token_ids),
+                "committed_tokens": [],
+                "prompt_len": prompt_len,
+                "kv_cursor": max(0, prompt_len - 1),
+                "block_ids": block_ids,
+                "block_size": block_size,
+                "active": True,
+            }
+            if prompt_len > 1:
+                pre_len = prompt_len - 1
+                slot_mapping = [
+                    self._np_slot_for_position(block_ids, block_size, pos)
+                    for pos in range(pre_len)
+                ]
+                positions = list(range(pre_len))
+                attn_meta, total = self._np_build_attn_metadata(
+                    state, [pre_len], [pre_len], slot_mapping, positions)
+                prev_mode = self.np_state.get("mode", "off")
+                self.np_state["mode"] = "off"
+                try:
+                    with torch.no_grad():
+                        self._np_run_forward(
+                            model, device, prompt_token_ids[:pre_len], positions,
+                            attn_meta, total)
+                finally:
+                    self.np_state["mode"] = prev_mode
+            states.append(state)
+        return states
+
     def _np_step_forward(self, model, device, state, n_sample):
         """Build a 1+n_sample-row step (prefix-sharing), one query per row at
         position `kv_cursor`. Row 0 writes KV; rows 1..n_sample get -1
