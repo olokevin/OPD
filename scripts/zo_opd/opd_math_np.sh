@@ -40,9 +40,13 @@ export NP_KEEP_CUDA_VISIBLE=${NP_KEEP_CUDA_VISIBLE:-1}
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=${RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES:-1}
 
 # ---- V2 graphed decode driver ----
-export DECODE_MODE=${DECODE_MODE:-graphed}
+export DECODE_MODE=${DECODE_MODE:-graphed}   # eager | graphed | packed | packed_graphed (V3 all-layer)
 export USE_CUDA_GRAPH=${USE_CUDA_GRAPH:-true}
 export PACK_WIDTH=${PACK_WIDTH:-8}
+# ---- V3 fully-graphed packed all-layer knobs (decode_mode=packed_graphed, EN_LAYERWISE=false) ----
+export B_PACK_BUCKETS=${B_PACK_BUCKETS:-'[2,4,8,16]'}   # fixed CUDA-graph bucket widths
+export TEACHER_BATCH_SIZE=${TEACHER_BATCH_SIZE:-16}      # batch B prompts' teacher prefill in one generate
+export TOPK_STORE_K=${TOPK_STORE_K:-512}                 # decode-side stored top-k window (>= log_prob_top_k)
 
 # ---- NP knobs (corrected scaling; (L_q-mean)/sigma) ----
 export SIGMA=${SIGMA:-0.01}
@@ -99,6 +103,8 @@ mkdir -p "$SAVE_DIR"
 python3 -m verl.trainer.main_np --config-name np_trainer \
     np.decode_mode=${DECODE_MODE} np.use_cuda_graph=${USE_CUDA_GRAPH} \
     np.pack_width=${PACK_WIDTH} \
+    "np.b_pack_buckets=${B_PACK_BUCKETS}" \
+    np.teacher_batch_size=${TEACHER_BATCH_SIZE} np.topk_store_k=${TOPK_STORE_K} \
     np.sigma=${SIGMA} np.n_sample=${N_SAMPLE} np.n_rollout=${N_ROLLOUT} \
     np.batch_size=${BATCH_SIZE} \
     np.sample_method=${SAMPLE_METHOD} np.perturb_granularity=${PERTURB_GRANULARITY} \
