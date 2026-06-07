@@ -406,6 +406,7 @@ class RayNPTrainer:
                 top_k_strategy=self.np_config.top_k_strategy,
                 teacher_temperature=self.np_config.teacher_temperature,
                 weight_mode=self.np_config.reward_weight_mode,
+                teacher_batch_size=int(self.np_config.get("teacher_batch_size", 16)),
             )
         elif loss_type == "grpo":
             raise NotImplementedError(
@@ -480,6 +481,9 @@ class RayNPTrainer:
             global_seed=int(cfg.global_seed),
             sigma=float(cfg.sigma),
             sample_method=cfg.sample_method,
+            topk_store_k=max(int(cfg.get("log_prob_top_k", 256)),
+                             int(cfg.get("topk_store_k", 512))),
+            b_pack_buckets=list(cfg.get("b_pack_buckets", [2, 4, 8, 16])),
         )
 
         batch_size = int(cfg.get("batch_size", 1))
@@ -489,10 +493,10 @@ class RayNPTrainer:
         decode_mode = cfg.get("decode_mode", "eager")
         use_cuda_graph = bool(cfg.get("use_cuda_graph", False))
         pack_width = int(cfg.get("pack_width", 8))
-        if decode_mode not in ("eager", "graphed", "packed"):
+        if decode_mode not in ("eager", "graphed", "packed", "packed_graphed"):
             raise ValueError(
                 f"np.decode_mode={decode_mode!r} must be 'eager', 'graphed', "
-                f"or 'packed'.")
+                f"'packed', or 'packed_graphed'.")
         # Packed mode needs the rollout-id helper; import once (pure-Python, no
         # GPU deps) rather than per-step inside the layer loop.
         if decode_mode == "packed":
