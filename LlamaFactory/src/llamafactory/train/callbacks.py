@@ -520,6 +520,22 @@ class CompressSaveCallback(TrainerCallback):
         out = pathlib.Path(args.output_dir) / f"checkpoint-{state.global_step}-merged"
         out.mkdir(parents=True, exist_ok=True)
         self._dump(model, str(out), self._extract_tokenizer(kwargs))
+        # Honor save_total_limit for the dense -merged dirs too (the HF Trainer only
+        # rotates the factored checkpoint-N dirs). Keep the newest N -merged dirs.
+        self._rotate_merged(args, keep=getattr(args, "save_total_limit", None))
+
+    @staticmethod
+    def _rotate_merged(args, keep):
+        if not keep or keep <= 0:
+            return
+        import shutil
+        root = pathlib.Path(args.output_dir)
+        merged = sorted(
+            (p for p in root.glob("checkpoint-*-merged") if p.is_dir()),
+            key=lambda p: int(p.name.split("-")[1]),
+        )
+        for old in merged[:-keep]:
+            shutil.rmtree(old, ignore_errors=True)
 
     def on_train_end(self, args, state, control, model=None, **kwargs):
         if not getattr(state, "is_world_process_zero", False):

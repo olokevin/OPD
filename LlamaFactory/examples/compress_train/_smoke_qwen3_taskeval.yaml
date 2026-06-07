@@ -1,0 +1,68 @@
+### SMOKE: FA2 + svd_nystrom forward + task-accuracy callback firing once at step 5.
+### Tiny eval sets so it's fast. Launch in sft env:
+###   CUDA_VISIBLE_DEVICES=6 HF_HOME=/data/yequan/huggingface WANDB_MODE=offline \
+###     llamafactory-cli train examples/compress_train/_smoke_qwen3_taskeval.yaml
+
+### model
+model_name_or_path: Qwen/Qwen3-4B-Base
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: svd_nystrom
+calib_mode: svd_v2
+compression_ratio: 0.7
+skip_last_layers: 1
+trainable_type: all
+train_position: output
+s_merged_to: frozen
+calib_source: traces
+calib_traces_path: /home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl
+calib_num_seqs: 16
+flash_attn: fa2
+enable_liger_kernel: false
+
+### dataset
+dataset: openthought3_qwen3_4b
+template: qwen3
+enable_thinking: false
+cutoff_len: 4096
+max_samples: 200
+preprocessing_num_workers: 16
+dataloader_num_workers: 16
+
+### output
+output_dir: /data/yequan/compress_sft/smoke/qwen3_taskeval
+logging_steps: 1
+save_steps: 5
+max_steps: 5
+overwrite_output_dir: true
+save_only_model: true
+report_to: none
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+learning_rate: 1.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.0
+bf16: true
+ddp_timeout: 180000000
+
+### eval
+val_size: 0.02
+per_device_eval_batch_size: 4
+eval_strategy: steps
+eval_steps: 5
+
+### task-eval callback fires at step 5; tiny sets + short gen for a fast smoke
+task_eval_steps: 5
+task_eval_math_limit: 4
+task_eval_mmlu_limit: 4
+task_eval_aime_amc: true
+task_eval_aime_amc_k: 2
+task_eval_max_new_tokens: 512
+
+use_swanlab: false

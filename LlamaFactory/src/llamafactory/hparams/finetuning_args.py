@@ -611,6 +611,37 @@ class CompressArguments:
             )
         },
     )
+    # --- in-trainer task-accuracy eval (TaskAccuracyEvalCallback) ---
+    task_eval_steps: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Run TRUE task accuracy (MATH-500/MMLU-Pro/AIME/AMC via HF generate + "
+                "the ttrl_math grader) every N optimization steps and log to wandb. "
+                "0 = disabled (only val-loss is logged)."
+            )
+        },
+    )
+    task_eval_math_limit: int = field(
+        default=100,
+        metadata={"help": "MATH-500 problems per in-trainer eval (greedy @4096)."},
+    )
+    task_eval_mmlu_limit: int = field(
+        default=200,
+        metadata={"help": "MMLU-Pro problems per in-trainer eval (greedy @512, stratified)."},
+    )
+    task_eval_aime_amc: bool = field(
+        default=True,
+        metadata={"help": "Also eval AIME24/AIME25/AMC23 with avg@k sampling per in-trainer eval."},
+    )
+    task_eval_aime_amc_k: int = field(
+        default=8,
+        metadata={"help": "Number of samples (avg@k) for AIME/AMC small-set in-trainer eval."},
+    )
+    task_eval_max_new_tokens: int = field(
+        default=4096,
+        metadata={"help": "max_new_tokens for MATH/AIME/AMC generation in the in-trainer eval."},
+    )
 
 
 @dataclass

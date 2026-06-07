@@ -75,9 +75,16 @@ def _training_function(config: dict[str, Any]) -> None:
     if finetuning_args.early_stopping_steps is not None:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=finetuning_args.early_stopping_steps))
 
-    if finetuning_args.finetuning_type in ("blocktt", "svd"):
+    if finetuning_args.finetuning_type in ("blocktt", "svd", "svd_nystrom"):
         callbacks.append(CompressNormalizeCallback(finetuning_args))
         callbacks.append(CompressSaveCallback(finetuning_args))
+
+    # In-trainer task-accuracy eval (MATH-500/MMLU-Pro/AIME/AMC) -> wandb, gated on a
+    # config flag so it only fires when requested. Added BEFORE ReporterCallback so
+    # its wandb.log calls land in the active run.
+    if getattr(finetuning_args, "task_eval_steps", 0) and getattr(finetuning_args, "task_eval_steps") > 0:
+        from .eval_callbacks import TaskAccuracyEvalCallback
+        callbacks.append(TaskAccuracyEvalCallback(finetuning_args, model_args))
 
     callbacks.append(ReporterCallback(model_args, data_args, finetuning_args, generating_args))  # add to last
 
