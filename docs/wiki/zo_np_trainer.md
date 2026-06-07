@@ -594,3 +594,145 @@ point (matches the throughput grid):
 - **But the fundamental zeroth-order forward-count tax bounds the win**: NP pays `n_sample` extra forward
   evaluations per token *per layer*, whereas BP pays one backward for *all* layers. Tiling and graphing
   shrink the per-step constant; they do not change that asymptotic. The §10.4 negative result stands.
+
+---
+
+# V3 — fully-CUDA-graphed ALL-LAYER packed decode (design + the goal-proof result)
+
+> **One line.** V3 perturbs **every matched linear layer at once** inside **one fully-CUDA-graphed
+> packed decode** — each decode token runs `bucket_b_pack × (1+N)` rows captured once at a fixed bucket
+> width and replayed per token, with EOS handled by **bucket-padding** (finished prompts → PAD rows) so
+> the captured graph never recaptures. It combines [§10](#101-the-mechanism--b_pack-prompts-in-one-forward)'s
+> prompt-packing with [§9](#9-v2--buffer-in-graph-decode-driver-design--initial-results)'s buffer-in-graph
+> capture **and** extends both from one-layer-per-step to all-layers-per-step. Branch
+> `worktree-np-alllayer-graphed`. **All correctness gates PASS (bit-parity to eager)** and it **learns**
+> (held-out KL down at LR=1e-3), but the **headline goal-proof is NEGATIVE**: NP one-step is **~46× slower**
+> than BP-OPD one-step at batch=64/1024 — the zeroth-order forward-count floor is fundamental. This
+> **sharpens** the [§10.4](#104-np-packed-vs-bp-opd--one-update-step-the-negative-result) single-layer
+> negative result rather than overturning it.
+
+### 11.1 The mechanism — all matched layers perturbed in ONE graphed packed decode
+
+§9/§10 perturb **one layer per step** (layerwise round-robin). V3 perturbs **all matched layers
+simultaneously in a single decode**. The row layout is the same `1+N` shared layout as §10, but the
+perturbation is now multi-layer:
+
+```
+wave of bucket_b_pack prompts ──prefill──► disjoint scratch-KV slabs
+                                                  │
+   ONE captured graph, replayed per token t:      │
+     each decode token = 1 clean row + N perturbed rows (shared across the wave)
+     at EVERY matched linear `layer`:              │
+        clean row 0:        y = W_layer · x        ├── capture x[layer] = clean row's input
+        perturbed row q:    y += σ·u_buf[layer][q] │     (independent per-(layer,q) buffer add)
+        ... applied at all 28 down_proj layers in the same forward ...
+                                                  │
+   per-layer δW from THAT layer's own (u[layer], x[layer]) outer product
+   bucket-pad EOS: finished prompts → PAD rows (slot=−1, VALID last-valid seq_len/position)
+   one batched top-k reverse-KL teacher score; one all-layer batched assemble + apply
+```
+
+- **Every perturbed row is perturbed at every matched linear** via an *independent* per-`(layer, q)`
+  buffer add `y += σ·u_buf[layer][q]`; **each layer captures its own clean-row input** `x[layer]` in the
+  same forward. The per-layer δW is then the node-perturbation outer product from *that layer's own*
+  `(u, x)`. Unbiased to first order because the noise is **independent per `(layer, q)`** and `x` is
+  captured per layer — the perturbations don't alias across layers.
+- **The fully-graphed packed path** lives in `run_np_decode_packed_graphed`
+  (`verl/verl/workers/rollout/vllm_rollout/np_worker_extension.py:620`): prefill `B_pack` prompts, capture
+  **ONE** CUDA graph at a fixed bucket width `R = bucket_b_pack·(1+N)` (`_np_capture_step_packed`, line
+  `1143`), replay per token (`_np_replay_step_packed`, line `1343`) with **bucket-pad EOS** (finished
+  prompts become PAD rows: `slot=−1`, VALID last-valid `seq_len`/`position` so they neither write KV nor
+  corrupt the kernel grid), **one** batched top-k reverse-KL teacher score, and **one** all-layer batched
+  assemble (`assemble_all_layers_and_apply`, line `1848`).
+- **Config:** `DECODE_MODE=packed_graphed EN_LAYERWISE=false`, with knobs
+  `b_pack_buckets / pack_width / teacher_batch_size / topk_store_k`
+  (`verl/verl/trainer/config/np_trainer.yaml:15-20`). The trainer branch is in
+  `verl/verl/trainer/np/ray_trainer.py` `fit()` (`decode_mode == "packed_graphed"`, line `508`):
+  `len(active) > 1` → one decode/score/assemble over **all** layers (line `526`);
+  `_pad_waves_to_pack_width` (line `2040`) pins **ONE** captured bucket per run so the graph is captured
+  once and replayed for the whole step.
+
+### 11.2 Correctness gates — ALL PASS (the infrastructure is bit-parity-correct)
+
+**F1 GPU parity gate** (`scripts/zo_opd/np_checks/check_alllayer_graphed_parity.py`, Qwen3-1.7B, GPU 1,
+2026-06-06):
+
+| Sub-gate | What it checks | Result |
+| --- | --- | --- |
+| (a) σ=0 routing | graphed clean tokens == greedy oracle for **all** prompts | **PASS** |
+| (b) graphed vs eager all-layer | matching `rollout_ids` → matching seeds → per-layer captured `u` **BIT-IDENTICAL** (`torch.equal`, **256/256** tensors); stored top-k logprobs **max rtol = 0.000e+00** (≤ 1e-2) | **PASS** |
+| (c) staggered-EOS bucket-crossing | 3 prompts, EOS at `[3, 6, 12]`: graphed packed replay == eager all-layer oracle **BIT-FOR-BIT** up to each prompt's EOS | **PASS** |
+
+Also: **E2**'s standalone staggered-EOS gate (`check_e2_staggered_eos.py`) and **E3**'s orchestrator gate
+(`check_e3_orchestrator.py`, B=4 exact-fit **AND** B=3 with one PAD slot) are both **bit-for-bit vs
+eager**. Together these prove the CUDA-graph machinery is correct: the captured graph perturbs the **right
+rows** with the **right per-`(layer, q)` noise**, and **padded rows don't corrupt active prompts** (the
+`slot=−1` / valid-padded-seq_len trick survives capture, exactly as the §9.2 vLLM facts predict).
+
+### 11.3 e2e learning gate — PASS at the RIGHT LR (the LR finding)
+
+**F2** (`scripts/zo_opd/np_checks/check_alllayer_e2e.sh`, real Qwen3-1.7B student + Keven16 4B teacher,
+20 steps, batch=8, `pack_width=4`, `max_tokens=128`, **all 28 `down_proj` layers**, GPU 1):
+
+- All 28 layers `dW_norm > 0`, `weight_sync_ok = 1.0` every step, `weight_delta_mean > 0` every step —
+  the all-layer update lands and broadcasts correctly.
+- **The LR finding.** The **single-layer default LR=3e-2 DIVERGES** in all-layer mode (28 layers update
+  simultaneously → ~28× aggregate step): held-out teacher-KL `3.30 → 6.24 → 7.25 → 13.59 → 6.44` over
+  steps 0/5/10/15/19. **LR=1e-3 LEARNS**: `heldout_kl 0.5263 → 0.7417 → 0.8366 → 0.2465 → 0.2708` —
+  noisy (the known near-orthogonal NP estimator, worse per-layer here because 28 layers share **one**
+  combined loss at `n_sample=8`) but **net DOWN** (last `0.27 < first 0.53`, ~halved).
+  **All-layer NP needs ~30× smaller LR than single-layer.**
+- **`pack_width` KV cap:** `_np_prefill_packed` reserves full-ctx (2560 blocks) **per prompt**, so
+  `pack_width · 2560 ≤ num_gpu_blocks`. `pack_width=4` fits with the co-located teacher; `8` does not
+  (this is the [§10.5](#105-the-packed-scratch-kv-ceiling--operating-recommendation) packed-scratch-KV
+  ceiling, tightened by the second co-located engine).
+
+### 11.4 The goal proof — NP(packed_graphed all-layer) vs BP-OPD one-step (the headline NEGATIVE result)
+
+**F3** (`scripts/zo_opd/bench_np_vs_bp.sh`, results
+[`scripts/zo_opd/results/np_vs_bp_alllayer_graphed.txt`](../../scripts/zo_opd/results/np_vs_bp_alllayer_graphed.txt),
+batch=64, `max_tokens=1024`, N=8, NP GPU 1 / BP GPU 2, 2026-06-06):
+
+| | NP (packed_graphed, all 28 layers) | BP-OPD (`token_reward_direct`) |
+| --- | --- | --- |
+| one-step wall-clock | **2472.37 s** (~41 min) | **53.79 s** (step-1 cold) / **27.54 s** (step-2 steady) |
+| peak GPU mem (nvidia-smi device peak) | **82372 MiB** | **71710 MiB** |
+
+**RATIO NP/BP = 45.97× (vs cold) / 89.78× (vs steady). VERDICT: FAIL — the goal (NP one-step ≤ BP
+one-step) is NOT met at batch=64/1024.**
+
+**NP breakdown** (attributable):
+
+- **decode = 1368 s (55%)** — the fundamental `(1+N)=9×` forward floor × 28 layers × 64 prompts × 1024
+  tokens. Per-wave decode is flat at ~85 s (capture amortized after wave 0; the cost is the **forward
+  count itself**, not the capture).
+- **assemble = 835 s (34%)** — a **CPU-bound per-token Python reduction loop**
+  (`np_worker_extension.py:1899-1911`) building `g_t`/`x_t` rows over **65536** token-signals (64×1024) ×
+  28 layers (~1.8M Python iterations, each with a per-token `.to(device)` + `sample_scale`). It is **NOT**
+  folded into the batched GEMM (`dw = G.t() @ X` at line ~1915). This is the **largest FIXABLE residual**
+  — but fixing it still leaves NP ~30× slower.
+- **~269 s** of inter-wave teacher-scoring / accumulation gaps + step setup.
+
+**BP for contrast:** gen 10.8 s + teacher (compute_rm_score) 30.3 s + **one FSDP backward 8.8 s**.
+Autograd computes the **same 28-layer gradient in 8.8 s** on GPU; NP re-derives it from finite differences
+with a Python token loop.
+
+This **sharpens** the [§10.4](#104-np-packed-vs-bp-opd--one-update-step-the-negative-result) single-layer
+negative result: going all-layer **amortizes the teacher-score and assemble across layers** but does **NOT
+escape the `(1+N)`-row forward-count tax**, which is fundamental to node-perturbation. The CUDA-graphing
+removes per-token Python/launch overhead (decode is now a flat ~85 s/wave, capture amortized) but the
+**forward COUNT floor remains**.
+
+### 11.5 Bottom line + the one fixable lever
+
+- The all-layer graphed infrastructure is **CORRECT** (bit-parity gates §11.2) and **LEARNS** (held-out
+  KL down at LR=1e-3, §11.3), but does **NOT** beat BP one-step wall-clock — the zeroth-order
+  **forward-count floor is fundamental**.
+- **The single fixable residual:** vectorize the assemble's per-token `g_t`/`x_t` reduction into the
+  existing batched GEMM (`np_worker_extension.py:1899-1911` → one batched `sample_scale` + one reduce over
+  the `[T, n_sample, d_out]` stack) to collapse the **835 s** toward the docstring's "sub-10s GEMM"
+  target. (Future work, not done here.)
+- See [§10.4](#104-np-packed-vs-bp-opd--one-update-step-the-negative-result) (the single-layer packed
+  negative result) and [§10.5](#105-the-packed-scratch-kv-ceiling--operating-recommendation) (the
+  packed-scratch-KV ceiling) — V3 inherits both and confirms the forward-count tax is not closable by
+  tiling, graphing, **or** all-layer amortization.
