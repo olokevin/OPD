@@ -1180,6 +1180,126 @@ class WorkerExtension:
             "layer_names": list(layer_names),
         }
 
+    def _np_fill_u_buf_all_layers_packed(self, u_buf_dict, np_cfg, layer_names,
+                                         step, slot_rollout_ids, n_sample):
+        """C-6 single noise-refill site for the all-layer PACKED graph (E2).
+
+        The all-layer analog of run_np_decode_packed's per-prompt refill loop, but
+        for EVERY matched layer's u_buf at once. Each layer's packed u_buf is
+        [bucket_b_pack*n_sample, d_out] prompt-major: rows [p*n_sample : (p+1)*
+        n_sample] belong to slot p. We seed slot p's N rows with ITS rollout id
+        slot_rollout_ids[p] and the SAME noise_seed(global_seed, step, layer,
+        rollout, q) key the eager packed / serial paths use -> the bytes written
+        are bit-identical to those paths (parity-by-construction, spec §3/§5.2).
+
+        slot_rollout_ids: list (len bucket_b_pack) of the rollout id bound to each
+        graph SLOT. For a FINISHED/PAD slot (output discarded) the id is still a
+        valid int; the noise written is harmless (those rows are ignored), but we
+        fill them anyway so the captured buffer is never read undefined -- keeping
+        the replay deterministic regardless of which slots are active this token.
+        """
+        bucket_b_pack = len(slot_rollout_ids)
+        for layer_name in layer_names:
+            buf = u_buf_dict[layer_name]          # [bucket_b_pack*n_sample, d_out]
+            d_out = buf.shape[1]
+            for p in range(bucket_b_pack):
+                rid = int(slot_rollout_ids[p])
+                for q in range(n_sample):
+                    seed = noise_seed(int(np_cfg["global_seed"]), int(step),
+                                      layer_name, rid, q)
+                    u = draw_noise(seed, (d_out,), buf.device, buf.dtype,
+                                   np_cfg["sample_method"])
+                    buf[p * n_sample + q].copy_(u)
+
+    def _np_replay_step_packed(self, model, states, active_idx, n_sample,
+                               layer_names, np_cfg, step, slot_rollout_ids,
+                               graph_state):
+        """Run ONE decode token across all bucket prompts via packed CUDA-graph
+        replay (E2). The packed analog of _np_replay_step.
+
+        states: list (len bucket_b_pack) of per-slot state dicts (from
+            _np_prefill_packed); slot p is the prompt bound to graph slot p at
+            capture (its KV is baked into the graph's block_table -- a prompt
+            CANNOT change slots). states[p]["active"] flags whether slot p decodes
+            this token.
+        active_idx: indices into states of slots active THIS token (len <=
+            bucket_b_pack). Inactive slots are FINISHED (hit EOS) or PAD (the
+            active set is < the bucket width). All are C-4 pad-handled.
+        slot_rollout_ids: rollout id bound to each slot (parity seed identity).
+        graph_state: the dict from _np_capture_step_packed (graph + persistent
+            input/meta buffers + per-layer u_buf/x_buf dicts + clean/perturbed row
+            indices + bucket_b_pack). Mutated IN PLACE; never rebound (C-2).
+
+        Returns [R, vocab] logits (R = bucket_b_pack*(1+n_sample)). The caller
+        slices each ACTIVE slot's (1+n_sample) block; finished/pad rows are
+        discarded but kept attention-well-defined (C-4)."""
+        gs = graph_state
+        bucket_b_pack = int(gs["bucket_b_pack"])
+        assert len(states) == bucket_b_pack, (
+            f"_np_replay_step_packed: {len(states)} states for bucket width "
+            f"{bucket_b_pack}")
+        width = 1 + n_sample
+        active_set = set(int(i) for i in active_idx)
+
+        # --- Per-slot metadata (C-4): active -> real; finished/pad -> last-valid.
+        slot_states = []
+        for p in range(bucket_b_pack):
+            st_p = states[p]
+            block_ids = st_p["block_ids"]
+            block_size = st_p["block_size"]
+            prompt_len = st_p["prompt_len"]
+            q_pos = int(st_p["kv_cursor"])
+            if q_pos < prompt_len:
+                q_token = st_p["prompt_token_ids"][q_pos]
+            else:
+                q_token = st_p["committed_tokens"][q_pos - prompt_len]
+            # LAST-VALID fallback for a pad/finished slot: the slot has always
+            # decoded at least its token-0 (q_pos >= prompt_len-1 >= 0 after
+            # prefill), so kv_cursor / its token are a valid in-range position even
+            # for a just-finished prompt. (We never advance kv_cursor for a slot
+            # that hit EOS, so kv_cursor stays the last real position -> seq_len>0.)
+            is_active = p in active_set and bool(st_p["active"])
+            clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+            slot_states.append({
+                "active": is_active,
+                "q_token": int(q_token),
+                "q_pos": q_pos,
+                "clean_slot": int(clean_slot),
+                "last_q_token": int(q_token),
+                "last_q_pos": q_pos,
+            })
+        meta = _packed_replay_row_meta(slot_states)
+
+        # --- Refill persistent input + metadata buffers IN PLACE (pointers stable;
+        # the graph holds these by reference). Row layout: slot p owns rows
+        # [p*width : p*width+width]; row p*width is clean, the next N perturbed.
+        ids_buf = gs["input_ids_buf"]
+        pos_buf = gs["positions_buf"]
+        mb = gs["meta_bufs"]
+        sm = mb["slot_mapping"]           # [R] int64; perturbed rows fixed -1 at capture
+        sl = mb["seq_lens_gpu"]           # [R] int32 seqused_k (the load-bearing tensor)
+        for p in range(bucket_b_pack):
+            m = meta[p]
+            base = p * width
+            # all width rows query the same token at the same position.
+            ids_buf[base:base + width].fill_(m["q_token"])
+            pos_buf[base:base + width].fill_(m["q_pos"])
+            sl[base:base + width].fill_(m["seq_len"])
+            # clean row's slot is m["clean_slot"] (-1 for finished/pad). Perturbed
+            # rows were fixed to -1 at capture -- never write KV -- so we only set
+            # the clean row's slot here.
+            sm[base].fill_(m["clean_slot"])
+
+        # --- C-6 single noise-refill site: ALL layers' u_buf, seeded per slot.
+        self._np_fill_u_buf_all_layers_packed(
+            gs["u_buf"], np_cfg, layer_names, step, slot_rollout_ids, n_sample)
+
+        # --- Replay + sync + eager per-token logits over ALL rows.
+        gs["graph"].replay()
+        torch.cuda.synchronize()
+        logits = model.compute_logits(gs["hidden_buf"])   # [R, vocab]
+        return logits
+
     # -- helpers (vLLM-0.11.0-specific, against gpu_model_runner internals) --
 
     def _np_slot_for_position(self, block_ids, block_size, position):
@@ -1693,6 +1813,58 @@ def _packed_row_blocks(b_pack, n_sample):
         blocks.append({"clean": base,
                        "perturbed": list(range(base + 1, base + width))})
     return blocks
+
+
+def _packed_replay_row_meta(slot_states):
+    """C-4 pad-row metadata for the packed-graph replay (pure Python, testable).
+
+    The captured packed graph serves a FIXED set of `bucket_b_pack` prompt SLOTS;
+    slot p is bound to one prompt (its KV block_ids were baked into the graph's
+    block_table at capture, so a prompt CANNOT be moved to another slot -- it must
+    stay in its own slot for the whole decode). Each slot owns (1+n_sample) rows:
+    one clean row (writes KV) + n_sample perturbed rails (slot=-1, never write KV).
+
+    Input `slot_states`: list (len bucket_b_pack), one dict per slot, with the
+    fields needed to derive THIS token's per-slot metadata:
+      active       : bool -- ACTIVE (decode this token) vs FINISHED/PAD.
+      q_token      : int  -- input id queried this token.
+      q_pos        : int  -- absolute position (== seq_len-1).
+      clean_slot   : int  -- KV slot the clean row writes when ACTIVE.
+      last_q_token : int  -- the slot's LAST VALID token id (for pad reuse).
+      last_q_pos   : int  -- the slot's LAST VALID position (for pad reuse).
+    (The caller fills q_token/q_pos/clean_slot from states[p] for active slots and
+    last_q_* from the slot's last committed token; this helper just *selects*.)
+
+    Per slot returns {"q_token","q_pos","seq_len","clean_slot"}:
+      ACTIVE slot   -> the REAL values; clean_slot = its KV slot; seq_len=q_pos+1.
+      FINISHED/PAD  -> C-4: the row's output is DISCARDED, but the kernel still
+        processes all R rows, so the row must be attention-WELL-DEFINED. Reuse the
+        slot's LAST VALID (q_token,q_pos) -- NEVER 0/stale -- so seq_len=q_pos+1>0
+        and the position is in-range; FORCE clean_slot=-1 (a finished prompt
+        writes NO KV; its clean row must not corrupt the cache). A zero seqused_k
+        makes FlashAttention's KV iteration undefined (the #1 way to crash /
+        corrupt the ACTIVE rows' attention) -- that is exactly what this avoids.
+    """
+    meta = []
+    for s in slot_states:
+        if s["active"]:
+            q_pos = int(s["q_pos"])
+            meta.append({
+                "q_token": int(s["q_token"]),
+                "q_pos": q_pos,
+                "seq_len": q_pos + 1,
+                "clean_slot": int(s["clean_slot"]),
+            })
+        else:
+            # C-4: last-valid (never zero) seq_len/position; clean_slot forced -1.
+            q_pos = int(s["last_q_pos"])
+            meta.append({
+                "q_token": int(s["last_q_token"]),
+                "q_pos": q_pos,
+                "seq_len": q_pos + 1,
+                "clean_slot": -1,
+            })
+    return meta
 
 
 def _assign_rollout_ids(step, batch_size, n_rollout):
