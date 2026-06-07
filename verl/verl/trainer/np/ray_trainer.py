@@ -512,7 +512,130 @@ class RayNPTrainer:
             w_changed_fracs: Dict[str, float] = {}
             w_sync_ok: Dict[str, bool] = {}
             L_clean_means: List[float] = []
-            for layer_name in active:
+            if len(active) > 1:
+                # ===== ALL-LAYER branch (eager): ONE decode over all active
+                # layers -> ONE teacher score per prompt (shared across layers)
+                # -> ONE all-layer assemble+apply per step. The teacher loss is
+                # scored on the CLEAN rollout, which is IDENTICAL for every layer
+                # (perturbation only affects captured u/x, not the sampled clean
+                # tokens), so L_q/L_clean is scored ONCE per prompt and reused for
+                # every layer (the C-5 landmine: re-scoring per layer is wrong AND
+                # T*L times more work). Per-layer u/x are accumulated into
+                # layer_u_steps[ln]/layer_x_steps[ln], built in lockstep with the
+                # shared L_q_steps so each layer's list aligns positionally.
+                #
+                # All-layer EAGER routes through run_np_decode with the LIST arg
+                # (run_np_decode_packed raises on a list -- all-layer packed is
+                # Stage E). The clean rollout's candidate_logits is layer-agnostic.
+                L_q_steps: List[Any] = []
+                L_clean_steps: List[float] = []
+                layer_u_steps: Dict[str, List[Any]] = {ln: [] for ln in active}
+                layer_x_steps: Dict[str, List[Any]] = {ln: [] for ln in active}
+                for b in range(batch_size):
+                    prompt = prompts[(step * batch_size + b) % len(prompts)]
+                    pid = (prompt["prompt_token_ids"]
+                           if isinstance(prompt, dict) else prompt)
+                    for r in range(int(cfg.n_rollout)):
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} ALL-LAYER L={len(active)} "
+                                  f"b{b}/{batch_size} r{r}] decode start "
+                                  f"plen={len(pid)}", flush=True)
+                            _td = time.time()
+                        out = ray.get(self.engines[0].collective_rpc.remote(
+                            "run_np_decode",
+                            args=(pid, sp, active, np_cfg, r),
+                        ))[0]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} b{b}] all-layer decode done "
+                                  f"ntok={len(out['clean_tokens'])} "
+                                  f"dt={time.time()-_td:.2f}s", flush=True)
+                            _ts = time.time()
+                        if not out["clean_tokens"]:
+                            continue  # empty rollout -> no signal
+                        full = list(pid) + list(out["clean_tokens"])
+                        # ONE score per prompt -- shared across ALL layers.
+                        L_q, L_clean = self.scorer.score_rollout(
+                            full, out["candidate_logits"])
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} b{b}] all-layer score done "
+                                  f"dt={time.time()-_ts:.2f}s", flush=True)
+                        nT = len(out["candidate_logits"])
+                        L_q_steps += L_q
+                        L_clean_steps += L_clean
+                        # Per-layer u/x appended in lockstep: each layer gets the
+                        # SAME nT tokens in the SAME order as L_q_steps above.
+                        for ln in active:
+                            layer_u_steps[ln] += [
+                                out["captured_u"][ln][t] for t in range(nT)]
+                            layer_x_steps[ln] += [
+                                out["captured_x"][ln][t] for t in range(nT)]
+
+                if not L_q_steps:
+                    pass  # nothing decoded this step -> fall through to logging
+                else:
+                    if NP_DEBUG_DECODE:
+                        print(f"[npdbg s{step} ALL-LAYER] batch decode+score DONE; "
+                              f"assemble start nsig={len(L_q_steps)} "
+                              f"nlayer={len(active)}", flush=True)
+                        _ta = time.time()
+                    # Weight norms BEFORE the update (engine 0), per layer.
+                    w_before = {}
+                    if verify_update:
+                        for ln in active:
+                            w_before[ln] = ray.get(
+                                self.engines[0].collective_rpc.remote(
+                                    "layer_weight_norm", args=(ln,)))[0]
+                    # ONE all-layer assemble+apply: shared L_q/L_clean, per-layer
+                    # u/x. Returns {ln: ||dW||}.
+                    layer_signals = {
+                        ln: {"u": layer_u_steps[ln], "x": layer_x_steps[ln]}
+                        for ln in active
+                    }
+                    dws = ray.get(self.engines[0].collective_rpc.remote(
+                        "assemble_all_layers_and_apply",
+                        args=(layer_signals, L_q_steps, L_clean_steps,
+                              float(cfg.sigma), cfg.grad_estimate_sample,
+                              normalize_anp, cfg.token_agg, float(cfg.lr),
+                              cfg.get("update_clip")),
+                    ))[0]
+                    if NP_DEBUG_DECODE:
+                        print(f"[npdbg s{step} ALL-LAYER] assemble+apply DONE "
+                              f"dt={time.time()-_ta:.2f}s nlayer={len(dws)}",
+                              flush=True)
+                    for ln, dw in dws.items():
+                        dw_norms[ln] = dw
+                    # Broadcast EVERY updated layer from engine 0 to all engines.
+                    # (last_changed_frac is per-layer state set by the most-recent
+                    # apply_node_update, so read it right after each broadcast.)
+                    for ln in active:
+                        ray.get([
+                            e.collective_rpc.remote("broadcast_layer_weights",
+                                                     args=(ln, 0))
+                            for e in self.engines
+                        ])
+                    # Per-layer verify (same machinery as the single-layer path,
+                    # looped over active). NOTE: last_changed_frac is overwritten
+                    # by each apply inside assemble_all_layers_and_apply, so it is
+                    # NOT reliable per-layer here -- read weight_changed_frac via a
+                    # per-layer norm-delta is the honest signal we keep.
+                    if verify_update:
+                        for ln in active:
+                            norms = ray.get([
+                                e.collective_rpc.remote("layer_weight_norm",
+                                                         args=(ln,))
+                                for e in self.engines
+                            ])
+                            norms = [n[0] for n in norms]
+                            w_deltas[ln] = abs(norms[0] - w_before[ln])
+                            w_sync_ok[ln] = all(
+                                abs(n - norms[0]) < 1e-3 for n in norms)
+                    if L_clean_steps:
+                        L_clean_means.append(float(np.mean(L_clean_steps)))
+                # End all-layer branch; logging tail iterates dw_norms etc.
+                active_iter = []  # skip the single-layer loop below
+            else:
+                active_iter = active
+            for layer_name in active_iter:
                 # Accumulate batch_size distinct prompts (one update per step).
                 # Each prompt contributes n_rollout rollouts (default 1). The
                 # per-token signals from ALL prompts/rollouts are concatenated and
@@ -696,8 +819,13 @@ class RayNPTrainer:
                           f"-- next rollout would use stale weights!")
             # A nonzero dW that changed ZERO weight elements = a true bf16 no-op.
             # (weight_delta/norm is NOT used here -- it under-reports element changes.)
+            # Gated on `k in w_changed_fracs`: the all-layer branch cannot measure a
+            # reliable per-layer changed_frac (last_changed_frac is overwritten by
+            # each apply inside assemble_all_layers_and_apply), so it omits the key
+            # rather than emit a false 0%-changed no-op warning.
             for k, v in dw_norms.items():
-                if verify_update and v > 0 and w_changed_fracs.get(k, 0.0) == 0.0:
+                if (verify_update and v > 0 and k in w_changed_fracs
+                        and w_changed_fracs[k] == 0.0):
                     print(f"[WARN step {step}] dW_norm={v:.3e} for {k} but 0% of "
                           f"weight elements changed -- true bf16 no-op (lr too small).")
             logger.log(data=train_metrics, step=step)
