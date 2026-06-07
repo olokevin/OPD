@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Do not invoke superpowers related skills unless explicitly instructed to do so.
+
 ## Project
 
 Research code for the paper *"Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe"* ([arXiv:2604.13016](https://arxiv.org/pdf/2604.13016)). The repo studies token-level on-policy distillation (OPD): a teacher model provides dense per-token reward signals (typically log-probs over a Top-K set at student-visited states), and a student is trained against them using a PPO-style trainer.
@@ -21,15 +23,15 @@ The two training frameworks use **different conda envs** (`verl` py3.12 vs `sft`
 
 **Layout:**
 
-| Dir | What lives there | Who owns it |
-|---|---|---|
-| `docs/index.md` | **Content catalog** — every wiki/results/aris/plans page with a one-line summary. **Read this first** when answering a question or deciding where new knowledge goes. | LLM (update every ingest) |
-| `docs/log.md` | **Chronological log** — append-only `## [YYYY-MM-DD] <op> \| <title>` entries for every ingest/query/lint. `grep '^## \[' docs/log.md \| tail -5` shows recent activity. | LLM (append every op) |
-| `docs/wiki/` | **Design docs** — how a subsystem works (architecture, invariants, knobs, file map). One page per subsystem (`compressed_opd`, `ZO`, `zo_np_trainer`). Stable; revise when the design changes. | LLM |
-| `docs/results/` | **Experiments & mid-conclusions** — what we ran and what we learned, per thread (`compressed_opd`, `zo_opd`, `fura_opd`). Append-mostly; each session adds a dated block. | LLM |
-| `docs/aris/{project_name}/` | **ARIS research threads** — agent-pipeline outputs (see subsection below). | ARIS skills + LLM |
-| `docs/plans/` | **Implementation specs** — step-by-step build plans for trainer changes (companion to wiki design docs). | LLM |
-| `docs/papers/` | **Reference PDFs** — read-only source of truth. Cite by filename; **never edit**. | human (curates) |
+| Dir                           | What lives there                                                                                                                                                                                            | Who owns it               |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `docs/index.md`             | **Content catalog** — every wiki/results/aris/plans page with a one-line summary. **Read this first** when answering a question or deciding where new knowledge goes.                          | LLM (update every ingest) |
+| `docs/log.md`               | **Chronological log** — append-only `## [YYYY-MM-DD] <op> \| <title>` entries for every ingest/query/lint. `grep '^## \[' docs/log.md \| tail -5` shows recent activity.                           | LLM (append every op)     |
+| `docs/wiki/`                | **Design docs** — how a subsystem works (architecture, invariants, knobs, file map). One page per subsystem (`compressed_opd`, `ZO`, `zo_np_trainer`). Stable; revise when the design changes. | LLM                       |
+| `docs/results/`             | **Experiments & mid-conclusions** — what we ran and what we learned, per thread (`compressed_opd`, `zo_opd`, `fura_opd`). Append-mostly; each session adds a dated block.                      | LLM                       |
+| `docs/aris/{project_name}/` | **ARIS research threads** — agent-pipeline outputs (see subsection below).                                                                                                                           | ARIS skills + LLM         |
+| `docs/plans/`               | **Implementation specs** — step-by-step build plans for trainer changes (companion to wiki design docs).                                                                                             | LLM                       |
+| `docs/papers/`              | **Reference PDFs** — read-only source of truth. Cite by filename; **never edit**.                                                                                                              | human (curates)           |
 
 **Workflow (the three operations from `docs/llm-wiki.md`):**
 
@@ -176,7 +178,6 @@ When adding a new train set, append its path to `TRAIN_DATASET` and a short iden
 - `lllyx/Qwen3-4B-Base-GRPO` — zero-RL student from `Qwen3-4B-Base` (produced by `grpo.sh`).
 
 The HF collection lives at `huggingface.co/collections/lllyx/rethinking-opd`.
-
 
 # Claude Code Guidelines
 
