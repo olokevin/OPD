@@ -11,6 +11,8 @@ Perturbations are regenerated from seeds, never stored. enforce_eager=True is
 mandatory (set by NPNcclLLM) so these eager-Python hooks actually run.
 See docs/superpowers/specs/2026-05-28-np-trainer-design.md.
 """
+import os
+
 import numpy as np
 import torch
 
@@ -703,6 +705,14 @@ class WorkerExtension:
         captured_x = [{ln: {} for ln in layer_names} for _ in range(B)]
 
         width = 1 + n_sample
+        # TIMING-ISOLATION HARNESS (NP_BENCH_SKIP_NOISE=1): pre-fill every layer's
+        # u_buf ONCE so the per-token refill can be skipped while the forward still
+        # sees valid noise. Isolates the per-token noise-refill cost (896 draw_noise
+        # calls/token) from the rest of decode. Breaks gradient correctness; bench
+        # only.
+        if os.environ.get("NP_BENCH_SKIP_NOISE"):
+            self._np_fill_u_buf_all_layers_packed(
+                gs["u_buf"], np_cfg, layer_names, 0, slot_rollout_ids, n_sample)
         try:
             for t in range(max_tokens):
                 active_idx = [p for p in range(B) if states[p]["active"]]
@@ -1420,8 +1430,16 @@ class WorkerExtension:
             sm[base].fill_(m["clean_slot"])
 
         # --- C-6 single noise-refill site: ALL layers' u_buf, seeded per slot.
-        self._np_fill_u_buf_all_layers_packed(
-            gs["u_buf"], np_cfg, layer_names, step, slot_rollout_ids, n_sample)
+        # TIMING-ISOLATION HARNESS (NP_BENCH_SKIP_NOISE=1): skip the per-token
+        # refill to measure decode cost WITHOUT the 896 host-orchestrated
+        # draw_noise calls/token. The orchestrator pre-fills u_buf ONCE before the
+        # loop so the buffers still hold valid (non-garbage) noise -> the forward
+        # is representative, only the per-token regeneration is removed. This
+        # BREAKS gradient correctness (stale noise) and is for wall-clock
+        # attribution ONLY; never set it in a training run.
+        if not os.environ.get("NP_BENCH_SKIP_NOISE"):
+            self._np_fill_u_buf_all_layers_packed(
+                gs["u_buf"], np_cfg, layer_names, step, slot_rollout_ids, n_sample)
 
         # --- Replay + sync + eager per-token logits over ALL rows.
         gs["graph"].replay()
