@@ -36,7 +36,11 @@ export PYTHONPATH="$(dirname "$(realpath "$0")")/src${PYTHONPATH:+:$PYTHONPATH}"
 # a per-run port + temp dir and DO NOT global-`ray stop --force` (which would
 # tear down sibling runs). Otherwise keep the original single-run behavior.
 export RAY_ISOLATE=${RAY_ISOLATE:-0}
-if [ "$RAY_ISOLATE" != "1" ]; then
+# RAY_EXTERNAL=1: a Ray cluster was already started outside this script (e.g. a
+# multi-node head+worker bootstrap) and RAY_ADDRESS points at it. Do not stop it
+# and do not start a new head — just let the python driver attach via RAY_ADDRESS.
+export RAY_EXTERNAL=${RAY_EXTERNAL:-0}
+if [ "$RAY_ISOLATE" != "1" ] && [ "$RAY_EXTERNAL" != "1" ]; then
     ray stop --force
 fi
 export RAY_memory_usage_threshold=0.99
@@ -168,7 +172,10 @@ export SAVE_FREQ=${SAVE_FREQ:-20}
 export TEST_FREQ=${TEST_FREQ:-20}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
+# CKPT_PATH is overridable: set a fixed CKPT_PATH in the env to get a stable
+# checkpoint dir across relaunches (required for resume_mode=auto). Unset -> the
+# original timestamped default (one fresh dir per run).
+export CKPT_PATH=${CKPT_PATH:-${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)}
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -179,7 +186,9 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
+# EXPERIMENT_NAME is overridable too: pin it (alongside CKPT_PATH) so relaunches
+# share one stable name. Unset -> the original timestamped default.
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)}
 
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
@@ -200,7 +209,11 @@ PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_R
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
-if [ "$RAY_ISOLATE" = "1" ]; then
+if [ "$RAY_EXTERNAL" = "1" ]; then
+    # Multi-node: the cluster (head + workers) was started outside this script and
+    # RAY_ADDRESS already points at the head. Just attach the python driver to it.
+    echo "RAY_EXTERNAL=1: attaching driver to pre-started cluster RAY_ADDRESS=${RAY_ADDRESS}"
+elif [ "$RAY_ISOLATE" = "1" ]; then
     # Per-run private Ray head so concurrent single-GPU runs don't collide:
     # unique port + a FRESH temp dir per run keyed to the GPU id. CUDA_VISIBLE_
     # DEVICES already confines each run to its own GPU, so no node-ip tricks are
