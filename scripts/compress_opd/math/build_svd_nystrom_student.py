@@ -62,33 +62,75 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "opd" / "math" / "compressed_opd"
 import compress_common as cc  # noqa: E402
 
 from compress.calibration import (  # noqa: E402
+    collect_both_covariances_from_loader,
     collect_covariances_from_loader,
     collect_mixed_statistics,
+    collect_nystrom_combined_statistics,
 )
 from compress.compress_model import MethodSpec  # noqa: E402
 from compress.svd.svd_llm_v2 import svd_llm_v2_compress_model  # noqa: E402
-from compress.structured.nystrom import nystrom_compress_model  # noqa: E402
+from compress.structured.nystrom import (  # noqa: E402
+    nystrom_compress_model,
+    nystrom_combined_compress_model,
+)
 
 
-def compress_svd_nystrom(model, attn_cov, mlp_stats, *, ratio, device, protect):
-    """SVD-V2 (forward input whitening) on self_attn + Nystrom on mlp; layers
-    in `protect` (last-N decoder layers) are left dense by dropping their
-    statistics (a layer with no entry is silently skipped by the compress core
-    — the same pattern used by every A/B/D driver and `ratio_sweep_trace.py`)."""
-    attn = cc.drop_protected_stats(
-        {k: v for k, v in attn_cov.items() if ".self_attn." in k}, protect)
+def compress_svd_nystrom(model, attn_fwd_cov, mlp_stats, *, ratio, device, protect,
+                         objective="forward", attn_bwd_cov=None):
+    """SVD-V2 on self_attn + Nystrom on mlp; layers in `protect` (last-N decoder
+    layers) are left dense by dropping their statistics (a layer with no entry
+    is silently skipped by the compress core — same pattern as every A/B/D
+    driver and `ratio_sweep_trace.py`).
+
+    objective="forward" (wiki D0, repo default — input-whitening only):
+        - attn: svd_llm_v2_compress_model(..., objective="forward")
+        - mlp:  nystrom_compress_model(forward C_sigma only)
+        Expects attn_fwd_cov = forward attn input covariances,
+                mlp_stats    = forward Nystrom C_sigma dict.
+
+    objective="combined" (wiki D2 — bilateral / OBD-LLM-style):
+        - attn: svd_llm_v2_compress_model(..., objective="combined", backward_covariances=...)
+        - mlp:  nystrom_combined_compress_model(joint K = Cf^{1/2} Cb Cf^{1/2})
+        Expects attn_fwd_cov = forward attn input cov, attn_bwd_cov = backward
+                attn output-grad cov, mlp_stats = dict[down_proj -> (C_f, C_b)]
+                from collect_nystrom_combined_statistics.
+    """
+    attn_fwd = cc.drop_protected_stats(
+        {k: v for k, v in attn_fwd_cov.items() if ".self_attn." in k}, protect)
     mlp = cc.drop_protected_stats(mlp_stats, protect)
+
     logger.disable("compress")
     try:
-        nystrom_compress_model(
-            model, {k: v.clone() for k, v in mlp.items()},
-            sparsity=1.0 - ratio, skip_layers=("lm_head",), device=device,
-        )
-        svd_llm_v2_compress_model(
-            model, {k: v.clone() for k, v in attn.items()},
-            compression_ratio=ratio, skip_layers=("lm_head",),
-            device=device, objective="forward",
-        )
+        if objective == "forward":
+            nystrom_compress_model(
+                model, {k: v.clone() for k, v in mlp.items()},
+                sparsity=1.0 - ratio, skip_layers=("lm_head",), device=device,
+            )
+            svd_llm_v2_compress_model(
+                model, {k: v.clone() for k, v in attn_fwd.items()},
+                compression_ratio=ratio, skip_layers=("lm_head",),
+                device=device, objective="forward",
+            )
+        elif objective == "combined":
+            if attn_bwd_cov is None:
+                raise ValueError("objective='combined' requires attn_bwd_cov")
+            attn_bwd = cc.drop_protected_stats(
+                {k: v for k, v in attn_bwd_cov.items() if ".self_attn." in k}, protect)
+            # mlp_stats here is the {down_proj -> (C_f, C_b)} dict from
+            # collect_nystrom_combined_statistics; clone the pair tensors.
+            mlp_cloned = {k: (cf.clone(), cb.clone()) for k, (cf, cb) in mlp.items()}
+            nystrom_combined_compress_model(
+                model, mlp_cloned,
+                sparsity=1.0 - ratio, skip_layers=("lm_head",), device=device,
+            )
+            svd_llm_v2_compress_model(
+                model, {k: v.clone() for k, v in attn_fwd.items()},
+                compression_ratio=ratio, skip_layers=("lm_head",),
+                device=device, objective="combined",
+                backward_covariances={k: v.clone() for k, v in attn_bwd.items()},
+            )
+        else:
+            raise ValueError(f"objective must be 'forward' or 'combined', got {objective!r}")
     finally:
         logger.enable("compress")
     return model
@@ -104,6 +146,12 @@ def main():
                     help="retain ratio (wiki best safe aggressive op = 0.7)")
     ap.add_argument("--skip-last-layers", type=int, default=1,
                     help="leave the top-N decoder layers DENSE (protocol: 1)")
+    ap.add_argument("--objective", default="forward",
+                    choices=["forward", "combined"],
+                    help="forward = wiki D0 (input-whitening only). combined = "
+                         "wiki D2 (bilateral, fwd + CE-backward whitening) for "
+                         "both attn (svd_llm_v2 objective=combined) and mlp "
+                         "(nystrom_combined joint K = Cf^{1/2} Cb Cf^{1/2}).")
     # Calibration knobs — defaults are the 2026-06-04 productionized recipe.
     ap.add_argument("--calib", default="openthought3",
                     choices=["openthought3", "c4"])
@@ -147,47 +195,69 @@ def main():
 
     t0 = time.time()
 
-    # ---- statistics: forward-only attn input cov + MLP Nystrom C_sigma -------- #
+    # ---- statistics: calibration covariances ------------------------------- #
     # Both collectors default reweight="sequence" (2026-06-04 productionized).
     # `build_calib_loader` defaults length="full" so we get the new mask-aware
     # full-conversation loader instead of the legacy 2048-window packer.
+    #
+    # objective=forward:  forward attn input cov + MLP Nystrom forward C_sigma.
+    # objective=combined: both fwd+bwd attn covariances (CE backward) +
+    #                     MLP joint Nystrom (C_f, C_b) statistics.
     logger.info(
-        f"Collecting calibration statistics (calib={args.calib} "
-        f"length={args.calib_length} reweight={args.calib_reweight} "
-        f"n_seqs={args.calib_num_seqs})..."
+        f"Collecting calibration statistics (objective={args.objective} "
+        f"calib={args.calib} length={args.calib_length} "
+        f"reweight={args.calib_reweight} n_seqs={args.calib_num_seqs})..."
     )
     m0 = copy.deepcopy(base_cpu).to(device)
 
-    # MLP Nystrom stats (only down_proj input cov, C_sigma).
-    calib_mlp = cc.build_calib_loader(
-        args.calib, tokenizer, num_seqs=args.calib_num_seqs,
-        max_length=args.calib_max_length, batch_size=args.calib_batch_size,
-        seed=args.calib_seed, length=args.calib_length)
-    mlp_stats = collect_mixed_statistics(
-        m0, calib_mlp, MethodSpec(attn=None, mlp="nystrom"),
-        device=device, skip_layers=("lm_head",),
-        reweight=args.calib_reweight,
-    )
-    del calib_mlp
+    def _calib():
+        return cc.build_calib_loader(
+            args.calib, tokenizer, num_seqs=args.calib_num_seqs,
+            max_length=args.calib_max_length, batch_size=args.calib_batch_size,
+            seed=args.calib_seed, length=args.calib_length,
+        )
 
-    # Attention input covariance (drives SVD-V2 whitening).
-    calib_attn = cc.build_calib_loader(
-        args.calib, tokenizer, num_seqs=args.calib_num_seqs,
-        max_length=args.calib_max_length, batch_size=args.calib_batch_size,
-        seed=args.calib_seed, length=args.calib_length)
-    attn_cov = collect_covariances_from_loader(
-        m0, calib_attn, device=device, skip_layers=("lm_head",),
-        reweight=args.calib_reweight,
-    )
-    del m0, calib_attn
+    attn_bwd_cov = None
+    if args.objective == "forward":
+        # MLP Nystrom forward stats (only down_proj input cov, C_sigma).
+        mlp_stats = collect_mixed_statistics(
+            m0, _calib(), MethodSpec(attn=None, mlp="nystrom"),
+            device=device, skip_layers=("lm_head",),
+            reweight=args.calib_reweight,
+        )
+        # Attention forward input covariance (drives SVD-V2 whitening).
+        attn_fwd_cov = collect_covariances_from_loader(
+            m0, _calib(), device=device, skip_layers=("lm_head",),
+            reweight=args.calib_reweight,
+        )
+    else:  # combined: fwd+bwd attn covariances + joint Nystrom (C_f, C_b)
+        # MLP joint Nystrom statistics (forward C_f + backward C_b from
+        # down_proj input gradient). Uses default CE-on-shifted-self-labels
+        # backward (loss_fn=None).
+        mlp_stats = collect_nystrom_combined_statistics(
+            m0, _calib(), device=device, skip_layers=("lm_head",),
+            reweight=args.calib_reweight,
+        )
+        # Bilateral attention covariances (forward input + CE-backward
+        # output-grad), one pass.
+        attn_fwd_cov, attn_bwd_cov = collect_both_covariances_from_loader(
+            m0, _calib(), device=device, skip_layers=("lm_head",),
+            reweight=args.calib_reweight,
+        )
+    del m0
     torch.cuda.empty_cache()
 
     # ---- compress ----------------------------------------------------------- #
-    logger.info(f"Compressing: SVD-V2 (attn) + Nystrom (mlp) @ retain {args.ratio}")
+    logger.info(
+        f"Compressing: SVD-V2 (attn, objective={args.objective}) + "
+        f"{'Nystrom-combined' if args.objective == 'combined' else 'Nystrom'} (mlp) "
+        f"@ retain {args.ratio}"
+    )
     model = copy.deepcopy(base_cpu).to(device)
     compress_svd_nystrom(
-        model, attn_cov, mlp_stats,
+        model, attn_fwd_cov, mlp_stats,
         ratio=args.ratio, device=device, protect=protect,
+        objective=args.objective, attn_bwd_cov=attn_bwd_cov,
     )
     del base_cpu
     torch.cuda.empty_cache()
@@ -218,9 +288,12 @@ def main():
         model.save_pretrained(str(save_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(save_dir))
 
+    method = ("svd_v2_attn+nystrom_combined_mlp" if args.objective == "combined"
+              else "svd_v2_attn+nystrom_mlp")
     out = {
         "config": vars(args),
-        "method": "svd_v2_attn+nystrom_mlp",
+        "method": method,
+        "objective": args.objective,
         "retain_ratio": args.ratio,
         "protected_layers": sorted(protect),
         "elapsed_s": time.time() - t0,

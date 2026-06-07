@@ -11,35 +11,40 @@
 # Override knobs via env vars:
 #   GPU                CUDA device id (default 0)
 #   RATIO              retain ratio (default 0.7 — the wiki best safe op point)
-#   EXPERIMENT_TAG     run label (default derived from ratio)
+#   OBJECTIVE          forward | combined (default forward — wiki D0).
+#                      combined = wiki D2 (fwd + CE-backward whitening).
+#   EXPERIMENT_TAG     run label (default derived from ratio + objective)
 #   STUDENT_DIR        where to save the compressed HF student
-#                      (default /data/yequan/compress_opd/students/svd_nystrom_r${RATIO})
+#                      (default /data/yequan/compress_opd/students/<EXPERIMENT_TAG>)
 #   STAGE              stage1 | stage2 | both (default both)
 #   PY                 python interpreter (default verl conda env)
 #
 # Usage:
+#   # forward-only (wiki D0, default)
 #   bash scripts/compress_opd/math/run_svd_nystrom_opd.sh
-#   GPU=1 RATIO=0.7 STAGE=stage1 bash scripts/compress_opd/math/run_svd_nystrom_opd.sh
+#   # combined (wiki D2)
+#   OBJECTIVE=combined bash scripts/compress_opd/math/run_svd_nystrom_opd.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 GPU=${GPU:-0}
 RATIO=${RATIO:-0.7}
+OBJECTIVE=${OBJECTIVE:-forward}
 STAGE=${STAGE:-both}
 PY=${PY:-/home/yequan/miniconda3/envs/verl/bin/python}
 
 # Strip the leading '0.' for a filesystem-friendly tag (0.7 → r07).
 TAG_RATIO=$(printf '%s' "$RATIO" | tr -d '.')
-EXPERIMENT_TAG=${EXPERIMENT_TAG:-svd_nystrom_r${TAG_RATIO}}
-STUDENT_DIR=${STUDENT_DIR:-/data/yequan/compress_opd/students/svd_nystrom_r${TAG_RATIO}}
+EXPERIMENT_TAG=${EXPERIMENT_TAG:-svd_nystrom_r${TAG_RATIO}_${OBJECTIVE}}
+STUDENT_DIR=${STUDENT_DIR:-/data/yequan/compress_opd/students/${EXPERIMENT_TAG}}
 
 METRICS_DIR="$SCRIPT_DIR/results"
 LOG_DIR="$REPO_ROOT/logs/compress_opd_svd_nystrom"
 mkdir -p "$METRICS_DIR" "$LOG_DIR"
 METRICS_JSON="$METRICS_DIR/${EXPERIMENT_TAG}_pre_opd.json"
 
-echo "[run] GPU=$GPU RATIO=$RATIO TAG=$EXPERIMENT_TAG STAGE=$STAGE"
+echo "[run] GPU=$GPU RATIO=$RATIO OBJECTIVE=$OBJECTIVE TAG=$EXPERIMENT_TAG STAGE=$STAGE"
 echo "[run] student dir: $STUDENT_DIR"
 echo "[run] pre-OPD metrics: $METRICS_JSON"
 
@@ -50,6 +55,7 @@ if [[ "$STAGE" == "stage1" || "$STAGE" == "both" ]]; then
   PYTHONPATH=src:verl \
     "$PY" "$SCRIPT_DIR/build_svd_nystrom_student.py" \
       --ratio "$RATIO" \
+      --objective "$OBJECTIVE" \
       --save-dir "$STUDENT_DIR" \
       --metrics-json "$METRICS_JSON" \
       2>&1 | tee "$LOG_DIR/${EXPERIMENT_TAG}_compress.log"
