@@ -1,6 +1,9 @@
+import pytest
+
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
     _packed_row_blocks,
     _assign_rollout_ids,
+    _select_bucket,
 )
 
 
@@ -31,3 +34,33 @@ def test_assign_rollout_ids_n_rollout_gt_1():
     # (step*batch_size + b) * n_rollout + r:
     # (0+0)*2+0, (0+0)*2+1, (0+1)*2+0, (0+1)*2+1
     assert ids == [0, 1, 2, 3]
+
+
+def test_select_bucket_smallest_ge_B():
+    # E3 picks the smallest bucket >= B; leftover slots become PAD rows (C-4).
+    buckets = [2, 4, 8, 16]
+    assert _select_bucket(1, buckets) == 2
+    assert _select_bucket(2, buckets) == 2
+    assert _select_bucket(3, buckets) == 4
+    assert _select_bucket(4, buckets) == 4
+    assert _select_bucket(5, buckets) == 8
+    assert _select_bucket(8, buckets) == 8
+    assert _select_bucket(16, buckets) == 16
+
+
+def test_select_bucket_exact_and_unsorted_input():
+    # Input order must not matter (helper sorts internally); exact-fit returns B.
+    assert _select_bucket(4, [16, 2, 8, 4]) == 4
+    assert _select_bucket(3, [8, 2, 4]) == 4
+
+
+def test_select_bucket_overflow_raises():
+    # B beyond the largest bucket: the graphed driver can't wave one fixed-width
+    # graph over more prompts than captured -> the caller must chunk. Raise.
+    with pytest.raises(ValueError):
+        _select_bucket(17, [2, 4, 8, 16])
+
+
+def test_select_bucket_invalid_B():
+    with pytest.raises(ValueError):
+        _select_bucket(0, [2, 4, 8, 16])

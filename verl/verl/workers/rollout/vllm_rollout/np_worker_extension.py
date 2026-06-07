@@ -616,6 +616,135 @@ class WorkerExtension:
             "captured_u": captured_u,
         }
 
+    # ============================================== E3: graphed orchestrator ==
+    def run_np_decode_packed_graphed(self, list_of_prompt_ids, sampling_params,
+                                     layer_names, np_cfg, rollout_ids):
+        """Fully CUDA-graphed all-layer PACKED decode for B prompts (Stage E3).
+
+        Ties E1 (capture) + E2 (replay) into a full decode driver: prefill all B
+        prompts, pick ONE bucket width >= B, capture ONE all-layer packed graph for
+        that bucket (cached so a repeat call at the same width never re-captures),
+        then loop decode tokens via _np_replay_step_packed, padding finished/unused
+        slots as PAD rows (C-4) inside the fixed bucket. Returns the SAME per-prompt
+        shape as run_np_decode_packed (lists indexed by prompt) so fit() consumes it
+        uniformly:
+          clean_tokens[p]      : list[int]
+          candidate_logits[p]  : list[(topk_logp, ids)]
+          captured_u[p]        : {layer: {t: tensor[n_sample, d_out]}}   (CPU clones)
+          captured_x[p]        : {layer: {t: tensor[d_in]}}              (CPU clones)
+
+        Bucket / pad design (the SIMPLEST CORRECT choice, spec): pick the single
+        bucket = smallest b in b_pack_buckets with b >= B (clamp/raise if B exceeds
+        max). Capture that ONE bucket, pad all B prompts into it, and run the WHOLE
+        decode in it -- finished prompts become PAD rows via E2's C-4 logic. We never
+        switch buckets mid-decode (no mid-decode recapture), so the captured graph's
+        block_table / row layout stay fixed for the whole decode.
+
+        `layer_names` is the LIST of all matched layers (every layer perturbs in one
+        forward). `rollout_ids` is the per-prompt rollout id list (from
+        _assign_rollout_ids) -- slot p is bound to prompt p, so slot p's noise is
+        seeded by rollout_ids[p] (parity with the eager/serial paths)."""
+        if not isinstance(layer_names, (list, tuple)):
+            raise TypeError(
+                "run_np_decode_packed_graphed is the ALL-LAYER packed path; "
+                "layer_names must be a list/tuple of matched layer names.")
+        layer_names = list(layer_names)
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
+
+        B = len(list_of_prompt_ids)
+        assert len(rollout_ids) == B, (
+            f"run_np_decode_packed_graphed: {len(rollout_ids)} rollout_ids for "
+            f"{B} prompts")
+        b_pack_buckets = list(np_cfg.get("b_pack_buckets", [2, 4, 8, 16]))
+        bucket = _select_bucket(B, b_pack_buckets)
+
+        # Prefill EXACTLY `bucket` prompt slots. Slots [0..B) are the real prompts;
+        # slots [B..bucket) are PAD slots (their KV is prefilled with a real prompt's
+        # ids so the graph's block_table is well-defined, but they are NEVER active,
+        # so their outputs are discarded -- C-4 keeps their padded rows attention-
+        # well-defined). PAD slots reuse prompt 0's ids (any valid prompt works).
+        padded_prompt_ids = list(list_of_prompt_ids) + [
+            list(list_of_prompt_ids[0]) for _ in range(bucket - B)]
+        states = self._np_prefill_packed(model, device, padded_prompt_ids)
+        for p in range(B, bucket):
+            states[p]["active"] = False  # PAD slot: never decodes.
+
+        # Slot rollout ids: real prompts get their rollout_ids[p]; pad slots get a
+        # valid int (their noise is harmless -- those rows are ignored).
+        slot_rollout_ids = [int(rollout_ids[p]) for p in range(B)] + [
+            int(rollout_ids[0]) for _ in range(bucket - B)]
+
+        max_seq_len_cap = max(s["prompt_len"] for s in states) + max_tokens
+
+        # Capture ONCE per bucket, cached on the worker so repeated calls at the
+        # same width skip recapture. C-2: the returned graph_state's u_buf/x_buf
+        # dicts are the EXACT pinned objects the replay mutates in place.
+        st["sigma"] = sigma
+        if not hasattr(self, "_np_graph_by_bucket"):
+            self._np_graph_by_bucket = {}
+        if bucket not in self._np_graph_by_bucket:
+            gs = self._np_capture_step_packed(
+                model, device, bucket, n_sample, layer_names, states,
+                max_seq_len_cap)
+            self._np_graph_by_bucket[bucket] = gs
+        gs = self._np_graph_by_bucket[bucket]
+
+        # Per-prompt outputs (only the B real prompts; pad slots contribute none).
+        clean_tokens = [[] for _ in range(B)]
+        candidate_logits = [[] for _ in range(B)]
+        captured_u = [{ln: {} for ln in layer_names} for _ in range(B)]
+        captured_x = [{ln: {} for ln in layer_names} for _ in range(B)]
+
+        width = 1 + n_sample
+        try:
+            for t in range(max_tokens):
+                active_idx = [p for p in range(B) if states[p]["active"]]
+                if not active_idx:
+                    break
+                # ONE noise-refill site lives INSIDE the replay (C-6); the
+                # orchestrator never refills noise itself. Replay pads finished/pad
+                # slots (C-4) and returns [R, vocab] raw logits.
+                logits = self._np_replay_step_packed(
+                    model, states, active_idx, n_sample, layer_names, np_cfg, t,
+                    slot_rollout_ids, gs)
+                # Per ACTIVE real prompt: slice its (1+N) block, sample, capture,
+                # advance. u/x are read from the SAME pinned buffers the replay just
+                # refilled (u) / the forward just wrote (x), prompt-major sliced and
+                # cloned to CPU independently (no aliasing across tokens).
+                for p in active_idx:
+                    base = p * width
+                    block = logits[base:base + width]  # [1+N, vocab]
+                    candidate_logits[p].append(
+                        self._topk_store(block, topk_store_k))
+                    for ln in layer_names:
+                        captured_u[p][ln][t] = gs["u_buf"][ln][
+                            p * n_sample:(p + 1) * n_sample].detach().to(
+                            "cpu").clone()
+                        captured_x[p][ln][t] = gs["x_buf"][ln][p].detach().to(
+                            "cpu").clone()
+                    next_tok = self._np_sample_clean(block[0], sampling_params)
+                    clean_tokens[p].append(int(next_tok))
+                    if self._np_is_eos(next_tok, sampling_params):
+                        states[p]["active"] = False
+                    else:
+                        self._np_commit_clean(states[p], next_tok)
+        finally:
+            st["mode"] = "off"
+
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
     def _np_step_forward_graph(self, model, device, state, n_sample):
         """Eager 1+n_sample step forward for the perturb_graph path (M1).
 
@@ -1799,6 +1928,29 @@ def assemble_all_layers(L_q_per_step, L_clean_per_step, layer_signals,
                                      sample_mode=sample_mode, normalize=normalize,
                                      token_agg=token_agg, device=device)
             for ln, sig in layer_signals.items()}
+
+
+def _select_bucket(B, b_pack_buckets):
+    """Pick the ONE graph bucket width for B prompts (E3). The smallest bucket
+    >= B from b_pack_buckets, so all B prompts fit one captured graph and the
+    leftover slots are PAD rows (C-4). Raises if B exceeds the largest bucket --
+    the caller must chunk B down to <= max(b_pack_buckets) (the graphed driver
+    needs a FIXED-width graph; it cannot wave a single graph over more prompts
+    than it was captured for). B must be >= 1.
+
+    Examples (buckets [2,4,8,16]): B=1->2, B=3->4, B=4->4, B=5->8, B=16->16."""
+    if int(B) < 1:
+        raise ValueError(f"_select_bucket: B must be >= 1 (got {B})")
+    buckets = sorted(int(b) for b in b_pack_buckets)
+    if not buckets:
+        raise ValueError("_select_bucket: b_pack_buckets is empty")
+    for b in buckets:
+        if b >= int(B):
+            return b
+    raise ValueError(
+        f"_select_bucket: B={B} exceeds the largest bucket {buckets[-1]}; the "
+        f"caller must chunk B down to <= {buckets[-1]} (b_pack_buckets="
+        f"{buckets}).")
 
 
 def _packed_row_blocks(b_pack, n_sample):
