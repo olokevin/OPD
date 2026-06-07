@@ -78,13 +78,31 @@ class PerturbedLinear(torch.nn.Module):
             # ITS OWN clean-row input, all in this one forward. u_buf/x_buf are
             # dicts keyed by layer name (pinned by the caller / graph capture).
             # Perturbation is added to OUTPUT y, never input x, so the clean row
-            # (index 0) stays the genuine unperturbed input at this layer.
-            u_buf = st["u_buf"][self.name]          # [n_sample, d_out]
-            x_buf = st["x_buf"][self.name]          # [d_in]
+            # stays the genuine unperturbed input at this layer. Two row layouts,
+            # selected by st["perturbed_row_idx"] (mirrors the perturb_graph
+            # single-vs-packed split, but every layer reads its OWN buffer dict):
+            #   contiguous single-prompt (pri is None): perturbed rows are the
+            #     slice [n_clean : n_clean+N]; the clean row is row 0 -> x_buf.
+            #   packed (pri set): perturbed rows are SCATTERED across prompt blocks
+            #     (st["perturbed_row_idx"]); each prompt's clean-row input is
+            #     captured into x_buf[b_pack] via st["clean_row_idx"]. u_buf row i
+            #     aligns with pri[i]. Used by the all-layer packed graph (Stage E).
+            u_buf = st["u_buf"][self.name]          # [n_pert_rows, d_out]
+            x_buf = st["x_buf"][self.name]          # contiguous:[d_in] packed:[b_pack,d_in]
             sigma = st["sigma"]
-            x_buf.copy_(x[0])
-            y[n_clean:n_clean + u_buf.shape[0]] = (
-                y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            pri = st.get("perturbed_row_idx")
+            if pri is None:
+                # contiguous single-prompt eager path (unchanged).
+                n_clean = st["n_clean_rows"]
+                x_buf.copy_(x[0])
+                y[n_clean:n_clean + u_buf.shape[0]] = (
+                    y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            else:
+                # packed scatter path (mirrors perturb_graph packed branch, but
+                # per-layer dicts). x_buf holds one clean-input row per prompt.
+                cri = st["clean_row_idx"]            # LongTensor [b_pack] clean rows
+                x_buf.copy_(x[cri])                  # [b_pack, d_in]
+                y[pri] = y[pri] + sigma * u_buf      # u_buf rows align with pri
             return _repack(y, bias, was_tuple)
 
         if mode == "perturb_graph" and self.name == st["layer"]:
@@ -914,6 +932,253 @@ class WorkerExtension:
             "block_table": bt,
         }
         return attn_metadata, total_tokens, meta_bufs
+
+    def _np_build_attn_metadata_packed_persistent(self, per_row_block_ids,
+                                                  query_lens, seq_lens,
+                                                  slot_mapping, positions_cpu,
+                                                  max_seq_len_override=None):
+        """Persistent packed attn_metadata for the all-layer packed graph (E1).
+
+        Combines _np_build_attn_metadata_packed (num_reqs = R rows, each row
+        carrying its OWN seq_len / block_table / slot -- B_pack prompts) with
+        _np_build_attn_metadata_persistent (returns the GPU tensors the graph
+        pins by reference + freezes FlashAttention's max_seqlen_k at the cap).
+
+        per_row_block_ids: list (len R) of that row's prompt's block_ids list.
+        query_lens/seq_lens/slot_mapping/positions_cpu: per-row arrays (len R).
+        max_seq_len_override: freeze max_seqlen_k at the decode's CAP (the kernel
+        grid is sized by a frozen int; live per-row seqused_k is the seq_lens GPU
+        tensor, mutated per replay -- same contract as the single-prompt builder).
+
+        Returns (attn_metadata, total_tokens, meta_bufs). meta_bufs carries the
+        per-row slot_mapping / seq_lens GPU tensors the replay (E2) mutates in
+        place. Built ONCE; the FlashAttention builder stores these by reference."""
+        from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+
+        mr = self.model_runner
+        device = mr.device
+
+        num_reqs = len(query_lens)
+        total_tokens = int(sum(query_lens))
+        max_query_len = int(max(query_lens))
+        max_seq_len = (int(max_seq_len_override) if max_seq_len_override is not None
+                       else int(max(seq_lens)))
+
+        qsl_np = np.zeros(num_reqs + 1, dtype=np.int32)
+        qsl_np[1:] = np.cumsum(np.asarray(query_lens, dtype=np.int32))
+        qsl_cpu = torch.from_numpy(qsl_np)
+        qsl_gpu = qsl_cpu.to(device)
+
+        sl_cpu = torch.from_numpy(np.asarray(seq_lens, dtype=np.int32))
+        sl_gpu = sl_cpu.to(device)
+
+        max_blocks = int(
+            mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+        bt = torch.zeros((num_reqs, max_blocks), dtype=torch.int32, device=device)
+        for row, bids in enumerate(per_row_block_ids):
+            bt[row, : len(bids)] = torch.tensor(
+                bids, dtype=torch.int32, device=device)
+
+        slot_mapping_gpu = torch.tensor(
+            slot_mapping, dtype=torch.int64, device=device)
+        num_computed_tokens_cpu = torch.tensor(
+            [s - q for s, q in zip(seq_lens, query_lens)], dtype=torch.int32)
+
+        common = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu, query_start_loc_cpu=qsl_cpu,
+            seq_lens=sl_gpu, seq_lens_cpu=sl_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs, num_actual_tokens=total_tokens,
+            max_query_len=max_query_len, max_seq_len=max_seq_len,
+            block_table_tensor=bt, slot_mapping=slot_mapping_gpu, causal=True,
+        )
+
+        attn_metadata = {}
+        for group_id, _ in enumerate(mr.kv_cache_config.kv_cache_groups):
+            for attn_group in mr.attn_groups[group_id]:
+                meta = attn_group.get_metadata_builder().build(
+                    common_prefix_len=0, common_attn_metadata=common,
+                    fast_build=True)
+                for layer in attn_group.layer_names:
+                    attn_metadata[layer] = meta
+        meta_bufs = {
+            "slot_mapping": slot_mapping_gpu,
+            "seq_lens_gpu": sl_gpu,
+            "seq_lens_cpu": sl_cpu,
+            "qsl_gpu": qsl_gpu,
+            "qsl_cpu": qsl_cpu,
+            "block_table": bt,
+        }
+        return attn_metadata, total_tokens, meta_bufs
+
+    def _np_capture_step_packed(self, model, device, bucket_b_pack, n_sample,
+                                layer_names, prefill_states, max_seq_len_cap):
+        """Capture ONE all-layer packed step forward into a CUDA graph at a FIXED
+        bucket width R = bucket_b_pack * (1 + n_sample). The packed analog of
+        _np_capture_step: instead of a single prompt's 1+N rows perturbing one
+        layer, B_pack prompts' (1+N) blocks all perturb EVERY matched layer in
+        one wide forward, each layer with its OWN per-layer u_buf/x_buf dict.
+
+        bucket_b_pack: fixed #prompts this graph serves (the active set is padded
+            up to this width at replay -- E2/E3).
+        layer_names: the matched layers to perturb (all in this one forward).
+        prefill_states: list (len bucket_b_pack) of per-prompt state dicts from
+            _np_prefill_packed; supplies block_ids / kv_cursor for the token-0 row.
+        max_seq_len_cap: frozen max_seqlen_k (largest seqused_k the decode reaches,
+            prompt_len + max_tokens) -- ESSENTIAL, same reason as _np_capture_step.
+
+        ===================== C-2 INVARIANT (READ BEFORE EDITING) =============
+        The per-layer u_buf/x_buf DICTS installed on st BELOW are the EXACT tensor
+        objects the captured PerturbedLinear.forward pins by pointer. AFTER
+        capture you MUST NOT rebind st["u_buf"] / st["x_buf"] to new dict/tensor
+        objects -- the graph recorded those storages. The replay (E2) refills
+        them IN PLACE via copy_ (u_buf[ln].copy_(...), x_buf[ln] is written by the
+        forward). Rebinding -> the graph reads stale buffers -> a graph that
+        silently perturbs nothing. This method returns the dicts in graph_state so
+        the replay mutates the SAME objects. Likewise clean_row_idx /
+        perturbed_row_idx are pinned (scatter indices baked into the captured op).
+        =======================================================================
+
+        Returns a graph_state dict (graph + persistent input/meta buffers + the
+        per-layer dicts + scatter indices + bucket_b_pack) for E2/E3."""
+        from vllm.config.compilation import CUDAGraphMode
+
+        assert len(prefill_states) == bucket_b_pack, (
+            f"_np_capture_step_packed: got {len(prefill_states)} prefill states "
+            f"for bucket_b_pack={bucket_b_pack}")
+        R = bucket_b_pack * (1 + n_sample)
+        width = 1 + n_sample
+
+        # Row layout: prompt p owns rows [p*width : p*width+width]; row p*width is
+        # clean, the next n_sample are perturbed. Same convention as
+        # run_np_decode_packed (_packed_row_blocks).
+        blocks = _packed_row_blocks(bucket_b_pack, n_sample)
+        clean_row_idx = torch.tensor(
+            [blk["clean"] for blk in blocks], dtype=torch.long, device=device)
+        perturbed_row_idx = torch.tensor(
+            [r for blk in blocks for r in blk["perturbed"]],
+            dtype=torch.long, device=device)
+
+        # Per-layer buffer DICTS at PACKED shapes (C-2: pinned BEFORE capture).
+        # u_buf[ln]: [bucket_b_pack*n_sample, d_out] (one row per perturbed row,
+        # prompt-major, aligned with perturbed_row_idx). x_buf[ln]: [bucket_b_pack,
+        # d_in] (one clean-input row per prompt, captured via clean_row_idx).
+        subset = {ln: self.np_modules[ln] for ln in layer_names}
+        u_buf_dict, x_buf_dict = {}, {}
+        for ln, wrapped in subset.items():
+            w = wrapped.wrapped.weight                 # [d_out, d_in]
+            assert w.is_floating_point(), (
+                f"_np_capture_step_packed: layer {ln!r} weight must be floating "
+                f"(got {w.dtype}) for u_buf dtype parity.")
+            d_out, d_in = int(w.shape[0]), int(w.shape[1])
+            u_buf_dict[ln] = torch.zeros(
+                bucket_b_pack * n_sample, d_out, device=device, dtype=w.dtype)
+            x_buf_dict[ln] = torch.zeros(
+                bucket_b_pack, d_in, device=device, dtype=w.dtype)
+
+        st = self._ensure_np_state()
+        sigma = float(st.get("sigma", 0.0))
+        # Install the EXACT dict objects the graph will pin. NEVER rebind these
+        # after capture (C-2). Replay mutates u_buf_dict[ln] / x_buf_dict[ln] in
+        # place; the forward reads st["u_buf"][self.name] during capture.
+        st["mode"] = "perturb_all_layers"
+        st["n_clean_rows"] = 1
+        st["u_buf"] = u_buf_dict
+        st["x_buf"] = x_buf_dict
+        st["perturbed_row_idx"] = perturbed_row_idx
+        st["clean_row_idx"] = clean_row_idx
+        st["sigma"] = sigma
+
+        # Persistent input buffers (fixed shape R for the graph's life).
+        input_ids_buf = torch.zeros(R, dtype=torch.long, device=device)
+        positions_buf = torch.zeros(R, dtype=torch.long, device=device)
+
+        # Build the packed attn_metadata ONCE at the bucket width. Each prompt's
+        # (1+N) rows carry its block_ids + token-0 seq_len (q_pos+1); max_seqlen_k
+        # is frozen at the cap. Per replay (E2) we mutate the clean-row slots +
+        # per-row seqused_k in place; block_table is fixed (prefix KV).
+        per_row_block_ids, slot_mapping, positions, seq_lens, query_lens = (
+            [], [], [], [], [])
+        token0 = []
+        for p, state in enumerate(prefill_states):
+            block_ids = state["block_ids"]
+            block_size = state["block_size"]
+            prompt_len = state["prompt_len"]
+            q_pos = state["kv_cursor"]
+            if q_pos < prompt_len:
+                q_token = state["prompt_token_ids"][q_pos]
+            else:
+                q_token = state["committed_tokens"][q_pos - prompt_len]
+            clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+            # clean row writes KV; perturbed rows PAD(-1) -> reshape_and_cache skips.
+            per_row_block_ids += [block_ids] * width
+            slot_mapping += [clean_slot] + [-1] * n_sample
+            positions += [q_pos] * width
+            seq_lens += [q_pos + 1] * width
+            query_lens += [1] * width
+            token0 += [(int(q_token), int(q_pos))] * width
+
+        attn_meta, total, meta_bufs = (
+            self._np_build_attn_metadata_packed_persistent(
+                per_row_block_ids, query_lens, seq_lens, slot_mapping, positions,
+                max_seq_len_override=max_seq_len_cap))
+
+        # Seed input buffers with token-0 ids/positions (per-row; prompts differ).
+        ids_cpu = torch.tensor([t[0] for t in token0], dtype=torch.long)
+        pos_cpu = torch.tensor([t[1] for t in token0], dtype=torch.long)
+        input_ids_buf.copy_(ids_cpu.to(device))
+        positions_buf.copy_(pos_cpu.to(device))
+
+        # Warm up a few eager steps so cuBLAS workspaces / autotune settle before
+        # capture (vLLM does the same before its own capture).
+        for _ in range(3):
+            with torch.no_grad(), set_forward_context(
+                attn_meta, self.model_runner.vllm_config, num_tokens=total,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE):
+                _ = model(input_ids=input_ids_buf, positions=positions_buf)
+        torch.cuda.synchronize()
+
+        # Capture. Graph-pool-release gotcha (VERBATIM from _np_capture_step): a
+        # prior graph is still alive (use_count>0) when we capture the next one,
+        # and capturing into a pool a live graph holds trips CUDACachingAllocator's
+        # "use_count > 0" assert. Release the PREVIOUS graph (freeing its pool)
+        # before capturing so each graph owns its own default pool.
+        prev = getattr(self, "_np_active_graph", None)
+        if prev is not None:
+            del prev
+            self._np_active_graph = None
+            import gc as _gc
+            _gc.collect()
+            torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), set_forward_context(
+            attn_meta, self.model_runner.vllm_config, num_tokens=total,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE):
+            with torch.cuda.graph(graph):
+                hidden_buf = model(input_ids=input_ids_buf, positions=positions_buf)
+        self._np_active_graph = graph
+
+        # Post-fix the perturbed-row slots to PAD(-1) once. Only the clean rows'
+        # slots (clean_row_idx) change per token; perturbed rows never write KV.
+        meta_bufs["slot_mapping"][perturbed_row_idx] = -1
+
+        return {
+            "graph": graph,
+            "input_ids_buf": input_ids_buf,
+            "positions_buf": positions_buf,
+            "hidden_buf": hidden_buf,
+            "meta_bufs": meta_bufs,
+            "attn_meta": attn_meta,
+            "total": total,
+            # C-2: the EXACT pinned objects -- replay mutates these IN PLACE.
+            "u_buf": u_buf_dict,
+            "x_buf": x_buf_dict,
+            "clean_row_idx": clean_row_idx,
+            "perturbed_row_idx": perturbed_row_idx,
+            "bucket_b_pack": bucket_b_pack,
+            "n_sample": n_sample,
+            "layer_names": list(layer_names),
+        }
 
     # -- helpers (vLLM-0.11.0-specific, against gpu_model_runner internals) --
 
