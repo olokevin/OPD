@@ -497,11 +497,18 @@ class RayNPTrainer:
             raise ValueError(
                 f"np.decode_mode={decode_mode!r} must be 'eager', 'graphed', "
                 f"'packed', or 'packed_graphed'.")
-        # Packed mode needs the rollout-id helper; import once (pure-Python, no
-        # GPU deps) rather than per-step inside the layer loop.
+        # Packed modes need the rollout-id helper; import once (pure-Python, no
+        # GPU deps) rather than per-step inside the layer loop. packed_graphed
+        # (all-layer graphed) also needs the wave-padding helper that keeps every
+        # wave at pack_width so only ONE bucket is ever captured.
         if decode_mode == "packed":
             from verl.workers.rollout.vllm_rollout.np_worker_extension import (
                 _assign_rollout_ids,
+            )
+        if decode_mode == "packed_graphed":
+            from verl.workers.rollout.vllm_rollout.np_worker_extension import (
+                _assign_rollout_ids,
+                _pad_waves_to_pack_width,
             )
         # Env-gated per-prompt boundary instrumentation (decode / score / assemble).
         # Removable: set NP_DEBUG_DECODE=1 only when diagnosing a stall.
@@ -535,44 +542,111 @@ class RayNPTrainer:
                 L_clean_steps: List[float] = []
                 layer_u_steps: Dict[str, List[Any]] = {ln: [] for ln in active}
                 layer_x_steps: Dict[str, List[Any]] = {ln: [] for ln in active}
-                for b in range(batch_size):
-                    prompt = prompts[(step * batch_size + b) % len(prompts)]
-                    pid = (prompt["prompt_token_ids"]
-                           if isinstance(prompt, dict) else prompt)
-                    for r in range(int(cfg.n_rollout)):
+
+                # Shared per-prompt score+accumulate tail. `full_pid` is the prompt
+                # token ids; `out_*` are this prompt's slice of a decode result
+                # (clean_tokens/candidate_logits are this prompt's; captured_u/x are
+                # {layer: {t: tensor}} for THIS prompt). ONE teacher score per
+                # prompt, reused for every layer; per-layer u/x appended in lockstep
+                # so each layer's list aligns positionally with L_q_steps. Both the
+                # eager loop and the packed_graphed wave loop feed THIS, so the
+                # assemble+broadcast+verify tail below runs once, identically.
+                def _accum_prompt(full_pid, out_clean_tokens,
+                                  out_candidate_logits, out_captured_u,
+                                  out_captured_x):
+                    if not out_clean_tokens:
+                        return  # empty rollout -> no signal
+                    full = list(full_pid) + list(out_clean_tokens)
+                    L_q, L_clean = self.scorer.score_rollout(
+                        full, out_candidate_logits)
+                    nT = len(out_candidate_logits)
+                    L_q_steps.extend(L_q)
+                    L_clean_steps.extend(L_clean)
+                    for ln in active:
+                        layer_u_steps[ln] += [
+                            out_captured_u[ln][t] for t in range(nT)]
+                        layer_x_steps[ln] += [
+                            out_captured_x[ln][t] for t in range(nT)]
+
+                if decode_mode == "packed_graphed":
+                    # ALL-LAYER graphed packed decode: ONE wide forward perturbs
+                    # EVERY matched layer (pass the FULL `active` list, not
+                    # active[0]). Build (prompt,rollout) slots exactly like the
+                    # eager packed branch, then pad every wave to pack_width so
+                    # _select_bucket picks the SAME bucket each wave -> ONE captured
+                    # graph (no multi-bucket allocator assert).
+                    all_pids = [
+                        (prompts[(step * batch_size + b) % len(prompts)])
+                        for b in range(batch_size)
+                    ]
+                    all_pids = [
+                        (p["prompt_token_ids"] if isinstance(p, dict) else p)
+                        for p in all_pids
+                    ]
+                    rollout_ids_full = _assign_rollout_ids(
+                        step, batch_size, int(cfg.n_rollout))
+                    if int(cfg.n_rollout) > 1:
+                        slot_pids, slot_rids = [], []
+                        for b in range(batch_size):
+                            for r in range(int(cfg.n_rollout)):
+                                slot_pids.append(all_pids[b])
+                                slot_rids.append(
+                                    rollout_ids_full[b * int(cfg.n_rollout) + r])
+                    else:
+                        slot_pids, slot_rids = all_pids, rollout_ids_full
+
+                    waves = _pad_waves_to_pack_width(
+                        slot_pids, slot_rids, pack_width)
+                    for wi, (wave_pids, wave_rids, real_count) in enumerate(waves):
                         if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} ALL-LAYER L={len(active)} "
-                                  f"b{b}/{batch_size} r{r}] decode start "
-                                  f"plen={len(pid)}", flush=True)
-                            _td = time.time()
+                            print(f"[npdbg s{step} ALL-LAYER GRAPHED L={len(active)} "
+                                  f"wave {wi} real={real_count}/{pack_width}] "
+                                  f"packed_graphed decode start", flush=True)
+                            _tw = time.time()
                         out = ray.get(self.engines[0].collective_rpc.remote(
-                            "run_np_decode",
-                            args=(pid, sp, active, np_cfg, r),
+                            "run_np_decode_packed_graphed",
+                            args=(wave_pids, sp, active, np_cfg, wave_rids),
                         ))[0]
                         if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} b{b}] all-layer decode done "
-                                  f"ntok={len(out['clean_tokens'])} "
-                                  f"dt={time.time()-_td:.2f}s", flush=True)
-                            _ts = time.time()
-                        if not out["clean_tokens"]:
-                            continue  # empty rollout -> no signal
-                        full = list(pid) + list(out["clean_tokens"])
-                        # ONE score per prompt -- shared across ALL layers.
-                        L_q, L_clean = self.scorer.score_rollout(
-                            full, out["candidate_logits"])
-                        if NP_DEBUG_DECODE:
-                            print(f"[npdbg s{step} b{b}] all-layer score done "
-                                  f"dt={time.time()-_ts:.2f}s", flush=True)
-                        nT = len(out["candidate_logits"])
-                        L_q_steps += L_q
-                        L_clean_steps += L_clean
-                        # Per-layer u/x appended in lockstep: each layer gets the
-                        # SAME nT tokens in the SAME order as L_q_steps above.
-                        for ln in active:
-                            layer_u_steps[ln] += [
-                                out["captured_u"][ln][t] for t in range(nT)]
-                            layer_x_steps[ln] += [
-                                out["captured_x"][ln][t] for t in range(nT)]
+                            print(f"[npdbg s{step}] wave decode done "
+                                  f"dt={time.time()-_tw:.2f}s", flush=True)
+                        # Score+accumulate ONLY the real prompts; discard padded tail.
+                        for pidx in range(real_count):
+                            _accum_prompt(
+                                wave_pids[pidx],
+                                out["clean_tokens"][pidx],
+                                out["candidate_logits"][pidx],
+                                out["captured_u"][pidx],
+                                out["captured_x"][pidx])
+                else:
+                    # EAGER all-layer: per-prompt eager decode through run_np_decode
+                    # with the LIST `active`. The clean rollout's candidate_logits is
+                    # layer-agnostic; per-prompt u/x are {layer: {t: tensor}}.
+                    for b in range(batch_size):
+                        prompt = prompts[(step * batch_size + b) % len(prompts)]
+                        pid = (prompt["prompt_token_ids"]
+                               if isinstance(prompt, dict) else prompt)
+                        for r in range(int(cfg.n_rollout)):
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} ALL-LAYER L={len(active)} "
+                                      f"b{b}/{batch_size} r{r}] decode start "
+                                      f"plen={len(pid)}", flush=True)
+                                _td = time.time()
+                            out = ray.get(self.engines[0].collective_rpc.remote(
+                                "run_np_decode",
+                                args=(pid, sp, active, np_cfg, r),
+                            ))[0]
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] all-layer decode done "
+                                      f"ntok={len(out['clean_tokens'])} "
+                                      f"dt={time.time()-_td:.2f}s", flush=True)
+                                _ts = time.time()
+                            _accum_prompt(pid, out["clean_tokens"],
+                                          out["candidate_logits"],
+                                          out["captured_u"], out["captured_x"])
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] all-layer score done "
+                                      f"dt={time.time()-_ts:.2f}s", flush=True)
 
                 if not L_q_steps:
                     pass  # nothing decoded this step -> fall through to logging

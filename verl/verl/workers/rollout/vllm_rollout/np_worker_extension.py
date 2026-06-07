@@ -2035,3 +2035,41 @@ def _assign_rollout_ids(step, batch_size, n_rollout):
         for r in range(int(n_rollout)):
             ids.append((base + b) * int(n_rollout) + r)
     return ids
+
+
+def _pad_waves_to_pack_width(slot_pids, slot_rids, pack_width):
+    """Chunk (prompt,rollout) slots into FIXED-width waves for the graphed packed
+    all-layer driver. Every wave has EXACTLY `pack_width` prompts -- the final
+    short wave is PADDED up to `pack_width` by REPEATING slot 0's prompt/rollout
+    id. This guarantees `_select_bucket(pack_width)` picks the SAME bucket for
+    every wave, so `run_np_decode_packed_graphed` captures ONE graph and never
+    trips the CUDACachingAllocator "use_count>0" assert from a 2nd distinct-bucket
+    capture while the first is cache-pinned (the E3 multi-bucket carry-forward).
+
+    Returns a list of (wave_pids, wave_rids, real_count) tuples: wave_pids/
+    wave_rids are length `pack_width`; real_count (<= pack_width) is how many of
+    the leading slots are real -- the trainer slices outputs to [:real_count] and
+    discards the padded tail. slot_pids/slot_rids must be non-empty and same len."""
+    if len(slot_pids) != len(slot_rids):
+        raise ValueError(
+            f"_pad_waves_to_pack_width: {len(slot_pids)} pids vs "
+            f"{len(slot_rids)} rids")
+    if not slot_pids:
+        raise ValueError("_pad_waves_to_pack_width: empty slots")
+    pack_width = int(pack_width)
+    if pack_width < 1:
+        raise ValueError(
+            f"_pad_waves_to_pack_width: pack_width must be >= 1 (got {pack_width})")
+    waves = []
+    for w0 in range(0, len(slot_pids), pack_width):
+        wave_pids = list(slot_pids[w0:w0 + pack_width])
+        wave_rids = list(slot_rids[w0:w0 + pack_width])
+        real_count = len(wave_pids)
+        # Pad the short final wave up to pack_width by repeating slot 0 (any valid
+        # prompt/id works -- the padded tail's outputs are discarded).
+        while len(wave_pids) < pack_width:
+            wave_pids.append(list(slot_pids[0]) if isinstance(slot_pids[0], list)
+                             else slot_pids[0])
+            wave_rids.append(slot_rids[0])
+        waves.append((wave_pids, wave_rids, real_count))
+    return waves
