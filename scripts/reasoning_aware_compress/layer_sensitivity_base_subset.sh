@@ -9,7 +9,7 @@
 # Both modules (self_attn svd_v2 / mlp nystrom), ratios 0.9/0.8/0.6/0.5,
 # MATH-500 first 100, OpenThought3 calib. GPU6 also grades the baseline.
 #
-#   bash scripts/opd/math/compressed_opd/layer_sensitivity_base_subset.sh
+#   bash scripts/reasoning_aware_compress/layer_sensitivity_base_subset.sh
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"

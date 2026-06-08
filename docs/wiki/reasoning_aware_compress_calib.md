@@ -210,7 +210,7 @@ should stack (an apples-to-apples M1 × full-seq run is a follow-up).
 
 ## 6. How to run — entry points
 
-All drivers live in `scripts/opd/math/compressed_opd/`, run in the **`verl` conda
+All drivers live in `scripts/reasoning_aware_compress/`, run in the **`verl` conda
 env**, and share the env prefix (the eval grader needs `verl` on the path; ray needs
 the verl python):
 
@@ -240,14 +240,14 @@ override via flags.
 **Block D / A / B** (the mechanism search, retain 0.8):
 
 ```bash
-$ENV $PY scripts/opd/math/compressed_opd/bi_whitened_svd.py \
+$ENV $PY scripts/reasoning_aware_compress/bi_whitened_svd.py \
     --cells D0 D1 D2 --ratio 0.8 --math-limit 100 \
-    --out scripts/opd/math/compressed_opd/results/blockD/bi_whitened_r0.8.json
-$ENV $PY scripts/opd/math/compressed_opd/lr_sparse_residual.py \
+    --out scripts/reasoning_aware_compress/results/blockD/bi_whitened_r0.8.json
+$ENV $PY scripts/reasoning_aware_compress/lr_sparse_residual.py \
     --cells A0 A1 A2 --ratio 0.8 --sparse-frac 0.075 --math-limit 100 \
-    --out scripts/opd/math/compressed_opd/results/blockA/lr_sparse_r0.8.json
+    --out scripts/reasoning_aware_compress/results/blockA/lr_sparse_r0.8.json
 # or the chained launcher (D→A→B sequential on one GPU):
-GPU=5 bash scripts/opd/math/compressed_opd/run_abd.sh all
+GPU=5 bash scripts/reasoning_aware_compress/run_abd.sh all
 ```
 
 D3/B2 (OPD/teacher) require a **distinct** teacher (else fail-fast):
@@ -256,25 +256,25 @@ D3/B2 (OPD/teacher) require a **distinct** teacher (else fail-fast):
 **Forward-only ratio sweep + trace diff** (§4) — build the probe set ONCE, then sweep:
 
 ```bash
-$ENV $PY scripts/opd/math/compressed_opd/trace_diff.py --mode build --n-probes 5 \
-    --scan-limit 60 --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
-$ENV $PY scripts/opd/math/compressed_opd/ratio_sweep_trace.py \
+$ENV $PY scripts/reasoning_aware_compress/trace_diff.py --mode build --n-probes 5 \
+    --scan-limit 60 --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json
+$ENV $PY scripts/reasoning_aware_compress/ratio_sweep_trace.py \
     --ratios 0.8 0.7 0.6 0.5 0.4 --math-limit 100 \
-    --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json \
-    --out-dir scripts/opd/math/compressed_opd/results/sweep
+    --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json \
+    --out-dir scripts/reasoning_aware_compress/results/sweep
 # post-hoc termination-vs-reasoning metrics (CPU):
-PYTHONPATH=src:verl $PY scripts/opd/math/compressed_opd/analyze_len_to_correct.py \
-    --sweep-dir scripts/opd/math/compressed_opd/results/sweep \
-    --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
+PYTHONPATH=src:verl $PY scripts/reasoning_aware_compress/analyze_len_to_correct.py \
+    --sweep-dir scripts/reasoning_aware_compress/results/sweep \
+    --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json
 ```
 
 **Full-seq calibration study** (§5) — two stages (tune @0.7 → sweep the winner):
 
 ```bash
 # stage 1: 4 settings (token/sequence × full/lt2048) @0.7, split GPU 2 & 3
-bash scripts/opd/math/compressed_opd/run_fullseq.sh stage1
+bash scripts/reasoning_aware_compress/run_fullseq.sh stage1
 # stage 2: best setting at 0.6/0.5/0.4
-GPU=2 SET=sequence:lt2048 bash scripts/opd/math/compressed_opd/run_fullseq.sh stage2
+GPU=2 SET=sequence:lt2048 bash scripts/reasoning_aware_compress/run_fullseq.sh stage2
 ```
 
 ### Shared infra (reused by every driver)
@@ -309,7 +309,7 @@ backward over the 4B OOMs 96GB). See
 
 **File map**
 
-- `scripts/opd/math/compressed_opd/` drivers: `bi_whitened_svd.py` (D),
+- `scripts/reasoning_aware_compress/` drivers: `bi_whitened_svd.py` (D),
   `lr_sparse_residual.py` (A), `sequential_src.py` (B), `ratio_sweep_trace.py`
   (cliff + trace diff), `fullseq_calib_sweep.py` (calib study),
   `trace_diff.py` / `analyze_len_to_correct.py` (trace metrics),

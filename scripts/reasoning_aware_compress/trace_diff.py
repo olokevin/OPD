@@ -25,9 +25,9 @@ max_new_tokens=2048, left-padding, ttrl_math grader on dataset gold.
 Usage — build the probe set once (dense, GPU 5):
   CUDA_VISIBLE_DEVICES=5 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-      scripts/opd/math/compressed_opd/trace_diff.py --mode build \
+      scripts/reasoning_aware_compress/trace_diff.py --mode build \
         --n-probes 5 --scan-limit 60 \
-        --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
+        --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json
 """
 from __future__ import annotations
 

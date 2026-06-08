@@ -11,15 +11,15 @@ Output: per ratio, n_reached/5 (probes that ever produce the correct boxed answe
 and the median len-to-first-correct over those that do.
 
 Usage:
-  PYTHONPATH=src:verl python scripts/opd/math/compressed_opd/analyze_len_to_correct.py \
-    --sweep-dir scripts/opd/math/compressed_opd/results/sweep \
-    --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json
+  PYTHONPATH=src:verl python scripts/reasoning_aware_compress/analyze_len_to_correct.py \
+    --sweep-dir scripts/reasoning_aware_compress/results/sweep \
+    --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json
 """
 from __future__ import annotations
 import argparse, json, re, sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[4]
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "verl"))
 from verl.utils.reward_score.ttrl_math import compute_score  # noqa: E402

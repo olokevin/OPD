@@ -34,7 +34,7 @@ from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Repo plumbing (mirrors every sibling script: src for compress, verl for grader)
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 if str(REPO_ROOT / "verl") not in sys.path:

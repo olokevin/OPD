@@ -5,7 +5,7 @@ and report loss, logits stats, and whether anything is NaN/Inf.
 Run in the sft env:
   CUDA_VISIBLE_DEVICES=6 HF_HOME=/data/yequan/huggingface \
     /home/yequan/miniconda3/envs/sft/bin/python \
-    scripts/opd/math/compressed_opd/_diag_compressed_loss.py
+    scripts/compress_sft/_diag_compressed_loss.py
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 
-REPO = Path(__file__).resolve().parents[4]
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "LlamaFactory" / "src"))
 sys.path.insert(0, str(REPO / "src"))
 

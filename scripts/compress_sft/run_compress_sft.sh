@@ -65,12 +65,12 @@ eval_cell() {
   echo ">>> [eval] $tag $obj on GPU $gpu  ($ckpt)"
   cd "$REPO"
   CUDA_VISIBLE_DEVICES=$gpu PYTHONPATH=src:verl HF_HOME=$HF_HOME \
-    "$VERL_PY" scripts/opd/math/compressed_opd/eval_opd_ckpt.py \
+    "$VERL_PY" scripts/compress_sft/eval_opd_ckpt.py \
       --model-dir "$ckpt" --label "${tag}_${obj}_sft" \
       --metrics-json "$met/final_math500.json" \
       --math-limit 500 --math-max-new-tokens 4096 --math-batch-size 8
   CUDA_VISIBLE_DEVICES=$gpu PYTHONPATH=src:verl HF_HOME=$HF_HOME \
-    "$VERL_PY" scripts/opd/math/compressed_opd/eval_mmlu_pro.py \
+    "$VERL_PY" scripts/compress_sft/eval_mmlu_pro.py \
       --model-dir "$ckpt" --label "${tag}_${obj}_sft" \
       --metrics-json "$met/final_mmlu_pro.json" \
       --limit 1000 --mmlu-max-new-tokens 512 --mmlu-batch-size 16

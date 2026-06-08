@@ -11,7 +11,7 @@ ttrl_math grader). Mirrors build_sparsegpt_student.py.
 Run (verl env):
   CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:verl HF_HOME=/data/yequan/huggingface \\
     /home/yequan/miniconda3/envs/verl/bin/python \\
-    scripts/opd/math/compressed_opd/build_svd_nystrom_student.py \\
+    scripts/compress_sft/build_svd_nystrom_student.py \\
       --model Qwen/Qwen3-4B-Base --objective forward --ratio 0.7 \\
       --save-dir /data/yequan/compress_sft/ckpts/qwen3_4b_base/forward_r0.7_precompress \\
       --metrics-json /data/yequan/compress_sft/metrics/qwen3_4b_base/forward_r0.7_precompress.json
@@ -29,7 +29,7 @@ import torch
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-REPO = Path(__file__).resolve().parents[4]
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "verl"))
 
@@ -241,6 +241,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--ppl-seqlen", type=int, default=2048)
     ap.add_argument("--skip-eval", action="store_true")
+    ap.add_argument("--skip-mmlu", action="store_true", help="eval MATH+PPL only")
     ap.add_argument("--skip-save", action="store_true")
     args = ap.parse_args()
 
@@ -283,9 +284,10 @@ def main():
         math_acc = eval_math500(model, tokenizer, args.device, args.math_limit,
                                 args.math_max_new_tokens, args.batch_size)
         logger.info(f"MATH-500 ({args.math_limit}) = {math_acc*100:.2f}%")
-        mmlu_acc = eval_mmlu_pro(model, tokenizer, args.device, args.mmlu_limit,
-                                 args.mmlu_max_new_tokens, args.batch_size)
-        logger.info(f"MMLU-Pro ({args.mmlu_limit}) = {mmlu_acc*100:.2f}%")
+        if not args.skip_mmlu:
+            mmlu_acc = eval_mmlu_pro(model, tokenizer, args.device, args.mmlu_limit,
+                                     args.mmlu_max_new_tokens, args.batch_size)
+            logger.info(f"MMLU-Pro ({args.mmlu_limit}) = {mmlu_acc*100:.2f}%")
 
     metrics = {
         "model": args.model, "objective": args.objective, "ratio": args.ratio,

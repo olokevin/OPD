@@ -31,7 +31,7 @@ for ck in "${CKPTS[@]}"; do
   step=$(basename "$ck" | grep -oE '[0-9]+' || echo final)
   tmp=$(mktemp)
   CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH=src:verl HF_HOME=$HF_HOME \
-    "$VERL_PY" scripts/opd/math/compressed_opd/eval_opd_ckpt.py \
+    "$VERL_PY" scripts/compress_sft/eval_opd_ckpt.py \
       --model-dir "$ck" --label "step_${step}" --metrics-json "$tmp" \
       --skip-ppl --math-limit "$LIMIT" --math-max-new-tokens 4096 --math-batch-size 8
   # append {step, math500_acc} to the jsonl growth file

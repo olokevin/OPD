@@ -38,9 +38,9 @@ calibration loader is the documented refinement.
 Usage (one GPU):
   CUDA_VISIBLE_DEVICES=5 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-      scripts/opd/math/compressed_opd/bi_whitened_svd.py \
+      scripts/reasoning_aware_compress/bi_whitened_svd.py \
         --cells D0 D1 D2 D3 --ratio 0.8 --math-limit 100 \
-        --out scripts/opd/math/compressed_opd/results/blockD/bi_whitened_r0.8.json
+        --out scripts/reasoning_aware_compress/results/blockD/bi_whitened_r0.8.json
 """
 from __future__ import annotations
 

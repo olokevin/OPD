@@ -276,7 +276,7 @@ make the pipeline work and that you'd revisit if reproducing or extending:
      --target_dir /data/yequan/compressed_opd_v2/students/sparsegpt_v2_qwen3_4b_gen_OPD_step138
    # 4b. Eval the merged HF ckpt (sparsity check + C4 PPL + MATH-500 greedy 200).
    CUDA_VISIBLE_DEVICES=1 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
-   python scripts/opd/math/compressed_opd/eval_opd_ckpt.py \
+   python scripts/compress_sft/eval_opd_ckpt.py \
      --model-dir /data/yequan/compressed_opd_v2/students/sparsegpt_v2_qwen3_4b_gen_OPD_step138 \
      --metrics-json scripts/opd/math/compressed_opd/results/v2_runs/sparsegpt_v2_after_opd.json \
      --label sparsegpt_v2_qwen3_4b_gen_OPD_step138
@@ -397,7 +397,7 @@ _(Regenerate the tables from the raw JSON with `fill_sensitivity_tables.py`.)_
 
 Layer sweep covered 18 of 36 layers (late/mid/early blocks). RL-Math variant not
 run in this pass (descoped to base-only). Repro:
-`scripts/opd/math/compressed_opd/layer_sensitivity_base_subset.sh` (2 shards,
+`scripts/reasoning_aware_compress/layer_sensitivity_base_subset.sh` (2 shards,
 GPUs 6/7; ~10.5 h/shard). Sweep code: `layer_sensitivity.py`; figure:
 `plot_layer_sensitivity.py`; table regen: `fill_sensitivity_tables.py`. Raw data:
 `results/layer_sens_qwen3-4b-base_shard{A,B}.json`, merged CSV:

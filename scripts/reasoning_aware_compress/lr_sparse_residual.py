@@ -21,9 +21,9 @@ compression", not "a sparse tail did the work".
 Usage (GPU 5):
   CUDA_VISIBLE_DEVICES=5 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-      scripts/opd/math/compressed_opd/lr_sparse_residual.py \
+      scripts/reasoning_aware_compress/lr_sparse_residual.py \
         --cells A0 A1 A2 --ratio 0.8 --sparse-frac 0.075 --math-limit 100 \
-        --out scripts/opd/math/compressed_opd/results/blockA/lr_sparse_r0.8.json
+        --out scripts/reasoning_aware_compress/results/blockA/lr_sparse_r0.8.json
 """
 from __future__ import annotations
 

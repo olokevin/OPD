@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 _REPO = Path(__file__).resolve().parents[4]
 _TEST_DATA = _REPO / "datasets" / "test_data"
 _VERL_PY = "/home/yequan/miniconda3/envs/verl/bin/python"
-_GRADER = _REPO / "scripts" / "opd" / "math" / "compressed_opd" / "grade_responses.py"
+_GRADER = _REPO / "scripts" / "compress_sft" / "grade_responses.py"
 
 # Greedy benchmarks: (name, parquet subdir, n_problems limit, max_new_tokens)
 # AIME/AMC handled separately (avg@k sampling).

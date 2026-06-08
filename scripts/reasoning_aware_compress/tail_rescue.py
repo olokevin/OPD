@@ -22,7 +22,7 @@ k is expressed PER MODULE (so total added params scale with #attn linears).
 
 Usage:
   CUDA_VISIBLE_DEVICES=0 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
-    python scripts/opd/math/compressed_opd/tail_rescue.py \
+    python scripts/reasoning_aware_compress/tail_rescue.py \
       --k-sweep 0 4 8 16 32 --math-limit 100 \
       --out results/block0/tail_rescue.json
 """
@@ -40,7 +40,7 @@ import torch.nn as nn
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "verl"))
 

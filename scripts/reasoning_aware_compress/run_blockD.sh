@@ -9,7 +9,7 @@ PY=/home/yequan/miniconda3/envs/verl/bin/python
 export CUDA_VISIBLE_DEVICES=5
 export HF_HOME=/data/yequan/huggingface
 export PYTHONPATH="$REPO/src:$REPO/verl"
-SD=scripts/opd/math/compressed_opd
+SD=scripts/reasoning_aware_compress
 mode=${1:-full}
 ts=$(date +%Y%m%d_%H%M%S)
 

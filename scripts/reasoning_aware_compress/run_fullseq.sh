@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../../.."
 REPO=$(pwd); PY=/home/yequan/miniconda3/envs/verl/bin/python
-SD=scripts/opd/math/compressed_opd
+SD=scripts/reasoning_aware_compress
 export HF_HOME=/data/yequan/huggingface PYTHONPATH="$REPO/src:$REPO/verl"
 mkdir -p $SD/results/fullseq $SD/logs
 ts() { date +%Y%m%d_%H%M%S; }

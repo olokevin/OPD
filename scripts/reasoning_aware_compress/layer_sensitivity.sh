@@ -12,7 +12,7 @@
 # + that model's uncompressed baseline). GPU6=base, GPU7=rlmath.
 #
 # Launch both in the background, tee logs, write per-shard JSON:
-#   bash scripts/opd/math/compressed_opd/layer_sensitivity.sh
+#   bash scripts/reasoning_aware_compress/layer_sensitivity.sh
 # Override the GPU pair or MATH size:
 #   GPUS="6 7" MATH_LIMIT=100 bash .../layer_sensitivity.sh
 set -euo pipefail

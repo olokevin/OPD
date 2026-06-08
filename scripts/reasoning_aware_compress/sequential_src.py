@@ -18,9 +18,9 @@ Success: B1 > B0 (accumulation matters) and B2 ≥ B1 (OPD objective adds on top
 Usage (GPU 5):
   CUDA_VISIBLE_DEVICES=5 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-      scripts/opd/math/compressed_opd/sequential_src.py \
+      scripts/reasoning_aware_compress/sequential_src.py \
         --cells B0 B1 B2 --ratio 0.8 --math-limit 100 \
-        --out scripts/opd/math/compressed_opd/results/blockB/src_r0.8.json
+        --out scripts/reasoning_aware_compress/results/blockB/src_r0.8.json
 """
 from __future__ import annotations
 

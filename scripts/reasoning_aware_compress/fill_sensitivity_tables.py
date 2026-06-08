@@ -12,8 +12,8 @@ import json
 import re
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[4]
-RES = REPO / "scripts/opd/math/compressed_opd/results"
+REPO = Path(__file__).resolve().parents[2]
+RES = REPO / "scripts/reasoning_aware_compress/results"
 DOC = REPO / "docs/results/compressed_opd.md"
 
 LAYER_ORDER = [35, 34, 33, 32, 31, 30, 20, 19, 18, 17, 16, 15, 5, 4, 3, 2, 1, 0]

@@ -15,7 +15,7 @@ GPU=${GPU:-7}
 export CUDA_VISIBLE_DEVICES=$GPU
 export HF_HOME=/data/yequan/huggingface
 export PYTHONPATH="$REPO/src:$REPO/verl"
-SD=scripts/opd/math/compressed_opd
+SD=scripts/reasoning_aware_compress
 RATIO=${RATIO:-0.8}
 MATH=${MATH:-100}
 ts() { date +%Y%m%d_%H%M%S; }

@@ -21,7 +21,7 @@ localization*, not a parameter-matched comparison.
 Usage:
   CUDA_VISIBLE_DEVICES=0 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-    scripts/opd/math/compressed_opd/subsystem_ablation.py \
+    scripts/reasoning_aware_compress/subsystem_ablation.py \
       --math-limit 100 --out results/block0/subsystem_ablation.json
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ import torch
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "verl"))
 

@@ -29,7 +29,7 @@ passes the smaller dense MLPs through, writing a plain (smaller) HF checkpoint.
   `svd_nystrom` (the save callback reads a full per-rank state_dict; ZeRO-3 shards it).
 - `LlamaFactory/examples/compress_train/{qwen3_4b,olmoe}_compressed_{fwd,combined}_sft.yaml`
   + `_smoke_qwen3_4b_fwd.yaml`.
-- `scripts/opd/math/compressed_opd/run_compress_sft.sh` (launcher, sft-env training +
+- `scripts/compress_sft/run_compress_sft.sh` (launcher, sft-env training +
   verl-env eval), `eval_mmlu_pro.py` (MMLU-Pro via ttrl grader), `sweep_sft_ckpts.sh`
   (post-hoc MATH growth curve), `_smoke_svd_nystrom.py` (standalone compress-init smoke).
 
@@ -85,11 +85,11 @@ compress step guards on `n_missing == 0` (every triplet must be routed ≥ once)
 
 ```bash
 # Qwen3-4B both objectives, GPUs 1 & 2, sft env (compress+train+save in one process):
-bash scripts/opd/math/compressed_opd/run_compress_sft.sh train all
+bash scripts/compress_sft/run_compress_sft.sh train all
 # Final eval (MATH-500@4096 + MMLU-Pro) on the final-merged ckpts, verl env:
-bash scripts/opd/math/compressed_opd/run_compress_sft.sh eval all
+bash scripts/compress_sft/run_compress_sft.sh eval all
 # Mid-training MATH growth curve (post-hoc, over checkpoint-*-merged), verl env:
-bash scripts/opd/math/compressed_opd/sweep_sft_ckpts.sh \
+bash scripts/compress_sft/sweep_sft_ckpts.sh \
   /data/yequan/compress_sft/sft/qwen3_4b_base/forward_r0.7 1 100
 ```
 Mid-training **val-loss** growth is live in wandb via `val_size`/`eval_steps` (tier-1).

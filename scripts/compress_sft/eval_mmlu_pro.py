@@ -6,7 +6,7 @@ like a math answer.
 Run in the `verl` conda env (the grader imports verl/ray):
   CUDA_VISIBLE_DEVICES=<gpu> PYTHONPATH=src:verl HF_HOME=/data/yequan/huggingface \\
     /home/yequan/miniconda3/envs/verl/bin/python \\
-    scripts/opd/math/compressed_opd/eval_mmlu_pro.py \\
+    scripts/compress_sft/eval_mmlu_pro.py \\
       --model-dir <ckpt> --label <name> --metrics-json <out.json> \\
       --limit 1000 --mmlu-max-new-tokens 512
 
@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "verl"))
 

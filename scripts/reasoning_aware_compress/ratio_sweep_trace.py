@@ -19,10 +19,10 @@ Output:
 Usage (GPU 5):
   CUDA_VISIBLE_DEVICES=5 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
     /home/yequan/miniconda3/envs/verl/bin/python \
-      scripts/opd/math/compressed_opd/ratio_sweep_trace.py \
+      scripts/reasoning_aware_compress/ratio_sweep_trace.py \
         --ratios 0.8 0.7 0.6 0.5 0.4 0.36 --math-limit 100 \
-        --probe-set scripts/opd/math/compressed_opd/results/blockT/trace_probe_set.json \
-        --out-dir scripts/opd/math/compressed_opd/results/sweep
+        --probe-set scripts/reasoning_aware_compress/results/blockT/trace_probe_set.json \
+        --out-dir scripts/reasoning_aware_compress/results/sweep
 """
 from __future__ import annotations
 

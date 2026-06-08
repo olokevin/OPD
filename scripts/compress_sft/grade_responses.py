@@ -5,7 +5,7 @@ MathMMLUEvalCallback, so the `sft` training env stays free of verl/ray/grading d
 
 Usage (verl env):
   PYTHONPATH=src:verl /home/yequan/miniconda3/envs/verl/bin/python \\
-    scripts/opd/math/compressed_opd/grade_responses.py --in <responses.json> --out <result.json>
+    scripts/compress_sft/grade_responses.py --in <responses.json> --out <result.json>
 
 Input JSON: [{"response": "...", "ground_truth": "..."}, ...]
 Output JSON: {"accuracy": float, "n_correct": int, "n_total": int}
@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "verl"))
 

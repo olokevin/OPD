@@ -30,7 +30,7 @@ Falsifier: steering subspace decays no worse than random -> thesis wrong.
 
 Usage (one free GPU):
   CUDA_VISIBLE_DEVICES=0 HF_HOME=/data/yequan/huggingface PYTHONPATH=src:verl \
-    python scripts/opd/math/compressed_opd/block0_ser_probe.py \
+    python scripts/reasoning_aware_compress/block0_ser_probe.py \
       --layers 35,33,30,20,15,5,2,0 --out results/block0/ser_probe.json
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ import torch
 from loguru import logger
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT / "verl"))
 
