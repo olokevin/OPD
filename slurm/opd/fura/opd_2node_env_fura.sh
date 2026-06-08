@@ -1,5 +1,5 @@
 #!/bin/bash
-# zo_opd_2node_env_fura.sh — DRIVER env for the FURA (BlockTT) OPD run.
+# opd_2node_env_fura.sh — DRIVER env for the FURA (BlockTT) OPD run.
 # Same models/data as the full run, but PEFT_MODE=blocktt (FurA: bf16 frozen
 # core, only the small BTT side trains) on FSDP2. Mirrors scripts/opd/math/fura.sh
 # adapted to the multi-node DAPO setup. Runtime/system env lives in rayenv.sh.
@@ -13,7 +13,7 @@ set -x
 export OPD_REPO=${OPD_REPO:-/global/u1/y/yequan/Project/OPD}
 export DATA_ROOT=${DATA_ROOT:-/pscratch/sd/y/yequan/opd}
 
-source "${OPD_REPO}/slurm/opd/zo_opd_2node_rayenv.sh"
+source "${OPD_REPO}/slurm/opd/opd_2node_rayenv.sh"
 cd "${OPD_REPO}"
 
 # ---- models + data (same as full) ----
@@ -34,7 +34,7 @@ export LR=${LR:-1e-5}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 export USE_KL=${USE_KL:-False}
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
-export PROJECT_NAME=${PROJECT_NAME:-zo_opd_qwen4b_1p7b}
+export PROJECT_NAME=${PROJECT_NAME:-nersc_opd_qwen4b_1p7b}
 
 # ---- FURA = BlockTT (non-quantized frozen core), from scripts/opd/math/fura.sh ----
 export PEFT_MODE=blocktt

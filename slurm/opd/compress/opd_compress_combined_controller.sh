@@ -1,25 +1,26 @@
 #!/bin/bash
-# job1: FULL OPD finetune, 4 interactive nodes (16 GPUs), lr=1e-6, auto-resume.
-# teacher Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500, student Qwen/Qwen3-1.7B,
-# dataset datasets/dapo-math-17k.parquet. Reuses the validated inside.sh + 2node
-# env (PEFT none); only the checkpoint dir, run name, node count, LR, and dataset
-# are overridden via env (all flow through to env.sh / on_policy_distillation.sh).
+# compress->OPD, COMBINED student (wiki D2: fwd+CE-backward). 2 interactive nodes (8 GPUs),
+# lr=1e-6, full model, auto-resume across the 4h interactive cap. Same teacher/
+# dataset/hyperparameters as slurm/opd/full; student = compressed Qwen3-4B.
+# Reuses the validated opd_2node_inside.sh + compress env (PEFT none).
 #
-# Launch detached from a login node:
-#   nohup bash slurm/zo_opd_job1_full_controller.sh > /pscratch/sd/$USER/opd/logs/job1_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+# Launch detached from a login node (UNIQUE controller name -> safe to pkill):
+#   nohup bash slurm/opd/compress/opd_compress_combined_controller.sh \
+#     > /pscratch/sd/$USER/opd/logs/compress_cmb_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 set -u
 OPD_REPO=/global/u1/y/yequan/Project/OPD
 DATA_ROOT=/pscratch/sd/y/yequan/opd
 ACCOUNT=m4788_g
-ALLOC_NODES=4
+ALLOC_NODES=2
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-30}
 STALL_LIMIT=${STALL_LIMIT:-3}
 
-# ---- job1 config (exported so inside.sh -> env.sh -> on_policy_distillation.sh see it) ----
-export ENV_SCRIPT=opd/full/zo_opd_2node_env.sh                 # full (PEFT none)
-export CKPT_PATH=${DATA_ROOT}/checkpoints/job1_full_dapo_lr1e-6
-export EXPERIMENT_NAME=opd_full_dapo_lr1e-6
-export WANDB_RUN_ID=opd_full_dapo_lr1e-6
+# ---- recipe config (exported -> inside.sh -> env.sh -> on_policy_distillation.sh) ----
+export ENV_SCRIPT=opd/compress/opd_2node_env_compress.sh
+export ACTOR_MODEL_PATH=${DATA_ROOT}/compress_opd/students/svd_nystrom_r07_combined
+export CKPT_PATH=${DATA_ROOT}/checkpoints/opd_compress_svd_nystrom_combined
+export EXPERIMENT_NAME=opd_compress_svd_nystrom_combined
+export WANDB_RUN_ID=opd_compress_svd_nystrom_combined
 export TRAIN_DATASET=datasets/dapo-math-17k.parquet
 export TRAIN_DATASET_NAME=DAPO-Math-17k
 export LR=1e-6
@@ -31,7 +32,10 @@ ITERFILE=${CKPT}/latest_checkpointed_iteration.txt
 mkdir -p "$CKPT" "${DATA_ROOT}/logs"
 cur_iter() { cat "$ITERFILE" 2>/dev/null | tr -dc '0-9' || echo 0; }
 
-# Keep ONLY the latest checkpoint (see zo_opd_2node_controller.sh for rationale).
+if [ ! -f "${ACTOR_MODEL_PATH}/config.json" ]; then
+  echo "=== ERROR: compressed student missing: $ACTOR_MODEL_PATH (run nersc_build_students.sh first) ==="; exit 1; fi
+
+# Keep ONLY the latest checkpoint (the resumed-from ckpt lingers; prune older).
 prune_loop() {
   while true; do
     L=$(cat "$ITERFILE" 2>/dev/null | tr -dc '0-9')
@@ -49,15 +53,15 @@ prune_loop & PRUNE_PID=$!
 trap 'kill $PRUNE_PID 2>/dev/null' EXIT
 
 ATTEMPT=0; PREV_ITER=-1; STALL=0
-echo "=== job1(full) controller start $(date) | ckpt=$CKPT | nodes=$ALLOC_NODES ==="
+echo "=== compress-cmb controller start $(date) | ckpt=$CKPT | nodes=$ALLOC_NODES | lr=$LR ==="
 while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   ATTEMPT=$((ATTEMPT+1))
   START_ITER=$(cur_iter); START_ITER=${START_ITER:-0}
-  RUNLOG=${DATA_ROOT}/logs/job1_full_attempt${ATTEMPT}_$(date +%Y%m%d_%H%M%S).log
+  RUNLOG=${DATA_ROOT}/logs/compress_cmb_attempt${ATTEMPT}_$(date +%Y%m%d_%H%M%S).log
   echo "=== attempt $ATTEMPT $(date) | start_iter=${START_ITER} | runlog=$RUNLOG ==="
   salloc --nodes "$ALLOC_NODES" --qos interactive --time 4:00:00 \
          --constraint 'gpu&hbm80g' --gpus-per-node=4 --account "$ACCOUNT" \
-         bash "$OPD_REPO/slurm/opd/zo_opd_2node_inside.sh" > "$RUNLOG" 2>&1
+         bash "$OPD_REPO/slurm/opd/opd_2node_inside.sh" > "$RUNLOG" 2>&1
   RC=$?
   END_ITER=$(cur_iter); END_ITER=${END_ITER:-0}
   TOTAL=$(grep -oE "Total training steps: [0-9]+" "$RUNLOG" 2>/dev/null | grep -oE "[0-9]+" | tail -1)
@@ -71,4 +75,4 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   if [ "$STALL" -ge "$STALL_LIMIT" ]; then echo "=== STOPPING: no progress across ${STALL_LIMIT} allocations ($RUNLOG) ==="; break; fi
   sleep 20
 done
-echo "=== job1(full) controller end $(date) | final_iter=$(cur_iter) ==="
+echo "=== compress-cmb controller end $(date) | final_iter=$(cur_iter) ==="

@@ -1,5 +1,5 @@
 #!/bin/bash
-# zo_opd_2node_inside.sh — runs under a live 2-node allocation (SLURM_JOB_ID set).
+# opd_2node_inside.sh — runs under a live 2-node allocation (SLURM_JOB_ID set).
 # Bootstraps a Ray cluster spanning both nodes, then runs the OPD driver on the
 # head node attached to that cluster. Returns when the driver exits OR when the
 # 4h allocation is revoked (Slurm kills the srun steps). The controller loops it.
@@ -15,8 +15,8 @@ PORT=6379
 
 # Ray ACTORS inherit env from the raylet (the `ray start` step), NOT from the
 # driver — so every ray-start srun step must source the full runtime env. $ACT
-# does that (conda + HF/wandb/vLLM/NCCL/caches); see zo_opd_2node_rayenv.sh.
-ACT="source $OPD_REPO/slurm/opd/zo_opd_2node_rayenv.sh;"
+# does that (conda + HF/wandb/vLLM/NCCL/caches); see opd_2node_rayenv.sh.
+ACT="source $OPD_REPO/slurm/opd/opd_2node_rayenv.sh;"
 
 # Head IP reachable by workers (management net is fine for Ray's control plane).
 HEAD_IP=$(srun --jobid="$JID" -N1 -n1 -w "$HEAD" hostname --ip-address 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)
@@ -54,7 +54,7 @@ done
 # ENV_SCRIPT selects the driver env (full vs fura, etc.); default keeps the
 # original 2-node full config. srun forwards the controller's exported env, so
 # CKPT_PATH/EXPERIMENT_NAME/WANDB_RUN_ID/LR/... overrides flow through.
-ENV_SCRIPT="${ENV_SCRIPT:-opd/full/zo_opd_2node_env.sh}"
+ENV_SCRIPT="${ENV_SCRIPT:-opd/full/opd_2node_env.sh}"
 srun --jobid="$JID" -N1 -n1 -w "$HEAD" --overlap bash -c \
   "export RAY_EXTERNAL=1 RAY_ADDRESS=$RAY_ADDR NNODES=$NNODES; exec bash $OPD_REPO/slurm/$ENV_SCRIPT"
 RC=$?

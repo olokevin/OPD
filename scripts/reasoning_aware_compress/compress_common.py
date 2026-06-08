@@ -237,10 +237,14 @@ def eval_math_capture(model, tokenizer, *, device: str, limit: int,
 
 def eval_cell(model, tokenizer, *, device: str, math_limit: int,
               math_max_new_tokens: int = 2048, math_batch_size: int = 16,
-              ppl_seqlen: int = 2048, skip_math: bool = False) -> dict:
-    """Both standing metrics for one compressed model, plus param accounting."""
+              ppl_seqlen: int = 2048, skip_math: bool = False,
+              skip_ppl: bool = False) -> dict:
+    """Both standing metrics for one compressed model, plus param accounting.
+
+    skip_ppl=True skips C4 PPL (the only metric needing internet/C4 — useful on
+    offline compute nodes where only the local MATH-500 parquet is available)."""
     total, nonzero = count_params(model)
-    c4 = eval_c4_ppl(model, tokenizer, seqlen=ppl_seqlen, device=device)
+    c4 = None if skip_ppl else eval_c4_ppl(model, tokenizer, seqlen=ppl_seqlen, device=device)
     math_acc = None
     if not skip_math:
         math_acc = eval_math(

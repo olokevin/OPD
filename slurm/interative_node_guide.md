@@ -2,7 +2,7 @@
 
 How to run a multi-hour (multi-node) training job on Perlmutter **interactive** GPU
 nodes and have it survive the **4-hour interactive walltime cap** by checkpointing
-and auto-resuming. Distilled from the working `zo_opd_qwen4b_1p7b` 2-node run.
+and auto-resuming. Distilled from the working `nersc_opd_qwen4b_1p7b` 2-node run.
 
 ## Why interactive nodes at all?
 
@@ -19,13 +19,13 @@ queue; for very long jobs, weigh it against a single `regular`/`preempt` batch j
 ## The four moving parts
 
 ```
-controller (login node, detached)         slurm/opd/full/zo_opd_job1_full_controller.sh
+controller (login node, detached)         slurm/opd/full/opd_job1_full_controller.sh
   └─ loops: salloc -N2 --qos interactive --time 4:00:00  bash inside.sh
-        inside.sh (login node, under alloc)  slurm/opd/zo_opd_2node_inside.sh
+        inside.sh (login node, under alloc)  slurm/opd/opd_2node_inside.sh
           ├─ ray start --head   on node0   (srun --block &)
           ├─ ray start --address on node1  (srun --block &)
           └─ driver on node0 (srun, RAY_EXTERNAL=1) ── env.sh ── on_policy_distillation.sh
-                env.sh + rayenv.sh                    slurm/opd/full/zo_opd_2node_env.sh + slurm/opd/zo_opd_2node_rayenv.sh
+                env.sh + rayenv.sh                    slurm/opd/full/opd_2node_env.sh + slurm/opd/opd_2node_rayenv.sh
 ```
 
 - **controller** — the only long-lived process. `salloc ... bash inside.sh` blocks
@@ -90,7 +90,7 @@ the compute nodes. That's why `inside.sh` can drive everything from one process.
 
 ```bash
 # LAUNCH (from a login node) — detached, with a log:
-nohup bash slurm/opd/full/zo_opd_job1_full_controller.sh \
+nohup bash slurm/opd/full/opd_job1_full_controller.sh \
   > /pscratch/sd/$USER/opd/logs/controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # MONITOR
@@ -101,7 +101,7 @@ ls /pscratch/sd/$USER/opd/checkpoints/<run>/             # should always be ONE 
 
 # STOP (must do BOTH, or the controller just re-allocates):
 scancel <jobid>
-pkill -f <controller-name>   # e.g. zo_opd_lora_controller, zo_opd_job1_full_controller
+pkill -f <controller-name>   # e.g. opd_lora_controller, opd_job1_full_controller
 
 # AFTER (login node): publish results, copy checkpoint off the purge-prone scratch
 wandb sync /pscratch/sd/$USER/opd/wandb/wandb/offline-run-*<run-id>
@@ -127,7 +127,7 @@ Controller log reads like: `attempt 1 done rc=143 | iter 0->130` (expiry) → `a
 
 ## Reference implementation
 
-the `slurm/opd/{<recipe>/controller+env, zo_opd_2node_inside, zo_opd_2node_rayenv}.sh` scripts in this repo, plus the
+the `slurm/opd/{<recipe>/controller+env, opd_2node_inside, opd_2node_rayenv}.sh` scripts in this repo, plus the
 `RAY_EXTERNAL` / overridable-`CKPT_PATH` patches in `on_policy_distillation.sh`.
 Verified end-to-end: a 279-step run completed across **three** 4 h expiries, each
 auto-resuming from the last checkpoint, with a single checkpoint kept throughout.

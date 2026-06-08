@@ -1,10 +1,10 @@
 #!/bin/bash
 # job2: FURA (BlockTT) OPD, 4 interactive nodes (16 GPUs), lr=1e-5, auto-resume.
-# Same models/data as job1; PEFT_MODE=blocktt via ENV_SCRIPT=zo_opd_2node_env_fura.sh.
+# Same models/data as job1; PEFT_MODE=blocktt via ENV_SCRIPT=opd_2node_env_fura.sh.
 # Validated: blocktt checkpoint saves BTT cores, resume continues training, eval
 # (BTT->dense export_for_vllm) works.
 #
-#   nohup bash slurm/zo_opd_job2_fura_controller.sh > /pscratch/sd/$USER/opd/logs/job2_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+#   nohup bash slurm/opd_job2_fura_controller.sh > /pscratch/sd/$USER/opd/logs/job2_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 set -u
 OPD_REPO=/global/u1/y/yequan/Project/OPD
 DATA_ROOT=/pscratch/sd/y/yequan/opd
@@ -14,7 +14,7 @@ MAX_ATTEMPTS=${MAX_ATTEMPTS:-30}
 STALL_LIMIT=${STALL_LIMIT:-3}
 
 # ---- job2 config (fura) ----
-export ENV_SCRIPT=opd/fura/zo_opd_2node_env_fura.sh
+export ENV_SCRIPT=opd/fura/opd_2node_env_fura.sh
 export CKPT_PATH=${DATA_ROOT}/checkpoints/job2_fura_dapo_lr7e-6
 export EXPERIMENT_NAME=opd_fura_dapo_lr7e-6
 export WANDB_RUN_ID=opd_fura_dapo_lr7e-6
@@ -54,7 +54,7 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   echo "=== attempt $ATTEMPT $(date) | start_iter=${START_ITER} | runlog=$RUNLOG ==="
   salloc --nodes "$ALLOC_NODES" --qos interactive --time 4:00:00 \
          --constraint 'gpu&hbm80g' --gpus-per-node=4 --account "$ACCOUNT" \
-         bash "$OPD_REPO/slurm/opd/zo_opd_2node_inside.sh" > "$RUNLOG" 2>&1
+         bash "$OPD_REPO/slurm/opd/opd_2node_inside.sh" > "$RUNLOG" 2>&1
   RC=$?
   END_ITER=$(cur_iter); END_ITER=${END_ITER:-0}
   TOTAL=$(grep -oE "Total training steps: [0-9]+" "$RUNLOG" 2>/dev/null | grep -oE "[0-9]+" | tail -1)

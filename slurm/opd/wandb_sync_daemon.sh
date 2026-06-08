@@ -1,11 +1,11 @@
 #!/bin/bash
-# zo_wandb_sync_daemon.sh — periodically sync the live OFFLINE wandb runs to
+# wandb_sync_daemon.sh — periodically sync the live OFFLINE wandb runs to
 # wandb.ai from a login node (compute nodes have no internet, so runs log offline).
 # Syncs the LATEST offline-run dir for each pinned run id every INTERVAL seconds;
 # when a new 4h-segment creates a new dir, it switches to it automatically (the
 # pinned WANDB_RUN_ID + resume=allow makes wandb append to the same run).
 #
-#   nohup bash slurm/zo_wandb_sync_daemon.sh > /pscratch/sd/$USER/opd/logs/wandb_sync_daemon.log 2>&1 &
+#   nohup bash slurm/wandb_sync_daemon.sh > /pscratch/sd/$USER/opd/logs/wandb_sync_daemon.log 2>&1 &
 set -u
 source /pscratch/sd/y/yequan/miniconda3/etc/profile.d/conda.sh
 conda activate /pscratch/sd/y/yequan/opd/envs/verl

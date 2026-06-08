@@ -1,7 +1,7 @@
 #!/bin/bash
 # job1: LoRA OPD (rank 128), 4 interactive nodes (16 GPUs), lr=1e-5, auto-resume.
 # teacher Step500, student Qwen3-1.7B, dapo-math-17k.
-#   nohup bash slurm/zo_opd_lora_controller.sh > /pscratch/sd/$USER/opd/logs/lora_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+#   nohup bash slurm/opd_lora_controller.sh > /pscratch/sd/$USER/opd/logs/lora_controller_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 set -u
 OPD_REPO=/global/u1/y/yequan/Project/OPD
 DATA_ROOT=/pscratch/sd/y/yequan/opd
@@ -10,7 +10,7 @@ ALLOC_NODES=4
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-30}
 STALL_LIMIT=${STALL_LIMIT:-3}
 
-export ENV_SCRIPT=opd/lora/zo_opd_2node_env_lora.sh
+export ENV_SCRIPT=opd/lora/opd_2node_env_lora.sh
 export CKPT_PATH=${DATA_ROOT}/checkpoints/job1_lora_dapo_lr1e-5
 export EXPERIMENT_NAME=opd_lora_dapo_lr1e-5
 export WANDB_RUN_ID=opd_lora_dapo_lr1e-5
@@ -33,7 +33,7 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   RUNLOG=${DATA_ROOT}/logs/job1_lora_attempt${ATTEMPT}_$(date +%Y%m%d_%H%M%S).log
   echo "=== attempt $ATTEMPT $(date) | start_iter=${START_ITER} | runlog=$RUNLOG ==="
   salloc --nodes "$ALLOC_NODES" --qos interactive --time 4:00:00 --constraint 'gpu&hbm80g' --gpus-per-node=4 --account "$ACCOUNT" \
-         bash "$OPD_REPO/slurm/opd/zo_opd_2node_inside.sh" > "$RUNLOG" 2>&1
+         bash "$OPD_REPO/slurm/opd/opd_2node_inside.sh" > "$RUNLOG" 2>&1
   RC=$?; END_ITER=$(cur_iter); END_ITER=${END_ITER:-0}
   TOTAL=$(grep -oE "Total training steps: [0-9]+" "$RUNLOG" 2>/dev/null | grep -oE "[0-9]+" | tail -1)
   echo "=== attempt $ATTEMPT done rc=$RC | iter ${START_ITER}->${END_ITER} | total=${TOTAL:-?} ==="

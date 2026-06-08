@@ -1,16 +1,16 @@
 #!/bin/bash
-# zo_opd_2node_controller.sh — keep a 2-node (8 GPU) OPD run alive across the 4h
+# opd_2node_controller.sh — keep a 2-node (8 GPU) OPD run alive across the 4h
 # interactive-QOS expiry. Each iteration grabs a fresh 2-node allocation and runs
 # the Ray bootstrap + driver (which auto-resumes from the FIXED checkpoint dir).
 # Stops when training completes, finishes early, or stalls (no checkpoint progress
 # across several allocations -> likely a real failure, not just expiry).
 #
 # Launch detached from a login node:
-#   nohup bash slurm/opd/full/zo_opd_2node_controller.sh > /pscratch/sd/y/yequan/opd/logs/controller.log 2>&1 &
+#   nohup bash slurm/opd/full/opd_2node_controller.sh > /pscratch/sd/y/yequan/opd/logs/controller.log 2>&1 &
 set -u
 OPD_REPO=/global/u1/y/yequan/Project/OPD
 DATA_ROOT=/pscratch/sd/y/yequan/opd
-CKPT=${DATA_ROOT}/checkpoints/zo_opd_qwen4b_1p7b_2node
+CKPT=${DATA_ROOT}/checkpoints/nersc_opd_qwen4b_1p7b_2node
 ITERFILE=${CKPT}/latest_checkpointed_iteration.txt
 ACCOUNT=m4788_g
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-24}
@@ -53,7 +53,7 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   # the allocation.
   salloc --nodes 2 --qos interactive --time 4:00:00 \
          --constraint 'gpu&hbm80g' --gpus-per-node=4 --account "$ACCOUNT" \
-         bash "$OPD_REPO/slurm/opd/zo_opd_2node_inside.sh" > "$RUNLOG" 2>&1
+         bash "$OPD_REPO/slurm/opd/opd_2node_inside.sh" > "$RUNLOG" 2>&1
   RC=$?
 
   END_ITER=$(cur_iter); END_ITER=${END_ITER:-0}

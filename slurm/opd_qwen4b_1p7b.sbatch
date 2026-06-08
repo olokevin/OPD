@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=zo_opd_qwen4b_1p7b
+#SBATCH --job-name=nersc_opd_qwen4b_1p7b
 #SBATCH --account=m4788_g
 #SBATCH --constraint=gpu&hbm80g
 #SBATCH --qos=regular
@@ -13,10 +13,10 @@
 # OPD: teacher Qwen3-4B-Non-Thinking-RL-Math (Step500) -> student Qwen3-1.7B,
 # both NON-THINKING. One Perlmutter GPU node (4x A100 80GB). Hyperparameters per
 # the user-provided table (= on_policy_distillation.sh DAPO-Math-17k defaults).
-# wandb project: zo_opd_qwen4b_1p7b.
+# wandb project: nersc_opd_qwen4b_1p7b.
 #
-# Smoke (interactive):  srun --jobid=<ID> --ntasks=1 --gpus=4 bash slurm/zo_opd_qwen4b_1p7b.sbatch
-# Full run (queue):     sbatch slurm/zo_opd_qwen4b_1p7b.sbatch
+# Smoke (interactive):  srun --jobid=<ID> --ntasks=1 --gpus=4 bash slurm/opd_qwen4b_1p7b.sbatch
+# Full run (queue):     sbatch slurm/opd_qwen4b_1p7b.sbatch
 
 # ---- paths ----
 export OPD_REPO=${OPD_REPO:-/global/u1/y/yequan/Project/OPD}
@@ -46,7 +46,7 @@ export VLLM_DO_NOT_TRACK=1
 export RAY_USAGE_STATS_ENABLED=0
 
 # ---- wandb (offline; sync after job on a login node) ----
-export WANDB_PROJECT=zo_opd_qwen4b_1p7b
+export WANDB_PROJECT=nersc_opd_qwen4b_1p7b
 export WANDB_DIR=${DATA_ROOT}/wandb
 mkdir -p "${WANDB_DIR}"
 
@@ -105,7 +105,7 @@ export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
 # Top-p 1.0: vLLM training-rollout default top_p is 1.0 (no override needed).
 
 # wandb project name (verl uses trainer.project_name as the wandb project).
-export PROJECT_NAME=${PROJECT_NAME:-zo_opd_qwen4b_1p7b}
+export PROJECT_NAME=${PROJECT_NAME:-nersc_opd_qwen4b_1p7b}
 
 # Both models are NON-THINKING -> disable the Qwen3 thinking chat template.
 export EXTRA_HYDRA_ARGS="+data.apply_chat_template_kwargs.enable_thinking=False"
