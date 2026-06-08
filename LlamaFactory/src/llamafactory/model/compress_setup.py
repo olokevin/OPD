@@ -165,14 +165,16 @@ def _init_compress_svd_nystrom(model, model_args, fa):
     if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # --- attention protection (last decoder layers) ---
-    # The wiki "last layer dense" operating point is applied to ATTENTION only.
-    # Rationale: SVD-compressed attn materializes back to FULL-size dense weights
-    # (shape-preserving), so skipping the last layer's attn is a pure quality knob.
-    # The MLP/experts, by contrast, SHRINK intermediate_size; to keep the saved HF
-    # checkpoint's config valid (one global intermediate_size), every MLP/expert is
-    # compressed UNIFORMLY — we do NOT leave the last layer's MLP dense.
-    attn_protect = _protected_layer_set(model, int(fa.skip_last_layers))
+    # --- protect the WHOLE last decoder layer (attn AND MLP), matching the wiki
+    # operating point. The last layer feeds the LM head directly and is highly
+    # sensitive — compressing its MLP collapses the model (esp. base models:
+    # Qwen3-4B-Base @0.7 went 69% -> 16% when the last MLP was compressed, vs ~64%
+    # when left dense). This makes the MLP HETEROGENEOUS (last layer full-size,
+    # others Nystrom-shrunk); that is fine for the factored resume checkpoint (HF
+    # Trainer saves the live model's actual per-layer shapes) and the merged save
+    # path builds its peer from the live model (not from a single-intermediate_size
+    # config). config.intermediate_size is therefore left UNCHANGED.
+    protect = _protected_layer_set(model, int(fa.skip_last_layers))
 
     # --- which down_proj names are MLP/expert triplets (architecture-agnostic) ---
     # Qwen3 -> {…mlp.down_proj} (one per layer). Dense gated MLPs and *unfused*
@@ -186,9 +188,9 @@ def _init_compress_svd_nystrom(model, model_args, fa):
     n_layers = _num_decoder_layers(model)
     logger.info_rank0(
         f"compress_setup[svd_nystrom]: ratio={ratio} objective={objective} "
-        f"skip_last_layers={fa.skip_last_layers} (attn only) | {len(triplets)} "
-        f"MLP/expert triplets, {n_layers} decoder layers, "
-        f"attn_protect={sorted(attn_protect)}"
+        f"skip_last_layers={fa.skip_last_layers} (whole layer: attn+MLP) | "
+        f"{len(triplets)} MLP/expert triplets, {n_layers} decoder layers, "
+        f"protect={sorted(protect)}"
     )
 
     # --- sequence-reweighted FULL-seq calibration loader (wiki §5 default) ---
@@ -211,17 +213,17 @@ def _init_compress_svd_nystrom(model, model_args, fa):
             model, loader, device=device, skip_layers=skip, reweight="sequence",
         )
         attn_cov = _drop_protected_stats(
-            {k: v for k, v in full_cov.items() if ".self_attn." in k}, attn_protect)
-        # MLP: compress ALL triplets uniformly (no last-layer protection) so the
-        # saved config's intermediate_size stays valid.
-        down_cov = {k: v for k, v in full_cov.items() if k in mlp_down_keys}
+            {k: v for k, v in full_cov.items() if ".self_attn." in k}, protect)
+        # MLP: protect the last layer too (whole-layer dense), like the wiki.
+        down_cov = _drop_protected_stats(
+            {k: v for k, v in full_cov.items() if k in mlp_down_keys}, protect)
         del full_cov
         _empty_cache()
-        n_missing = len(mlp_down_keys) - len(down_cov)
+        n_dense_mlp = len(mlp_down_keys) - len(down_cov)
         logger.info_rank0(
             f"compress_setup[svd_nystrom]: forward cov — {len(attn_cov)} attn, "
-            f"{len(down_cov)} mlp-down ({n_missing} triplets had NO cov — "
-            "left dense, e.g. unrouted MoE experts)."
+            f"{len(down_cov)} mlp-down ({n_dense_mlp} MLP triplets left dense: "
+            "protected last layer + any unrouted MoE experts)."
         )
         nystrom_compress_model(
             model, {k: v.clone() for k, v in down_cov.items()},
@@ -241,21 +243,22 @@ def _init_compress_svd_nystrom(model, model_args, fa):
             model, loader, device=device, skip_layers=skip, reweight="sequence",
         )
         attn_fwd = _drop_protected_stats(
-            {k: v for k, v in fwd_cov.items() if ".self_attn." in k}, attn_protect)
+            {k: v for k, v in fwd_cov.items() if ".self_attn." in k}, protect)
         attn_bwd = _drop_protected_stats(
-            {k: v for k, v in bwd_cov.items() if ".self_attn." in k}, attn_protect)
+            {k: v for k, v in bwd_cov.items() if ".self_attn." in k}, protect)
         del fwd_cov, bwd_cov
         _empty_cache()
         # MLP/expert (C_f, C_b) pairs keyed by down_proj name (covers experts).
-        # Compress ALL triplets uniformly (no last-layer protection).
-        mlp_stats = collect_nystrom_combined_statistics(
-            model, loader, device=device, skip_layers=skip, reweight="sequence",
-        )
-        n_missing = len(mlp_down_keys) - len(mlp_stats)
+        # Protect the last layer too (whole-layer dense), like the wiki.
+        mlp_stats = _drop_protected_stats(
+            collect_nystrom_combined_statistics(
+                model, loader, device=device, skip_layers=skip, reweight="sequence",
+            ), protect)
+        n_dense_mlp = len(mlp_down_keys) - len(mlp_stats)
         logger.info_rank0(
             f"compress_setup[svd_nystrom]: combined cov — {len(attn_fwd)} attn, "
-            f"{len(mlp_stats)} mlp-down ({n_missing} triplets had NO cov — "
-            "left dense, e.g. unrouted MoE experts)."
+            f"{len(mlp_stats)} mlp-down ({n_dense_mlp} MLP triplets left dense: "
+            "protected last layer + any unrouted MoE experts)."
         )
         nystrom_combined_compress_model(
             model, mlp_stats, sparsity=1.0 - ratio, skip_layers=skip, device=device,
@@ -269,30 +272,12 @@ def _init_compress_svd_nystrom(model, model_args, fa):
     del loader
     _empty_cache()
 
-    # --- guard: every MLP/expert triplet must have been compressed, else the saved
-    # checkpoint would be heterogeneous (a stray full-size dense expert) and reload
-    # under a single global intermediate_size would fail. With sequence-reweighted
-    # full-seq calib + calib_num_seqs sized for the routing (512 for OLMoE), this
-    # should be zero; if not, raise with an actionable message.
-    if n_missing:
-        raise RuntimeError(
-            f"svd_nystrom: {n_missing} MLP/expert triplet(s) received no calibration "
-            "covariance (e.g. MoE experts never routed by the calib set) and were left "
-            "dense. The saved HF checkpoint requires a uniform intermediate_size — "
-            "increase calib_num_seqs (and/or use length_filter=full) so every expert "
-            "is routed at least once."
-        )
-
-    # --- update config.intermediate_size to the compressed width so the saved HF
-    # checkpoint reloads correctly (CompressSaveCallback rebuilds from this config). ---
-    new_k = _compressed_intermediate_size(model, triplets)
-    old_k = getattr(model.config, "intermediate_size", None)
-    if new_k is not None and new_k != old_k:
-        model.config.intermediate_size = int(new_k)
-        logger.info_rank0(
-            f"compress_setup[svd_nystrom]: config.intermediate_size {old_k} -> {new_k} "
-            "(Nystrom-shrunk MLP width; recorded for checkpoint reload)."
-        )
+    # config.intermediate_size is left UNCHANGED: the MLP is now HETEROGENEOUS
+    # (protected last layer at full width, others Nystrom-shrunk), so there is no
+    # single global width to record. The factored resume checkpoint saves the live
+    # model's per-layer shapes directly, and _materialize_and_save builds its dense
+    # peer from a copy of the live model (see CompressSaveCallback) — neither needs
+    # a uniform intermediate_size.
 
     # --- make compressed factors TRAINABLE for SFT ---
     # SVD attn factors: SVDCompressedLinear U_r/V_r (+bias). Nystrom MLP outputs are
@@ -350,28 +335,6 @@ def _assert_no_fused_experts(model) -> None:
                 f"svd_nystrom: model has FUSED MoE experts at {name!r} "
                 f"(down_proj is a 3D Parameter {tuple(dwn.shape)}); see above."
             )
-
-
-def _compressed_intermediate_size(model, triplets):
-    """The post-Nystrom MLP width ``k`` (gate_proj out_features). Nystrom keeps
-    ``k`` uniform across triplets (all share the same dint), so we read it from one
-    compressed triplet and assert uniformity. Returns None if no triplets."""
-    mods = dict(model.named_modules())
-    widths = set()
-    for parent_path, _g, _u, _d in triplets:
-        parent = mods.get(parent_path)
-        if parent is None:
-            continue
-        widths.add(int(parent.gate_proj.weight.shape[0]))
-    if not widths:
-        return None
-    if len(widths) > 1:
-        raise RuntimeError(
-            "svd_nystrom: non-uniform compressed MLP widths "
-            f"{sorted(widths)} — cannot record a single intermediate_size for the "
-            "saved checkpoint. Expected uniform Nystrom width across all triplets."
-        )
-    return widths.pop()
 
 
 def _num_decoder_layers(model) -> int:

@@ -482,25 +482,41 @@ def _build_materialized_state_dict(model) -> "dict[str, torch.Tensor]":
 
 
 def _materialize_and_save(model, ckpt_dir: str) -> None:
-    """Build a peer model with dense nn.Linear weights and save it as a
-    plain HF checkpoint at ``ckpt_dir``. The live training model is not
-    mutated.
+    """Save a dense HF checkpoint of the compressed model at ``ckpt_dir`` without
+    mutating the live training model.
 
-    Under DeepSpeed ZeRO-2, parameter tensors are fully replicated per
-    rank, so step 1 (state_dict materialization) reads complete data
-    without any gather. ZeRO-3 is disallowed by the validator in
-    llamafactory.hparams.parser.
+    The peer is built by DEEP-COPYING the live model and materializing its factored
+    (BTT/SVD) modules to dense ``nn.Linear`` IN PLACE on the copy. This preserves the
+    live model's exact PER-LAYER shapes — critical for svd_nystrom, whose MLP is
+    HETEROGENEOUS (protected last layer at full width, others Nystrom-shrunk). A
+    ``from_config`` peer would build every MLP at the single ``config.intermediate_size``
+    and silently drop the mismatched last-layer MLP under ``strict=False``.
+
+    Under DeepSpeed ZeRO-2 params are fully replicated per rank, so the copy reads
+    complete data without any gather. ZeRO-3 is disallowed by the parser validator.
     """
-    from transformers import AutoModelForCausalLM
+    import copy
+
+    from ..model.compress_setup import _ensure_compress_on_path
+    _ensure_compress_on_path()
+    from compress.integration import (
+        BTTLinear, SVDCompressedLinear,
+        materialize_calibrated_btt_to_linear, materialize_svd_to_linear,
+    )
 
     ckpt = pathlib.Path(ckpt_dir)
     ckpt.mkdir(parents=True, exist_ok=True)
 
-    merged_sd = _build_materialized_state_dict(model)
-
-    peer = AutoModelForCausalLM.from_config(model.config)
-    peer.load_state_dict(merged_sd, strict=False)
+    # Deep-copy on CPU to avoid doubling GPU memory; detach grads first.
+    peer = copy.deepcopy(model).to("cpu")
+    has_btt = any(isinstance(m, BTTLinear) for m in peer.modules())
+    has_svd = any(isinstance(m, SVDCompressedLinear) for m in peer.modules())
+    if has_btt:
+        materialize_calibrated_btt_to_linear(peer)
+    if has_svd:
+        materialize_svd_to_linear(peer)
     peer.save_pretrained(str(ckpt))
+    del peer
 
 
 class CompressSaveCallback(TrainerCallback):

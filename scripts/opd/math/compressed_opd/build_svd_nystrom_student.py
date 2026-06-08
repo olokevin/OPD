@@ -174,11 +174,14 @@ def _gen_grade(model, tokenizer, device, prompts, gts, max_new_tokens, batch_siz
 
 def compress(model, tokenizer, *, ratio, objective, skip_last, device, calib_num_seqs):
     skip = ("lm_head",)
-    attn_protect = _protect(model, skip_last)
+    # Protect the WHOLE last decoder layer (attn AND MLP), matching the wiki. The
+    # last layer feeds the LM head and is highly sensitive — compressing its MLP
+    # collapses base models (Qwen3-4B-Base @0.7: 69% -> 16% vs ~64% with it dense).
+    protect = _protect(model, skip_last)
     triplets = find_mlp_triplets(model, skip)
     mlp_down_keys = {d for (_p, _g, _u, d) in triplets}
     logger.info(f"svd_nystrom: ratio={ratio} objective={objective} | {len(triplets)} triplets, "
-                f"attn_protect={sorted(attn_protect)}")
+                f"protect={sorted(protect)} (whole layer: attn+MLP)")
 
     texts = _calib_texts(tokenizer, calib_num_seqs * 20)
     bs = 1 if objective == "combined" else 2
@@ -188,9 +191,8 @@ def compress(model, tokenizer, *, ratio, objective, skip_last, device, calib_num
     if objective == "forward":
         from compress.calibration import collect_covariances_reweighted
         cov = collect_covariances_reweighted(model, loader, device=device, skip_layers=skip, reweight="sequence")
-        attn = _drop_protected({k: v for k, v in cov.items() if ".self_attn." in k}, attn_protect)
-        down = {k: v for k, v in cov.items() if k in mlp_down_keys}
-        n_missing = len(mlp_down_keys) - len(down)
+        attn = _drop_protected({k: v for k, v in cov.items() if ".self_attn." in k}, protect)
+        down = _drop_protected({k: v for k, v in cov.items() if k in mlp_down_keys}, protect)
         nystrom_compress_model(model, {k: v.clone() for k, v in down.items()},
                                sparsity=1.0 - ratio, skip_layers=skip, device=device)
         svd_llm_v2_compress_model(model, {k: v.clone() for k, v in attn.items()},
@@ -200,10 +202,10 @@ def compress(model, tokenizer, *, ratio, objective, skip_last, device, calib_num
                                           collect_nystrom_combined_statistics)
         fwd, bwd = collect_both_covariances_from_loader(model, loader, device=device,
                                                         skip_layers=skip, reweight="sequence")
-        attn_fwd = _drop_protected({k: v for k, v in fwd.items() if ".self_attn." in k}, attn_protect)
-        attn_bwd = _drop_protected({k: v for k, v in bwd.items() if ".self_attn." in k}, attn_protect)
-        stats = collect_nystrom_combined_statistics(model, loader, device=device, skip_layers=skip, reweight="sequence")
-        n_missing = len(mlp_down_keys) - len(stats)
+        attn_fwd = _drop_protected({k: v for k, v in fwd.items() if ".self_attn." in k}, protect)
+        attn_bwd = _drop_protected({k: v for k, v in bwd.items() if ".self_attn." in k}, protect)
+        stats = _drop_protected(collect_nystrom_combined_statistics(
+            model, loader, device=device, skip_layers=skip, reweight="sequence"), protect)
         nystrom_combined_compress_model(model, stats, sparsity=1.0 - ratio, skip_layers=skip, device=device)
         svd_llm_v2_compress_model(model, {k: v.clone() for k, v in attn_fwd.items()},
                                   compression_ratio=ratio, skip_layers=skip, device=device,
@@ -211,18 +213,13 @@ def compress(model, tokenizer, *, ratio, objective, skip_last, device, calib_num
                                   backward_covariances={k: v.clone() for k, v in attn_bwd.items()})
     del loader
     torch.cuda.empty_cache()
-    if n_missing:
-        raise RuntimeError(f"{n_missing} MLP triplets had no calib cov; increase --calib-num-seqs")
 
-    # materialize SVD factors -> dense nn.Linear so the saved ckpt is a standard
-    # (smaller) Qwen3 that reloads for any future SFT / vLLM.
+    # materialize SVD factors -> dense nn.Linear. The MLP is HETEROGENEOUS (last
+    # layer full-size, others Nystrom-shrunk), so we do NOT change
+    # config.intermediate_size; the saved checkpoint is loaded back via the deepcopy
+    # peer trick (see --reload-with-peer) rather than a uniform-config from_pretrained.
     materialize_svd_to_linear(model)
-    # record the Nystrom-shrunk intermediate_size from a compressed triplet so the
-    # saved config matches the (smaller) MLP weights and reloads correctly.
-    mods = dict(model.named_modules())
-    k = int(mods[triplets[0][0]].gate_proj.weight.shape[0])
-    model.config.intermediate_size = k
-    logger.info(f"materialized SVD->dense; config.intermediate_size -> {k}")
+    logger.info("materialized SVD->dense (heterogeneous MLP; config.intermediate_size unchanged)")
     return model
 
 
@@ -233,7 +230,7 @@ def main():
     ap.add_argument("--ratio", type=float, default=0.7)
     ap.add_argument("--skip-last-layers", type=int, default=1)
     ap.add_argument("--calib-num-seqs", type=int, default=128)
-    ap.add_argument("--save-dir", required=True)
+    ap.add_argument("--save-dir", default=None, help="required unless --skip-save")
     ap.add_argument("--metrics-json", required=True)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
@@ -262,11 +259,21 @@ def main():
                 f"(retain {nonzero/total:.3f})")
 
     if not args.skip_save:
+        if not args.save_dir:
+            raise ValueError("--save-dir is required unless --skip-save is set")
+        # NOTE: with the whole last layer left dense, the MLP is heterogeneous
+        # (last layer full-size, others Nystrom-shrunk). A dense save is NOT
+        # vanilla-from_pretrained-reloadable (Qwen3 builds every MLP at one
+        # config.intermediate_size). The genuinely reloadable artifact is the SFT
+        # FACTORED checkpoint (init_compress_model re-compresses deterministically +
+        # loads factored params). We still save the dense weights for inspection, but
+        # reload it via the deepcopy-peer trick, not from_pretrained.
         save_dir = Path(args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(save_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(save_dir))
-        logger.info(f"Saved reloadable dense HF checkpoint -> {save_dir}")
+        logger.info(f"Saved dense HF weights -> {save_dir} (heterogeneous MLP; "
+                    "reload via peer trick, not from_pretrained)")
 
     ppl = math_acc = mmlu_acc = None
     if not args.skip_eval:
