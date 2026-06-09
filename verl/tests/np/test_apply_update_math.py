@@ -4,6 +4,7 @@ from verl.trainer.np.grad_estimator import accumulate_delta_w, sample_scale
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
     PerturbedLinear,
     WorkerExtension,
+    assemble_all_layers,
     assemble_layer_delta,
 )
 
@@ -119,3 +120,22 @@ def test_apply_node_update_does_gradient_descent_sign():
     assert torch.allclose(base.weight.data, -lr * dw, atol=1e-6), (
         f"sign error: weight={base.weight.data}, expected={-lr * dw}")
     assert norm_returned == float(dw.norm().item())
+
+
+def test_all_layer_assemble_matches_per_layer():
+    torch.manual_seed(0)
+    T, n, layers = 12, 8, {"L0": (64, 48), "L1": (32, 96)}
+    sigma = 0.01
+    L_q = [torch.randn(n) for _ in range(T)]
+    L_clean = [float(torch.randn(())) for _ in range(T)]
+    sig = {ln: {"u": [torch.randn(n, d_out) for _ in range(T)],
+                "x": [torch.randn(d_in) for _ in range(T)]}
+           for ln, (d_out, d_in) in layers.items()}
+    got = assemble_all_layers(L_q, L_clean, sig, sigma=sigma, sample_mode="grpo",
+                              normalize=False, token_agg="mean", device="cpu")
+    for ln in layers:
+        ref = assemble_layer_delta(L_q, L_clean, sig[ln]["u"], sig[ln]["x"],
+                                   sigma=sigma, sample_mode="grpo",
+                                   normalize=False, token_agg="mean", device="cpu")
+        rel = (got[ln] - ref).norm() / (ref.norm() + 1e-12)
+        assert rel < 1e-5, f"{ln} rel_fro={rel:.2e}"

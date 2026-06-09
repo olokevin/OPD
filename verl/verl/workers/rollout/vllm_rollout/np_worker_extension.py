@@ -11,6 +11,8 @@ Perturbations are regenerated from seeds, never stored. enforce_eager=True is
 mandatory (set by NPNcclLLM) so these eager-Python hooks actually run.
 See docs/superpowers/specs/2026-05-28-np-trainer-design.md.
 """
+import os
+
 import numpy as np
 import torch
 
@@ -73,6 +75,38 @@ class PerturbedLinear(torch.nn.Module):
             st["captured_x"][self.name] = x[0].detach().clone()
             return out
 
+        if mode == "perturb_all_layers":
+            # Every matched layer perturbs with ITS OWN buffer slice and captures
+            # ITS OWN clean-row input, all in this one forward. u_buf/x_buf are
+            # dicts keyed by layer name (pinned by the caller / graph capture).
+            # Perturbation is added to OUTPUT y, never input x, so the clean row
+            # stays the genuine unperturbed input at this layer. Two row layouts,
+            # selected by st["perturbed_row_idx"] (mirrors the perturb_graph
+            # single-vs-packed split, but every layer reads its OWN buffer dict):
+            #   contiguous single-prompt (pri is None): perturbed rows are the
+            #     slice [n_clean : n_clean+N]; the clean row is row 0 -> x_buf.
+            #   packed (pri set): perturbed rows are SCATTERED across prompt blocks
+            #     (st["perturbed_row_idx"]); each prompt's clean-row input is
+            #     captured into x_buf[b_pack] via st["clean_row_idx"]. u_buf row i
+            #     aligns with pri[i]. Used by the all-layer packed graph (Stage E).
+            u_buf = st["u_buf"][self.name]          # [n_pert_rows, d_out]
+            x_buf = st["x_buf"][self.name]          # contiguous:[d_in] packed:[b_pack,d_in]
+            sigma = st["sigma"]
+            pri = st.get("perturbed_row_idx")
+            if pri is None:
+                # contiguous single-prompt eager path (unchanged).
+                n_clean = st["n_clean_rows"]
+                x_buf.copy_(x[0])
+                y[n_clean:n_clean + u_buf.shape[0]] = (
+                    y[n_clean:n_clean + u_buf.shape[0]] + sigma * u_buf)
+            else:
+                # packed scatter path (mirrors perturb_graph packed branch, but
+                # per-layer dicts). x_buf holds one clean-input row per prompt.
+                cri = st["clean_row_idx"]            # LongTensor [b_pack] clean rows
+                x_buf.copy_(x[cri])                  # [b_pack, d_in]
+                y[pri] = y[pri] + sigma * u_buf      # u_buf rows align with pri
+            return _repack(y, bias, was_tuple)
+
         if mode == "perturb_graph" and self.name == st["layer"]:
             # V2 graph-capturable perturbation (spec §5.2). The host has already
             # filled the persistent buffer u_buf (st["u_buf"]) before this forward.
@@ -129,6 +163,20 @@ class PerturbedLinear(torch.nn.Module):
         return out
 
 
+def _alloc_layer_buffers(np_modules, n_sample, device):
+    """Allocate per-layer u_buf [n_sample, d_out] and x_buf [d_in] dicts for the
+    all-layer perturbation mode. Shapes are read from each wrapped linear's
+    weight [d_out, d_in]. Buffers are zero-initialized on `device` (the noise
+    refill / forward overwrites them)."""
+    u_buf, x_buf = {}, {}
+    for name, wrapped in np_modules.items():
+        w = wrapped.wrapped.weight
+        d_out, d_in = w.shape[0], w.shape[1]
+        u_buf[name] = torch.zeros(n_sample, d_out, device=device, dtype=w.dtype)
+        x_buf[name] = torch.zeros(d_in, device=device, dtype=w.dtype)
+    return u_buf, x_buf
+
+
 class WorkerExtension:
     def _ensure_np_state(self):
         if not hasattr(self, "np_state"):
@@ -168,13 +216,24 @@ class WorkerExtension:
 
     def run_np_decode(self, prompt_token_ids, sampling_params, layer_name,
                       np_cfg, rollout_idx):
-        """Custom decode for ONE prompt. See module docstring + spec §2."""
+        """Custom decode for ONE prompt. See module docstring + spec §2.
+
+        `layer_name` is EITHER a `str` (single-layer V1 path, the parity oracle)
+        OR a `list[str]`/`tuple[str]` (all-layer eager path). In the all-layer
+        case every matched layer is perturbed in ONE forward with its own
+        per-(layer, q) noise, and `captured_u`/`captured_x` are returned as
+        per-layer dicts `{layer: {t: tensor}}` (vs the single-layer `{t: tensor}`)."""
+        if isinstance(layer_name, (list, tuple)):
+            return self._run_np_decode_all_layers(
+                prompt_token_ids, sampling_params, list(layer_name), np_cfg,
+                rollout_idx)
         st = self._ensure_np_state()
         mr = self.model_runner
         model = mr.model
         device = mr.device
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         # Prefill prompt (clean, normal KV write).
         state = self._np_prefill(model, device, list(prompt_token_ids))
@@ -195,7 +254,7 @@ class WorkerExtension:
                 "captured_u": {},
             })
             logits = self._np_step_forward(model, device, state, n_sample)
-            candidate_logits.append(logits.detach().to("cpu"))
+            candidate_logits.append(self._topk_store(logits, topk_store_k))
             captured_u[t] = st["captured_u"].get(layer_name)
             # x_t for the rank-1 update, captured in the SAME forward (no 2nd pass).
             cx = st["captured_x"].get(layer_name)
@@ -207,6 +266,78 @@ class WorkerExtension:
             self._np_commit_clean(state, next_tok)
 
         st["mode"] = "off"
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
+    def _run_np_decode_all_layers(self, prompt_token_ids, sampling_params,
+                                  layer_names, np_cfg, rollout_idx):
+        """All-layer eager decode for ONE prompt: perturb every layer in
+        `layer_names` in ONE forward per token (perturb_all_layers mode), each
+        layer with its own per-(layer, q) noise drawn into a per-layer u_buf and
+        its own clean-row input captured into a per-layer x_buf. Same per-prompt
+        output contract as run_np_decode, but captured_u/captured_x are
+        per-layer dicts: {layer: {t: tensor}}."""
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
+
+        state = self._np_prefill(model, device, list(prompt_token_ids))
+
+        # Per-layer u_buf/x_buf dicts, allocated ONCE and reused across steps
+        # (refilled per step). PerturbedLinear (perturb_all_layers branch) reads
+        # st["u_buf"][self.name] / writes st["x_buf"][self.name] by reference, so
+        # these exact dicts must stay installed for the whole decode.
+        subset = {ln: self.np_modules[ln] for ln in layer_names}
+        u_buf, x_buf = _alloc_layer_buffers(subset, n_sample, device)
+        st.update({
+            "mode": "perturb_all_layers",
+            "sigma": sigma,
+            "n_clean_rows": 1,
+            "u_buf": u_buf,
+            "x_buf": x_buf,
+            # Defensive: ensure the contiguous (non-scatter) perturb_all_layers
+            # path; a prior packed decode could have left these behind.
+            "perturbed_row_idx": None,
+            "clean_row_idx": None,
+        })
+
+        clean_tokens, candidate_logits = [], []
+        captured_u = {ln: {} for ln in layer_names}
+        captured_x = {ln: {} for ln in layer_names}
+        try:
+            for t in range(max_tokens):
+                st["sigma"] = sigma
+                st["n_clean_rows"] = 1
+                # Refill ALL layers' noise BEFORE the forward (the only RNG site);
+                # the forward reads u_buf and writes x_buf for every layer.
+                self._np_fill_u_buf_all_layers(
+                    st["u_buf"], np_cfg, layer_names, t, rollout_idx, n_sample)
+                logits = self._np_step_forward(model, device, state, n_sample)
+                candidate_logits.append(self._topk_store(logits, topk_store_k))
+                # Capture per-layer u (just refilled) and x (just written by the
+                # forward), one CPU clone each, per layer per step.
+                for ln in layer_names:
+                    captured_u[ln][t] = st["u_buf"][ln].detach().to("cpu").clone()
+                    captured_x[ln][t] = st["x_buf"][ln].detach().to("cpu").clone()
+                next_tok = self._np_sample_clean(logits[0], sampling_params)
+                clean_tokens.append(int(next_tok))
+                if self._np_is_eos(next_tok, sampling_params):
+                    break
+                self._np_commit_clean(state, next_tok)
+        finally:
+            st["mode"] = "off"
+            st["u_buf"] = None
+            st["x_buf"] = None
+
         return {
             "clean_tokens": clean_tokens,
             "candidate_logits": candidate_logits,
@@ -248,6 +379,20 @@ class WorkerExtension:
                            np_cfg["sample_method"])
             u_buf[q].copy_(u)
 
+    def _np_fill_u_buf_all_layers(self, u_buf_dict, np_cfg, matched_layers,
+                                  step, rollout, n_sample):
+        """Refill every matched layer's u_buf with independent noise per (layer,q),
+        seeded identically to V1's single-layer draw -> parity by construction."""
+        for layer_name in matched_layers:
+            buf = u_buf_dict[layer_name]
+            d_out = buf.shape[1]
+            for q in range(n_sample):
+                seed = noise_seed(int(np_cfg["global_seed"]), int(step),
+                                  layer_name, int(rollout), q)
+                u = draw_noise(seed, (d_out,), buf.device, buf.dtype,
+                               np_cfg["sample_method"])
+                buf[q].copy_(u)
+
     def run_np_decode_graphed(self, prompt_token_ids, sampling_params, layer_name,
                               np_cfg, rollout_idx, use_cuda_graph=False):
         """V2 decode for ONE prompt. Same contract as run_np_decode (returns
@@ -262,6 +407,7 @@ class WorkerExtension:
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
         sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         state = self._np_prefill(model, device, list(prompt_token_ids))
         # Largest seqused_k the decode reaches (prompt_len + max_tokens). Used to
@@ -322,7 +468,7 @@ class WorkerExtension:
                     logits = self._np_step_forward_graph(
                         model, device, state, n_sample)
 
-                candidate_logits.append(logits.detach().to("cpu"))
+                candidate_logits.append(self._topk_store(logits, topk_store_k))
                 # u_t for the rank-1 update: same noise just written to u_buf.
                 captured_u[t] = u_buf.detach().to("cpu").clone()
                 captured_x[t] = x_buf.detach().to("cpu").clone()
@@ -353,7 +499,20 @@ class WorkerExtension:
         (disjoint scratch slices) and its own noise (seeded by rollout_ids[p], so
         identical to what the serial loop drew for that prompt -> parity). A prompt
         that hits EOS is marked inactive and dropped from the next forward; its
-        captured signals stop at its EOS token."""
+        captured signals stop at its EOS token.
+
+        Single-layer only. The all-layer packed path needs a scattered-row,
+        per-layer-dict form of PerturbedLinear's perturb_graph branch
+        (st["u_buf"][name][pri] / st["x_buf"][name][cri]); that scatter extension
+        is added in Stage E (run_np_decode_packed_graphed). Until then a list
+        `layer_name` is rejected here rather than silently single-layered."""
+        # all-layer packed path: see Stage E (run_np_decode_packed_graphed).
+        if isinstance(layer_name, (list, tuple)):
+            raise NotImplementedError(
+                "run_np_decode_packed is single-layer only; the all-layer packed "
+                "path (scattered per-layer u_buf/x_buf) is added in Stage E "
+                "(run_np_decode_packed_graphed). Use run_np_decode (eager) for "
+                "the all-layer path, or pass a single layer name here.")
         st = self._ensure_np_state()
         mr = self.model_runner
         model = mr.model
@@ -361,6 +520,7 @@ class WorkerExtension:
         n_sample = int(np_cfg["n_sample"])
         max_tokens = int(np_cfg["max_tokens"])
         sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
 
         states = self._np_prefill_packed(model, device, list_of_prompt_ids)
         b_pack = len(states)
@@ -435,7 +595,7 @@ class WorkerExtension:
                 for i, p in enumerate(active_idx):
                     base = blocks[i]["clean"]
                     block = logits[base:base + 1 + n_sample]  # [1+N, vocab]
-                    candidate_logits[p].append(block.detach().to("cpu"))
+                    candidate_logits[p].append(self._topk_store(block, topk_store_k))
                     # u for this prompt = its N rows of u_buf.
                     captured_u[p][t] = u_buf[i * n_sample:(i + 1) * n_sample
                                              ].detach().to("cpu").clone()
@@ -450,6 +610,143 @@ class WorkerExtension:
             st["mode"] = "off"
             for k in ("u_buf", "x_buf", "perturbed_row_idx", "clean_row_idx"):
                 st[k] = None
+
+        return {
+            "clean_tokens": clean_tokens,
+            "candidate_logits": candidate_logits,
+            "captured_x": captured_x,
+            "captured_u": captured_u,
+        }
+
+    # ============================================== E3: graphed orchestrator ==
+    def run_np_decode_packed_graphed(self, list_of_prompt_ids, sampling_params,
+                                     layer_names, np_cfg, rollout_ids):
+        """Fully CUDA-graphed all-layer PACKED decode for B prompts (Stage E3).
+
+        Ties E1 (capture) + E2 (replay) into a full decode driver: prefill all B
+        prompts, pick ONE bucket width >= B, capture ONE all-layer packed graph for
+        that bucket (cached so a repeat call at the same width never re-captures),
+        then loop decode tokens via _np_replay_step_packed, padding finished/unused
+        slots as PAD rows (C-4) inside the fixed bucket. Returns the SAME per-prompt
+        shape as run_np_decode_packed (lists indexed by prompt) so fit() consumes it
+        uniformly:
+          clean_tokens[p]      : list[int]
+          candidate_logits[p]  : list[(topk_logp, ids)]
+          captured_u[p]        : {layer: {t: tensor[n_sample, d_out]}}   (CPU clones)
+          captured_x[p]        : {layer: {t: tensor[d_in]}}              (CPU clones)
+
+        Bucket / pad design (the SIMPLEST CORRECT choice, spec): pick the single
+        bucket = smallest b in b_pack_buckets with b >= B (clamp/raise if B exceeds
+        max). Capture that ONE bucket, pad all B prompts into it, and run the WHOLE
+        decode in it -- finished prompts become PAD rows via E2's C-4 logic. We never
+        switch buckets mid-decode (no mid-decode recapture), so the captured graph's
+        block_table / row layout stay fixed for the whole decode.
+
+        `layer_names` is the LIST of all matched layers (every layer perturbs in one
+        forward). `rollout_ids` is the per-prompt rollout id list (from
+        _assign_rollout_ids) -- slot p is bound to prompt p, so slot p's noise is
+        seeded by rollout_ids[p] (parity with the eager/serial paths)."""
+        if not isinstance(layer_names, (list, tuple)):
+            raise TypeError(
+                "run_np_decode_packed_graphed is the ALL-LAYER packed path; "
+                "layer_names must be a list/tuple of matched layer names.")
+        layer_names = list(layer_names)
+        st = self._ensure_np_state()
+        mr = self.model_runner
+        model = mr.model
+        device = mr.device
+        n_sample = int(np_cfg["n_sample"])
+        max_tokens = int(np_cfg["max_tokens"])
+        sigma = float(np_cfg["sigma"])
+        topk_store_k = int(np_cfg.get("topk_store_k", 512))
+
+        B = len(list_of_prompt_ids)
+        assert len(rollout_ids) == B, (
+            f"run_np_decode_packed_graphed: {len(rollout_ids)} rollout_ids for "
+            f"{B} prompts")
+        b_pack_buckets = list(np_cfg.get("b_pack_buckets", [2, 4, 8, 16]))
+        bucket = _select_bucket(B, b_pack_buckets)
+
+        # Prefill EXACTLY `bucket` prompt slots. Slots [0..B) are the real prompts;
+        # slots [B..bucket) are PAD slots (their KV is prefilled with a real prompt's
+        # ids so the graph's block_table is well-defined, but they are NEVER active,
+        # so their outputs are discarded -- C-4 keeps their padded rows attention-
+        # well-defined). PAD slots reuse prompt 0's ids (any valid prompt works).
+        padded_prompt_ids = list(list_of_prompt_ids) + [
+            list(list_of_prompt_ids[0]) for _ in range(bucket - B)]
+        states = self._np_prefill_packed(model, device, padded_prompt_ids)
+        for p in range(B, bucket):
+            states[p]["active"] = False  # PAD slot: never decodes.
+
+        # Slot rollout ids: real prompts get their rollout_ids[p]; pad slots get a
+        # valid int (their noise is harmless -- those rows are ignored).
+        slot_rollout_ids = [int(rollout_ids[p]) for p in range(B)] + [
+            int(rollout_ids[0]) for _ in range(bucket - B)]
+
+        max_seq_len_cap = max(s["prompt_len"] for s in states) + max_tokens
+
+        # Capture ONCE per bucket, cached on the worker so repeated calls at the
+        # same width skip recapture. C-2: the returned graph_state's u_buf/x_buf
+        # dicts are the EXACT pinned objects the replay mutates in place.
+        st["sigma"] = sigma
+        if not hasattr(self, "_np_graph_by_bucket"):
+            self._np_graph_by_bucket = {}
+        if bucket not in self._np_graph_by_bucket:
+            gs = self._np_capture_step_packed(
+                model, device, bucket, n_sample, layer_names, states,
+                max_seq_len_cap)
+            self._np_graph_by_bucket[bucket] = gs
+        gs = self._np_graph_by_bucket[bucket]
+
+        # Per-prompt outputs (only the B real prompts; pad slots contribute none).
+        clean_tokens = [[] for _ in range(B)]
+        candidate_logits = [[] for _ in range(B)]
+        captured_u = [{ln: {} for ln in layer_names} for _ in range(B)]
+        captured_x = [{ln: {} for ln in layer_names} for _ in range(B)]
+
+        width = 1 + n_sample
+        # TIMING-ISOLATION HARNESS (NP_BENCH_SKIP_NOISE=1): pre-fill every layer's
+        # u_buf ONCE so the per-token refill can be skipped while the forward still
+        # sees valid noise. Isolates the per-token noise-refill cost (896 draw_noise
+        # calls/token) from the rest of decode. Breaks gradient correctness; bench
+        # only.
+        if os.environ.get("NP_BENCH_SKIP_NOISE"):
+            self._np_fill_u_buf_all_layers_packed(
+                gs["u_buf"], np_cfg, layer_names, 0, slot_rollout_ids, n_sample)
+        try:
+            for t in range(max_tokens):
+                active_idx = [p for p in range(B) if states[p]["active"]]
+                if not active_idx:
+                    break
+                # ONE noise-refill site lives INSIDE the replay (C-6); the
+                # orchestrator never refills noise itself. Replay pads finished/pad
+                # slots (C-4) and returns [R, vocab] raw logits.
+                logits = self._np_replay_step_packed(
+                    model, states, active_idx, n_sample, layer_names, np_cfg, t,
+                    slot_rollout_ids, gs)
+                # Per ACTIVE real prompt: slice its (1+N) block, sample, capture,
+                # advance. u/x are read from the SAME pinned buffers the replay just
+                # refilled (u) / the forward just wrote (x), prompt-major sliced and
+                # cloned to CPU independently (no aliasing across tokens).
+                for p in active_idx:
+                    base = p * width
+                    block = logits[base:base + width]  # [1+N, vocab]
+                    candidate_logits[p].append(
+                        self._topk_store(block, topk_store_k))
+                    for ln in layer_names:
+                        captured_u[p][ln][t] = gs["u_buf"][ln][
+                            p * n_sample:(p + 1) * n_sample].detach().to(
+                            "cpu").clone()
+                        captured_x[p][ln][t] = gs["x_buf"][ln][p].detach().to(
+                            "cpu").clone()
+                    next_tok = self._np_sample_clean(block[0], sampling_params)
+                    clean_tokens[p].append(int(next_tok))
+                    if self._np_is_eos(next_tok, sampling_params):
+                        states[p]["active"] = False
+                    else:
+                        self._np_commit_clean(states[p], next_tok)
+        finally:
+            st["mode"] = "off"
 
         return {
             "clean_tokens": clean_tokens,
@@ -775,6 +1072,381 @@ class WorkerExtension:
         }
         return attn_metadata, total_tokens, meta_bufs
 
+    def _np_build_attn_metadata_packed_persistent(self, per_row_block_ids,
+                                                  query_lens, seq_lens,
+                                                  slot_mapping, positions_cpu,
+                                                  max_seq_len_override=None):
+        """Persistent packed attn_metadata for the all-layer packed graph (E1).
+
+        Combines _np_build_attn_metadata_packed (num_reqs = R rows, each row
+        carrying its OWN seq_len / block_table / slot -- B_pack prompts) with
+        _np_build_attn_metadata_persistent (returns the GPU tensors the graph
+        pins by reference + freezes FlashAttention's max_seqlen_k at the cap).
+
+        per_row_block_ids: list (len R) of that row's prompt's block_ids list.
+        query_lens/seq_lens/slot_mapping/positions_cpu: per-row arrays (len R).
+        max_seq_len_override: freeze max_seqlen_k at the decode's CAP (the kernel
+        grid is sized by a frozen int; live per-row seqused_k is the seq_lens GPU
+        tensor, mutated per replay -- same contract as the single-prompt builder).
+
+        Returns (attn_metadata, total_tokens, meta_bufs). meta_bufs carries the
+        per-row slot_mapping / seq_lens GPU tensors the replay (E2) mutates in
+        place. Built ONCE; the FlashAttention builder stores these by reference."""
+        from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+
+        mr = self.model_runner
+        device = mr.device
+
+        num_reqs = len(query_lens)
+        total_tokens = int(sum(query_lens))
+        max_query_len = int(max(query_lens))
+        max_seq_len = (int(max_seq_len_override) if max_seq_len_override is not None
+                       else int(max(seq_lens)))
+
+        qsl_np = np.zeros(num_reqs + 1, dtype=np.int32)
+        qsl_np[1:] = np.cumsum(np.asarray(query_lens, dtype=np.int32))
+        qsl_cpu = torch.from_numpy(qsl_np)
+        qsl_gpu = qsl_cpu.to(device)
+
+        sl_cpu = torch.from_numpy(np.asarray(seq_lens, dtype=np.int32))
+        sl_gpu = sl_cpu.to(device)
+
+        max_blocks = int(
+            mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+        bt = torch.zeros((num_reqs, max_blocks), dtype=torch.int32, device=device)
+        for row, bids in enumerate(per_row_block_ids):
+            bt[row, : len(bids)] = torch.tensor(
+                bids, dtype=torch.int32, device=device)
+
+        slot_mapping_gpu = torch.tensor(
+            slot_mapping, dtype=torch.int64, device=device)
+        num_computed_tokens_cpu = torch.tensor(
+            [s - q for s, q in zip(seq_lens, query_lens)], dtype=torch.int32)
+
+        common = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu, query_start_loc_cpu=qsl_cpu,
+            seq_lens=sl_gpu, seq_lens_cpu=sl_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=num_reqs, num_actual_tokens=total_tokens,
+            max_query_len=max_query_len, max_seq_len=max_seq_len,
+            block_table_tensor=bt, slot_mapping=slot_mapping_gpu, causal=True,
+        )
+
+        attn_metadata = {}
+        for group_id, _ in enumerate(mr.kv_cache_config.kv_cache_groups):
+            for attn_group in mr.attn_groups[group_id]:
+                meta = attn_group.get_metadata_builder().build(
+                    common_prefix_len=0, common_attn_metadata=common,
+                    fast_build=True)
+                for layer in attn_group.layer_names:
+                    attn_metadata[layer] = meta
+        meta_bufs = {
+            "slot_mapping": slot_mapping_gpu,
+            "seq_lens_gpu": sl_gpu,
+            "seq_lens_cpu": sl_cpu,
+            "qsl_gpu": qsl_gpu,
+            "qsl_cpu": qsl_cpu,
+            "block_table": bt,
+        }
+        return attn_metadata, total_tokens, meta_bufs
+
+    def _np_capture_step_packed(self, model, device, bucket_b_pack, n_sample,
+                                layer_names, prefill_states, max_seq_len_cap):
+        """Capture ONE all-layer packed step forward into a CUDA graph at a FIXED
+        bucket width R = bucket_b_pack * (1 + n_sample). The packed analog of
+        _np_capture_step: instead of a single prompt's 1+N rows perturbing one
+        layer, B_pack prompts' (1+N) blocks all perturb EVERY matched layer in
+        one wide forward, each layer with its OWN per-layer u_buf/x_buf dict.
+
+        bucket_b_pack: fixed #prompts this graph serves (the active set is padded
+            up to this width at replay -- E2/E3).
+        layer_names: the matched layers to perturb (all in this one forward).
+        prefill_states: list (len bucket_b_pack) of per-prompt state dicts from
+            _np_prefill_packed; supplies block_ids / kv_cursor for the token-0 row.
+        max_seq_len_cap: frozen max_seqlen_k (largest seqused_k the decode reaches,
+            prompt_len + max_tokens) -- ESSENTIAL, same reason as _np_capture_step.
+
+        ===================== C-2 INVARIANT (READ BEFORE EDITING) =============
+        The per-layer u_buf/x_buf DICTS installed on st BELOW are the EXACT tensor
+        objects the captured PerturbedLinear.forward pins by pointer. AFTER
+        capture you MUST NOT rebind st["u_buf"] / st["x_buf"] to new dict/tensor
+        objects -- the graph recorded those storages. The replay (E2) refills
+        them IN PLACE via copy_ (u_buf[ln].copy_(...), x_buf[ln] is written by the
+        forward). Rebinding -> the graph reads stale buffers -> a graph that
+        silently perturbs nothing. This method returns the dicts in graph_state so
+        the replay mutates the SAME objects. Likewise clean_row_idx /
+        perturbed_row_idx are pinned (scatter indices baked into the captured op).
+        =======================================================================
+
+        Returns a graph_state dict (graph + persistent input/meta buffers + the
+        per-layer dicts + scatter indices + bucket_b_pack) for E2/E3."""
+        from vllm.config.compilation import CUDAGraphMode
+
+        assert len(prefill_states) == bucket_b_pack, (
+            f"_np_capture_step_packed: got {len(prefill_states)} prefill states "
+            f"for bucket_b_pack={bucket_b_pack}")
+        R = bucket_b_pack * (1 + n_sample)
+        width = 1 + n_sample
+
+        # Row layout: prompt p owns rows [p*width : p*width+width]; row p*width is
+        # clean, the next n_sample are perturbed. Same convention as
+        # run_np_decode_packed (_packed_row_blocks).
+        blocks = _packed_row_blocks(bucket_b_pack, n_sample)
+        clean_row_idx = torch.tensor(
+            [blk["clean"] for blk in blocks], dtype=torch.long, device=device)
+        perturbed_row_idx = torch.tensor(
+            [r for blk in blocks for r in blk["perturbed"]],
+            dtype=torch.long, device=device)
+
+        # Per-layer buffer DICTS at PACKED shapes (C-2: pinned BEFORE capture).
+        # u_buf[ln]: [bucket_b_pack*n_sample, d_out] (one row per perturbed row,
+        # prompt-major, aligned with perturbed_row_idx). x_buf[ln]: [bucket_b_pack,
+        # d_in] (one clean-input row per prompt, captured via clean_row_idx).
+        subset = {ln: self.np_modules[ln] for ln in layer_names}
+        u_buf_dict, x_buf_dict = {}, {}
+        for ln, wrapped in subset.items():
+            w = wrapped.wrapped.weight                 # [d_out, d_in]
+            assert w.is_floating_point(), (
+                f"_np_capture_step_packed: layer {ln!r} weight must be floating "
+                f"(got {w.dtype}) for u_buf dtype parity.")
+            d_out, d_in = int(w.shape[0]), int(w.shape[1])
+            u_buf_dict[ln] = torch.zeros(
+                bucket_b_pack * n_sample, d_out, device=device, dtype=w.dtype)
+            x_buf_dict[ln] = torch.zeros(
+                bucket_b_pack, d_in, device=device, dtype=w.dtype)
+
+        st = self._ensure_np_state()
+        sigma = float(st.get("sigma", 0.0))
+        # Install the EXACT dict objects the graph will pin. NEVER rebind these
+        # after capture (C-2). Replay mutates u_buf_dict[ln] / x_buf_dict[ln] in
+        # place; the forward reads st["u_buf"][self.name] during capture.
+        st["mode"] = "perturb_all_layers"
+        st["n_clean_rows"] = 1
+        st["u_buf"] = u_buf_dict
+        st["x_buf"] = x_buf_dict
+        st["perturbed_row_idx"] = perturbed_row_idx
+        st["clean_row_idx"] = clean_row_idx
+        st["sigma"] = sigma
+
+        # Persistent input buffers (fixed shape R for the graph's life).
+        input_ids_buf = torch.zeros(R, dtype=torch.long, device=device)
+        positions_buf = torch.zeros(R, dtype=torch.long, device=device)
+
+        # Build the packed attn_metadata ONCE at the bucket width. Each prompt's
+        # (1+N) rows carry its block_ids + token-0 seq_len (q_pos+1); max_seqlen_k
+        # is frozen at the cap. Per replay (E2) we mutate the clean-row slots +
+        # per-row seqused_k in place; block_table is fixed (prefix KV).
+        per_row_block_ids, slot_mapping, positions, seq_lens, query_lens = (
+            [], [], [], [], [])
+        token0 = []
+        for p, state in enumerate(prefill_states):
+            block_ids = state["block_ids"]
+            block_size = state["block_size"]
+            prompt_len = state["prompt_len"]
+            q_pos = state["kv_cursor"]
+            if q_pos < prompt_len:
+                q_token = state["prompt_token_ids"][q_pos]
+            else:
+                q_token = state["committed_tokens"][q_pos - prompt_len]
+            clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+            # clean row writes KV; perturbed rows PAD(-1) -> reshape_and_cache skips.
+            per_row_block_ids += [block_ids] * width
+            slot_mapping += [clean_slot] + [-1] * n_sample
+            positions += [q_pos] * width
+            seq_lens += [q_pos + 1] * width
+            query_lens += [1] * width
+            token0 += [(int(q_token), int(q_pos))] * width
+
+        attn_meta, total, meta_bufs = (
+            self._np_build_attn_metadata_packed_persistent(
+                per_row_block_ids, query_lens, seq_lens, slot_mapping, positions,
+                max_seq_len_override=max_seq_len_cap))
+
+        # Seed input buffers with token-0 ids/positions (per-row; prompts differ).
+        ids_cpu = torch.tensor([t[0] for t in token0], dtype=torch.long)
+        pos_cpu = torch.tensor([t[1] for t in token0], dtype=torch.long)
+        input_ids_buf.copy_(ids_cpu.to(device))
+        positions_buf.copy_(pos_cpu.to(device))
+
+        # Warm up a few eager steps so cuBLAS workspaces / autotune settle before
+        # capture (vLLM does the same before its own capture).
+        for _ in range(3):
+            with torch.no_grad(), set_forward_context(
+                attn_meta, self.model_runner.vllm_config, num_tokens=total,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE):
+                _ = model(input_ids=input_ids_buf, positions=positions_buf)
+        torch.cuda.synchronize()
+
+        # Capture. Graph-pool-release gotcha (VERBATIM from _np_capture_step): a
+        # prior graph is still alive (use_count>0) when we capture the next one,
+        # and capturing into a pool a live graph holds trips CUDACachingAllocator's
+        # "use_count > 0" assert. Release the PREVIOUS graph (freeing its pool)
+        # before capturing so each graph owns its own default pool.
+        prev = getattr(self, "_np_active_graph", None)
+        if prev is not None:
+            del prev
+            self._np_active_graph = None
+            import gc as _gc
+            _gc.collect()
+            torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.no_grad(), set_forward_context(
+            attn_meta, self.model_runner.vllm_config, num_tokens=total,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE):
+            with torch.cuda.graph(graph):
+                hidden_buf = model(input_ids=input_ids_buf, positions=positions_buf)
+        self._np_active_graph = graph
+
+        # Post-fix the perturbed-row slots to PAD(-1) once. Only the clean rows'
+        # slots (clean_row_idx) change per token; perturbed rows never write KV.
+        meta_bufs["slot_mapping"][perturbed_row_idx] = -1
+
+        return {
+            "graph": graph,
+            "input_ids_buf": input_ids_buf,
+            "positions_buf": positions_buf,
+            "hidden_buf": hidden_buf,
+            "meta_bufs": meta_bufs,
+            "attn_meta": attn_meta,
+            "total": total,
+            # C-2: the EXACT pinned objects -- replay mutates these IN PLACE.
+            "u_buf": u_buf_dict,
+            "x_buf": x_buf_dict,
+            "clean_row_idx": clean_row_idx,
+            "perturbed_row_idx": perturbed_row_idx,
+            "bucket_b_pack": bucket_b_pack,
+            "n_sample": n_sample,
+            "layer_names": list(layer_names),
+        }
+
+    def _np_fill_u_buf_all_layers_packed(self, u_buf_dict, np_cfg, layer_names,
+                                         step, slot_rollout_ids, n_sample):
+        """C-6 single noise-refill site for the all-layer PACKED graph (E2).
+
+        The all-layer analog of run_np_decode_packed's per-prompt refill loop, but
+        for EVERY matched layer's u_buf at once. Each layer's packed u_buf is
+        [bucket_b_pack*n_sample, d_out] prompt-major: rows [p*n_sample : (p+1)*
+        n_sample] belong to slot p. We seed slot p's N rows with ITS rollout id
+        slot_rollout_ids[p] and the SAME noise_seed(global_seed, step, layer,
+        rollout, q) key the eager packed / serial paths use -> the bytes written
+        are bit-identical to those paths (parity-by-construction, spec §3/§5.2).
+
+        slot_rollout_ids: list (len bucket_b_pack) of the rollout id bound to each
+        graph SLOT. For a FINISHED/PAD slot (output discarded) the id is still a
+        valid int; the noise written is harmless (those rows are ignored), but we
+        fill them anyway so the captured buffer is never read undefined -- keeping
+        the replay deterministic regardless of which slots are active this token.
+        """
+        bucket_b_pack = len(slot_rollout_ids)
+        for layer_name in layer_names:
+            buf = u_buf_dict[layer_name]          # [bucket_b_pack*n_sample, d_out]
+            d_out = buf.shape[1]
+            for p in range(bucket_b_pack):
+                rid = int(slot_rollout_ids[p])
+                for q in range(n_sample):
+                    seed = noise_seed(int(np_cfg["global_seed"]), int(step),
+                                      layer_name, rid, q)
+                    u = draw_noise(seed, (d_out,), buf.device, buf.dtype,
+                                   np_cfg["sample_method"])
+                    buf[p * n_sample + q].copy_(u)
+
+    def _np_replay_step_packed(self, model, states, active_idx, n_sample,
+                               layer_names, np_cfg, step, slot_rollout_ids,
+                               graph_state):
+        """Run ONE decode token across all bucket prompts via packed CUDA-graph
+        replay (E2). The packed analog of _np_replay_step.
+
+        states: list (len bucket_b_pack) of per-slot state dicts (from
+            _np_prefill_packed); slot p is the prompt bound to graph slot p at
+            capture (its KV is baked into the graph's block_table -- a prompt
+            CANNOT change slots). states[p]["active"] flags whether slot p decodes
+            this token.
+        active_idx: indices into states of slots active THIS token (len <=
+            bucket_b_pack). Inactive slots are FINISHED (hit EOS) or PAD (the
+            active set is < the bucket width). All are C-4 pad-handled.
+        slot_rollout_ids: rollout id bound to each slot (parity seed identity).
+        graph_state: the dict from _np_capture_step_packed (graph + persistent
+            input/meta buffers + per-layer u_buf/x_buf dicts + clean/perturbed row
+            indices + bucket_b_pack). Mutated IN PLACE; never rebound (C-2).
+
+        Returns [R, vocab] logits (R = bucket_b_pack*(1+n_sample)). The caller
+        slices each ACTIVE slot's (1+n_sample) block; finished/pad rows are
+        discarded but kept attention-well-defined (C-4)."""
+        gs = graph_state
+        bucket_b_pack = int(gs["bucket_b_pack"])
+        assert len(states) == bucket_b_pack, (
+            f"_np_replay_step_packed: {len(states)} states for bucket width "
+            f"{bucket_b_pack}")
+        width = 1 + n_sample
+        active_set = set(int(i) for i in active_idx)
+
+        # --- Per-slot metadata (C-4): active -> real; finished/pad -> last-valid.
+        slot_states = []
+        for p in range(bucket_b_pack):
+            st_p = states[p]
+            block_ids = st_p["block_ids"]
+            block_size = st_p["block_size"]
+            prompt_len = st_p["prompt_len"]
+            q_pos = int(st_p["kv_cursor"])
+            if q_pos < prompt_len:
+                q_token = st_p["prompt_token_ids"][q_pos]
+            else:
+                q_token = st_p["committed_tokens"][q_pos - prompt_len]
+            # LAST-VALID fallback for a pad/finished slot: the slot has always
+            # decoded at least its token-0 (q_pos >= prompt_len-1 >= 0 after
+            # prefill), so kv_cursor / its token are a valid in-range position even
+            # for a just-finished prompt. (We never advance kv_cursor for a slot
+            # that hit EOS, so kv_cursor stays the last real position -> seq_len>0.)
+            is_active = p in active_set and bool(st_p["active"])
+            clean_slot = self._np_slot_for_position(block_ids, block_size, q_pos)
+            slot_states.append({
+                "active": is_active,
+                "q_token": int(q_token),
+                "q_pos": q_pos,
+                "clean_slot": int(clean_slot),
+                "last_q_token": int(q_token),
+                "last_q_pos": q_pos,
+            })
+        meta = _packed_replay_row_meta(slot_states)
+
+        # --- Refill persistent input + metadata buffers IN PLACE (pointers stable;
+        # the graph holds these by reference). Row layout: slot p owns rows
+        # [p*width : p*width+width]; row p*width is clean, the next N perturbed.
+        ids_buf = gs["input_ids_buf"]
+        pos_buf = gs["positions_buf"]
+        mb = gs["meta_bufs"]
+        sm = mb["slot_mapping"]           # [R] int64; perturbed rows fixed -1 at capture
+        sl = mb["seq_lens_gpu"]           # [R] int32 seqused_k (the load-bearing tensor)
+        for p in range(bucket_b_pack):
+            m = meta[p]
+            base = p * width
+            # all width rows query the same token at the same position.
+            ids_buf[base:base + width].fill_(m["q_token"])
+            pos_buf[base:base + width].fill_(m["q_pos"])
+            sl[base:base + width].fill_(m["seq_len"])
+            # clean row's slot is m["clean_slot"] (-1 for finished/pad). Perturbed
+            # rows were fixed to -1 at capture -- never write KV -- so we only set
+            # the clean row's slot here.
+            sm[base].fill_(m["clean_slot"])
+
+        # --- C-6 single noise-refill site: ALL layers' u_buf, seeded per slot.
+        # TIMING-ISOLATION HARNESS (NP_BENCH_SKIP_NOISE=1): skip the per-token
+        # refill to measure decode cost WITHOUT the 896 host-orchestrated
+        # draw_noise calls/token. The orchestrator pre-fills u_buf ONCE before the
+        # loop so the buffers still hold valid (non-garbage) noise -> the forward
+        # is representative, only the per-token regeneration is removed. This
+        # BREAKS gradient correctness (stale noise) and is for wall-clock
+        # attribution ONLY; never set it in a training run.
+        if not os.environ.get("NP_BENCH_SKIP_NOISE"):
+            self._np_fill_u_buf_all_layers_packed(
+                gs["u_buf"], np_cfg, layer_names, step, slot_rollout_ids, n_sample)
+
+        # --- Replay + sync + eager per-token logits over ALL rows.
+        gs["graph"].replay()
+        torch.cuda.synchronize()
+        logits = model.compute_logits(gs["hidden_buf"])   # [R, vocab]
+        return logits
+
     # -- helpers (vLLM-0.11.0-specific, against gpu_model_runner internals) --
 
     def _np_slot_for_position(self, block_ids, block_size, position):
@@ -1054,6 +1726,20 @@ class WorkerExtension:
             logits = model.compute_logits(hidden)
         return logits
 
+    def _topk_store(self, logits, k):
+        """Store top-k log-probs (GPU-side log_softmax over FULL vocab) + ids.
+
+        log_softmax MUST be over the full vocab BEFORE slicing, else the
+        normalizer is wrong. ids come from the clean/student row (0); ALL rows
+        are gathered on those same ids -> [1+N, k] log-probs + [k] ids, both on
+        CPU. Replaces the full-vocab D2H copy in the decode drivers (the scorer
+        consumes top-k log-probs directly). k is clamped to the vocab size.
+        """
+        lp = torch.log_softmax(logits.float(), dim=-1)
+        k = min(int(k), lp.shape[-1])
+        ids = torch.topk(lp[0], k).indices
+        return lp[:, ids].to("cpu"), ids.to("cpu")
+
     def _np_sample_clean(self, logits_row0, sampling_params):
         """Sample / argmax the clean next token. Greedy when temperature==0."""
         temp = getattr(sampling_params, "temperature", 0.0) or 0.0
@@ -1177,6 +1863,29 @@ class WorkerExtension:
                                   device=self.device)
         return self.apply_node_update(layer_name, dw, lr, update_clip)
 
+    def assemble_all_layers_and_apply(self, layer_signals, L_q_steps, L_clean_steps,
+                                      sigma, sample_mode, normalize, token_agg,
+                                      lr, update_clip):
+        """One-RPC bundle of (assemble δW) + (apply δW locally) for ALL layers.
+
+        layer_signals: {name: {"u": u_steps, "x": x_steps}}. The shared loss
+        L_q_steps/L_clean_steps (one combined loss per (token, sample), scored on
+        the clean rollout) is passed ONCE and reused for every layer -- never
+        copied T×L times (the C-5 bug this design avoids). We detach the shared
+        L_q_steps once before the loop, batch-assemble every layer's δW with one
+        GPU reduce per layer (device=self.device), then apply each in-place.
+
+        Returns {name: ‖δW‖} (post-clip) so the trainer can log + assert >0 per layer.
+        """
+        L_q_dev = [lq.detach() if hasattr(lq, "detach") else torch.as_tensor(lq)
+                   for lq in L_q_steps]
+        dws = assemble_all_layers(L_q_dev, L_clean_steps, layer_signals,
+                                  sigma=sigma, sample_mode=sample_mode,
+                                  normalize=normalize, token_agg=token_agg,
+                                  device=self.device)
+        return {ln: float(self.apply_node_update(ln, dw, lr, update_clip))
+                for ln, dw in dws.items()}
+
 
 def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
                          sigma, sample_mode, normalize, token_agg, eps=1e-6,
@@ -1227,6 +1936,41 @@ def assemble_layer_delta(L_q_per_step, L_clean_per_step, u_per_step, x_per_step,
     return dw.to("cpu", dtype=torch.float32)
 
 
+def assemble_all_layers(L_q_per_step, L_clean_per_step, layer_signals,
+                        sigma, sample_mode, normalize, token_agg, device=None):
+    """Batched assemble for ALL layers. layer_signals: {name: {"u":[...], "x":[...]}}.
+    L_q/L_clean are SHARED across layers (one combined loss per (token,sample)).
+    Returns {name: dW [d_out,d_in] on CPU}. Reuses assemble_layer_delta per layer."""
+    return {ln: assemble_layer_delta(L_q_per_step, L_clean_per_step,
+                                     sig["u"], sig["x"], sigma=sigma,
+                                     sample_mode=sample_mode, normalize=normalize,
+                                     token_agg=token_agg, device=device)
+            for ln, sig in layer_signals.items()}
+
+
+def _select_bucket(B, b_pack_buckets):
+    """Pick the ONE graph bucket width for B prompts (E3). The smallest bucket
+    >= B from b_pack_buckets, so all B prompts fit one captured graph and the
+    leftover slots are PAD rows (C-4). Raises if B exceeds the largest bucket --
+    the caller must chunk B down to <= max(b_pack_buckets) (the graphed driver
+    needs a FIXED-width graph; it cannot wave a single graph over more prompts
+    than it was captured for). B must be >= 1.
+
+    Examples (buckets [2,4,8,16]): B=1->2, B=3->4, B=4->4, B=5->8, B=16->16."""
+    if int(B) < 1:
+        raise ValueError(f"_select_bucket: B must be >= 1 (got {B})")
+    buckets = sorted(int(b) for b in b_pack_buckets)
+    if not buckets:
+        raise ValueError("_select_bucket: b_pack_buckets is empty")
+    for b in buckets:
+        if b >= int(B):
+            return b
+    raise ValueError(
+        f"_select_bucket: B={B} exceeds the largest bucket {buckets[-1]}; the "
+        f"caller must chunk B down to <= {buckets[-1]} (b_pack_buckets="
+        f"{buckets}).")
+
+
 def _packed_row_blocks(b_pack, n_sample):
     """Row layout for a packed wave (spec §4.1). Each prompt p owns a contiguous
     block of (1+n_sample) rows: row p*(1+n_sample) is its clean row, the next
@@ -1239,6 +1983,58 @@ def _packed_row_blocks(b_pack, n_sample):
         blocks.append({"clean": base,
                        "perturbed": list(range(base + 1, base + width))})
     return blocks
+
+
+def _packed_replay_row_meta(slot_states):
+    """C-4 pad-row metadata for the packed-graph replay (pure Python, testable).
+
+    The captured packed graph serves a FIXED set of `bucket_b_pack` prompt SLOTS;
+    slot p is bound to one prompt (its KV block_ids were baked into the graph's
+    block_table at capture, so a prompt CANNOT be moved to another slot -- it must
+    stay in its own slot for the whole decode). Each slot owns (1+n_sample) rows:
+    one clean row (writes KV) + n_sample perturbed rails (slot=-1, never write KV).
+
+    Input `slot_states`: list (len bucket_b_pack), one dict per slot, with the
+    fields needed to derive THIS token's per-slot metadata:
+      active       : bool -- ACTIVE (decode this token) vs FINISHED/PAD.
+      q_token      : int  -- input id queried this token.
+      q_pos        : int  -- absolute position (== seq_len-1).
+      clean_slot   : int  -- KV slot the clean row writes when ACTIVE.
+      last_q_token : int  -- the slot's LAST VALID token id (for pad reuse).
+      last_q_pos   : int  -- the slot's LAST VALID position (for pad reuse).
+    (The caller fills q_token/q_pos/clean_slot from states[p] for active slots and
+    last_q_* from the slot's last committed token; this helper just *selects*.)
+
+    Per slot returns {"q_token","q_pos","seq_len","clean_slot"}:
+      ACTIVE slot   -> the REAL values; clean_slot = its KV slot; seq_len=q_pos+1.
+      FINISHED/PAD  -> C-4: the row's output is DISCARDED, but the kernel still
+        processes all R rows, so the row must be attention-WELL-DEFINED. Reuse the
+        slot's LAST VALID (q_token,q_pos) -- NEVER 0/stale -- so seq_len=q_pos+1>0
+        and the position is in-range; FORCE clean_slot=-1 (a finished prompt
+        writes NO KV; its clean row must not corrupt the cache). A zero seqused_k
+        makes FlashAttention's KV iteration undefined (the #1 way to crash /
+        corrupt the ACTIVE rows' attention) -- that is exactly what this avoids.
+    """
+    meta = []
+    for s in slot_states:
+        if s["active"]:
+            q_pos = int(s["q_pos"])
+            meta.append({
+                "q_token": int(s["q_token"]),
+                "q_pos": q_pos,
+                "seq_len": q_pos + 1,
+                "clean_slot": int(s["clean_slot"]),
+            })
+        else:
+            # C-4: last-valid (never zero) seq_len/position; clean_slot forced -1.
+            q_pos = int(s["last_q_pos"])
+            meta.append({
+                "q_token": int(s["last_q_token"]),
+                "q_pos": q_pos,
+                "seq_len": q_pos + 1,
+                "clean_slot": -1,
+            })
+    return meta
 
 
 def _assign_rollout_ids(step, batch_size, n_rollout):
@@ -1257,3 +2053,41 @@ def _assign_rollout_ids(step, batch_size, n_rollout):
         for r in range(int(n_rollout)):
             ids.append((base + b) * int(n_rollout) + r)
     return ids
+
+
+def _pad_waves_to_pack_width(slot_pids, slot_rids, pack_width):
+    """Chunk (prompt,rollout) slots into FIXED-width waves for the graphed packed
+    all-layer driver. Every wave has EXACTLY `pack_width` prompts -- the final
+    short wave is PADDED up to `pack_width` by REPEATING slot 0's prompt/rollout
+    id. This guarantees `_select_bucket(pack_width)` picks the SAME bucket for
+    every wave, so `run_np_decode_packed_graphed` captures ONE graph and never
+    trips the CUDACachingAllocator "use_count>0" assert from a 2nd distinct-bucket
+    capture while the first is cache-pinned (the E3 multi-bucket carry-forward).
+
+    Returns a list of (wave_pids, wave_rids, real_count) tuples: wave_pids/
+    wave_rids are length `pack_width`; real_count (<= pack_width) is how many of
+    the leading slots are real -- the trainer slices outputs to [:real_count] and
+    discards the padded tail. slot_pids/slot_rids must be non-empty and same len."""
+    if len(slot_pids) != len(slot_rids):
+        raise ValueError(
+            f"_pad_waves_to_pack_width: {len(slot_pids)} pids vs "
+            f"{len(slot_rids)} rids")
+    if not slot_pids:
+        raise ValueError("_pad_waves_to_pack_width: empty slots")
+    pack_width = int(pack_width)
+    if pack_width < 1:
+        raise ValueError(
+            f"_pad_waves_to_pack_width: pack_width must be >= 1 (got {pack_width})")
+    waves = []
+    for w0 in range(0, len(slot_pids), pack_width):
+        wave_pids = list(slot_pids[w0:w0 + pack_width])
+        wave_rids = list(slot_rids[w0:w0 + pack_width])
+        real_count = len(wave_pids)
+        # Pad the short final wave up to pack_width by repeating slot 0 (any valid
+        # prompt/id works -- the padded tail's outputs are discarded).
+        while len(wave_pids) < pack_width:
+            wave_pids.append(list(slot_pids[0]) if isinstance(slot_pids[0], list)
+                             else slot_pids[0])
+            wave_rids.append(slot_rids[0])
+        waves.append((wave_pids, wave_rids, real_count))
+    return waves

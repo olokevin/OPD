@@ -59,3 +59,10 @@ def test_layer_schedule_layerwise_roundrobin():
 def test_layer_schedule_all_at_once():
     matched = ["A", "B", "C"]
     assert active_layers_for_step(matched, step=5, en_layerwise=False) == ["A", "B", "C"]
+
+
+def test_all_layer_mode_returns_all_in_forward_order():
+    matched = ["model.layers.2.mlp.down_proj", "model.layers.10.mlp.down_proj"]
+    # en_layerwise=False already returns all matched, in the SAME order (NOT sorted)
+    out = active_layers_for_step(matched, step=0, en_layerwise=False)
+    assert out == matched  # forward/resolve order preserved; layers.2 before layers.10

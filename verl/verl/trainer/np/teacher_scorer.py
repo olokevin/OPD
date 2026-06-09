@@ -45,15 +45,30 @@ class TeacherScorer:
     top-k set and call reverse_kl_topk per (token, sample). Returns L_t^(q).
     """
 
-    def __init__(self, teacher_engine, top_k, top_k_strategy, teacher_temperature, weight_mode):
+    def __init__(self, teacher_engine, top_k, top_k_strategy, teacher_temperature,
+                 weight_mode, teacher_batch_size=16):
         self.engine = teacher_engine
         self.top_k = int(top_k)
         self.top_k_strategy = top_k_strategy
         self.teacher_temperature = float(teacher_temperature)
         self.weight_mode = weight_mode
+        self.teacher_batch_size = int(teacher_batch_size)
 
     def score_rollout(self, prefix_token_ids, candidate_logits):
-        """candidate_logits: list over steps of [1+n_sample, vocab] (CPU tensors).
+        """Score per-step candidate distributions into per-token reverse-KL losses.
+
+        Two accepted input formats (auto-detected from candidate_logits[0]):
+
+          1. LEGACY full-vocab: list over steps of FULL-vocab [1+n_sample, vocab]
+             log-prob-able CPU tensors. Kept verbatim below; also the parity
+             oracle for the new path.
+          2. C1 TOP-K TUPLE: list over steps of (topk_logp [1+N, k], ids [k]),
+             where `topk_logp` are the student rows' log-probs (already
+             log_softmax'd over the FULL vocab, then sliced) over the stored
+             student top-`k` `ids`, and `ids` are those student top-`k` vocab
+             ids in DESCENDING student-logp order (torch.topk default). The
+             stored window width k (topk_store_k, default 512) is wide enough
+             that union/intersection still see teacher ids inside it.
 
         Returns (L_q_per_step, L_clean_per_step):
           L_q_per_step[t]:   [n_sample] reverse-KL of each perturbed candidate vs teacher
@@ -76,10 +91,51 @@ class TeacherScorer:
         teacher's top-k have probability strictly less than the minimum it
         surfaced, but using the minimum prevents log-prob domination.
         See spec §3 and §4 (top_k_strategy).
+
+        New-path approximation (TOP-K TUPLE only): ANY scored teacher id that
+        falls OUTSIDE the stored student window (`store_k < vocab`) has its true
+        student log-prob unavailable (the full-vocab path read it directly). We
+        substitute the per-row MIN of the stored student top-k logps (`s_floor`)
+        for that id (a calibrated floor, symmetric to how teacher ids missing
+        from the teacher surface are filled with the teacher MIN). This affects:
+          - `union`: teacher ids outside the student top-`top_k` but still
+            outside the stored window.
+          - `only_tch`: teacher ids ranked below the student's top-`store_k`.
+          - `intersection`: only its empty-intersection fallback, which scores
+            the full teacher set and thus inherits the same `only_tch` floor.
+        Exactness vs the legacy full-vocab path:
+          - `only_stu` is ALWAYS bit-exact — its scored ids are the student
+            top-`top_k`, a strict subset of the stored window, so no id is ever
+            floored. This is the lossless production default.
+          - `only_tch` / `intersection`-fallback / `union` are exact ONLY when
+            the window covers the full vocab (`store_k >= vocab`); with a finite
+            window they use the `s_floor` approximation above for any
+            out-of-window id and can deviate (empirically rel-Frobenius ~0.2–0.3
+            for `only_tch` at small `store_k`).
+        When `store_k >= vocab` the window is the full vocab, no id is ever
+        out-of-window, and ALL strategies are exact.
         """
-        L_q_per_step, L_clean_per_step = [], []
+        if not candidate_logits:
+            return [], []
         teacher_logp_by_pos, teacher_ids_by_pos = self._teacher_topk_logprobs(
             prefix_token_ids, len(candidate_logits))
+        return self._score_one(candidate_logits, teacher_logp_by_pos, teacher_ids_by_pos)
+
+    def _score_one(self, candidate_logits, teacher_logp_by_pos, teacher_ids_by_pos):
+        """Score one prompt's candidate logits given PRE-FETCHED teacher logprobs.
+
+        Pulled out of score_rollout so the batched path (score_wave) can pass
+        teacher logprobs fetched by a single batched generate call and reuse the
+        exact same scoring body. Auto-detects the C1 top-k tuple format vs the
+        legacy full-vocab format from candidate_logits[0], matching score_rollout.
+        """
+        if not candidate_logits:
+            return [], []
+        if isinstance(candidate_logits[0], tuple):
+            return self._score_rollout_topk(candidate_logits, teacher_logp_by_pos,
+                                            teacher_ids_by_pos)
+
+        L_q_per_step, L_clean_per_step = [], []
         for t, cl in enumerate(candidate_logits):
             s_full_logp = torch.log_softmax(cl.float(), dim=-1)  # [1+n_sample, vocab]
             t_ids = teacher_ids_by_pos[t]
@@ -94,6 +150,109 @@ class TeacherScorer:
                 for q in range(s_logp.shape[0] - 1)
             ]))
         return L_q_per_step, L_clean_per_step
+
+    def _score_rollout_topk(self, candidate_logits, teacher_logp_by_pos,
+                            teacher_ids_by_pos):
+        """New path: candidate_logits is a list of (topk_logp [1+N, k], ids [k]).
+
+        Mirrors the legacy full-vocab loop but (a) sources the student top-k from
+        the stored window and (b) computes reverse-KL for all 1+N rows in ONE
+        vectorized reduce per step instead of a per-row Python loop. The reduce
+        is the row-batched form of reverse_kl_topk; see score_rollout docstring
+        for the union out-of-window student-logp approximation. Teacher logprobs
+        are pre-fetched by the caller (score_rollout / score_wave) so the serial
+        and batched paths share this body.
+        """
+        L_q_per_step, L_clean_per_step = [], []
+        for t, (topk_logp, stored_ids) in enumerate(candidate_logits):
+            # topk_logp: [1+N, k] student rows' full-vocab log-softmax over stored_ids.
+            t_ids = teacher_ids_by_pos[t]
+            t_logp = teacher_logp_by_pos[t]
+            fallback = float(t_logp.min().item()) if t_logp.numel() else -50.0
+            # Per-row student-logp floor for union ids outside the stored window.
+            s_floor = topk_logp.min(dim=-1).values  # [1+N]
+
+            # s_logp_sel: [1+N, k'] student log-probs over the selected id set;
+            # t_aligned: [k'] teacher log-probs aligned to the same ids.
+            s_logp_sel, t_aligned = self._select_ids_from_window(
+                stored_ids, topk_logp, t_ids, t_logp, fallback, s_floor)
+
+            losses = self._reverse_kl_rows(s_logp_sel, t_aligned)  # [1+N]
+            L_clean_per_step.append(float(losses[0]))
+            L_q_per_step.append(losses[1:].clone())
+        return L_q_per_step, L_clean_per_step
+
+    def _reverse_kl_rows(self, s_logp, t_logp):
+        """Row-batched reverse_kl_topk: same formula, reduced over the last dim.
+
+        s_logp: [R, k'] (per-row student log-probs over the scored set)
+        t_logp: [k']    (teacher log-probs over the SAME set, shared across rows)
+        Returns [R] reverse-KL, identical to calling reverse_kl_topk per row.
+        """
+        diff = s_logp - t_logp                       # [R, k'] (t broadcasts)
+        if self.weight_mode == "student_p":
+            w = s_logp.exp()                         # [R, k']
+        elif self.weight_mode == "teacher_p":
+            w = t_logp.exp().expand_as(diff)         # [k'] -> [R, k']
+        elif self.weight_mode == "none":
+            w = torch.ones_like(diff)
+        else:
+            raise ValueError(f"unknown reward_weight_mode: {self.weight_mode!r}")
+        return (w * diff).sum(dim=-1)                 # [R]
+
+    def _select_ids_from_window(self, stored_ids, topk_logp, t_ids, t_logp,
+                                fallback, s_floor):
+        """Windowed analogue of _select_ids for the C1 top-k tuple path.
+
+        Returns (s_logp_sel [1+N, k'], t_aligned [k']) where the scored id set
+        matches what _select_ids would produce, the teacher logps are aligned
+        the same way (missing -> `fallback`), and the student logps are looked
+        up from the stored window (any scored id outside the window -> per-row
+        `s_floor`; can happen for union, only_tch, or the intersection-fallback
+        whenever store_k < vocab — see score_rollout for the exactness scope).
+
+        stored_ids are the student top-`topk_store_k` in DESCENDING student-logp
+        order, so stored_ids[:top_k] IS the student top-`top_k` (== the
+        torch.topk(s_full, top_k) set the legacy _select_ids computes).
+        """
+        # Map stored id -> its column in topk_logp (student log-probs per row).
+        stored_list = stored_ids.tolist()
+        col_of = {int(i): j for j, i in enumerate(stored_list)}
+        t_map = {int(i): float(lp) for i, lp in zip(t_ids.tolist(), t_logp.tolist())}
+
+        strat = self.top_k_strategy
+        if strat == "only_tch":
+            ids_list = [int(i) for i in t_ids.tolist()]
+        else:
+            s_top = stored_list[:self.top_k]          # student top-`top_k`
+            s_set = set(s_top)
+            t_set = set(int(i) for i in t_ids.tolist())
+            if strat == "only_stu":
+                ids_list = sorted(s_set)
+            elif strat == "intersection":
+                ids_list = sorted(s_set & t_set)
+            elif strat in ("union", "union-intersection"):
+                ids_list = sorted(s_set | t_set)
+            else:
+                raise ValueError(f"unknown top_k_strategy: {strat!r}")
+            if not ids_list:
+                # Defensive: empty intersection -> score the teacher set verbatim.
+                ids_list = [int(i) for i in t_ids.tolist()]
+
+        # Build student log-probs [1+N, k'] column-by-column, and teacher [k'].
+        s_cols, t_vals = [], []
+        for i in ids_list:
+            j = col_of.get(i)
+            if j is not None:
+                s_cols.append(topk_logp[:, j])        # [1+N] exact student logp
+            else:
+                # scored id outside the stored window -> per-row floor
+                # (union / only_tch / intersection-fallback when store_k < vocab).
+                s_cols.append(s_floor)
+            t_vals.append(t_map.get(i, fallback))
+        s_logp_sel = torch.stack(s_cols, dim=1)       # [1+N, k']
+        t_aligned = torch.tensor(t_vals, dtype=topk_logp.dtype)
+        return s_logp_sel, t_aligned
 
     def _select_ids(self, s_clean_full_logp, t_ids, t_logp, fallback):
         """Compute the union/intersection/etc id set per self.top_k_strategy and
@@ -131,25 +290,81 @@ class TeacherScorer:
                                  dtype=t_logp.dtype)
         return ids, t_aligned
 
-    def _teacher_topk_logprobs(self, prefix_token_ids, num_steps):
-        """Query the teacher engine for per-position top-k log-probs over the response.
+    def _sampling_params(self):
+        """The SamplingParams used to elicit per-position teacher prompt_logprobs.
 
-        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        Shared by the serial (_teacher_topk_logprobs) and batched (score_wave)
+        teacher generate calls so they can't drift.
         """
-        import ray
         from vllm import SamplingParams
+        return SamplingParams(temperature=self.teacher_temperature, max_tokens=1,
+                              prompt_logprobs=self.top_k)
 
-        sp = SamplingParams(temperature=self.teacher_temperature, max_tokens=1,
-                            prompt_logprobs=self.top_k)
-        out = self.engine.generate.remote({"prompt_token_ids": prefix_token_ids}, sp,
-                                          use_tqdm=False)
-        out = ray.get(out)[0]
-        # prompt_logprobs: list[dict[token_id -> Logprob]] aligned to prompt positions.
-        # The response region is the last num_steps positions of prefix_token_ids.
-        plp = out.prompt_logprobs[-num_steps:]
+    @staticmethod
+    def _parse_prompt_logprobs(request_output, num_steps):
+        """Parse one vLLM RequestOutput's prompt_logprobs into per-position lists.
+
+        prompt_logprobs: list[dict[token_id -> Logprob]] aligned to prompt
+        positions. The response region is the last num_steps positions.
+        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        Shared by the serial and batched teacher paths so their parse is identical.
+        """
+        plp = request_output.prompt_logprobs[-num_steps:]
         logp_by_pos, ids_by_pos = [], []
         for d in plp:
             ids = list(d.keys())
             logp_by_pos.append(torch.tensor([d[i].logprob for i in ids]))
             ids_by_pos.append(torch.tensor(ids, dtype=torch.long))
         return logp_by_pos, ids_by_pos
+
+    def _teacher_topk_logprobs(self, prefix_token_ids, num_steps):
+        """Query the teacher engine for per-position top-k log-probs over the response.
+
+        Returns (logp_by_pos: list[Tensor[k]], ids_by_pos: list[LongTensor[k]]).
+        """
+        import ray
+
+        sp = self._sampling_params()
+        out = ray.get(self.engine.generate.remote(
+            {"prompt_token_ids": prefix_token_ids}, sp, use_tqdm=False))[0]
+        return self._parse_prompt_logprobs(out, num_steps)
+
+    def score_wave(self, list_of_prefixes, list_of_candidate_logits):
+        """Batched analogue of score_rollout over B prompts with ONE teacher
+        generate call per chunk instead of B serial calls.
+
+        vLLM's generate accepts a LIST of prompts and returns a list of
+        RequestOutputs in prompt order; we issue one batched generate per chunk
+        of at most self.teacher_batch_size prompts, parse each output with the
+        SAME _parse_prompt_logprobs helper the serial path uses, and score each
+        prompt with the SAME _score_one body score_rollout uses. The result is
+        per-prompt identical to calling score_rollout(prefix_i, cand_i) for each i.
+
+        Returns a list [(L_q_per_step, L_clean_per_step), ...], one tuple per prompt.
+        """
+        assert len(list_of_prefixes) == len(list_of_candidate_logits)
+        B = len(list_of_prefixes)
+        if B == 0:
+            return []
+
+        # Serial fallback: no batching benefit, just loop score_rollout per prompt.
+        if self.teacher_batch_size <= 1:
+            return [self.score_rollout(list_of_prefixes[i], list_of_candidate_logits[i])
+                    for i in range(B)]
+
+        import ray
+        sp = self._sampling_params()
+        results = [None] * B
+        for start in range(0, B, self.teacher_batch_size):
+            idxs = range(start, min(start + self.teacher_batch_size, B))
+            prompts = [{"prompt_token_ids": list_of_prefixes[i]} for i in idxs]
+            # ONE generate.remote per chunk over the list of prompts.
+            outs = ray.get(self.engine.generate.remote(prompts, sp, use_tqdm=False))
+            for out_i, i in zip(outs, idxs):
+                cand_i = list_of_candidate_logits[i]
+                if not cand_i:
+                    results[i] = ([], [])
+                    continue
+                logp_by_pos, ids_by_pos = self._parse_prompt_logprobs(out_i, len(cand_i))
+                results[i] = self._score_one(cand_i, logp_by_pos, ids_by_pos)
+        return results

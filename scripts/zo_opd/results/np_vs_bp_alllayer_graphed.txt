@@ -1,0 +1,81 @@
+F3 GOAL PROOF: NP (packed_graphed ALL-LAYER) vs BP-OPD, one-step wall-clock + peak mem
+========================================================================================
+Config: Qwen3-1.7B student + Keven16 Qwen3-4B-Non-Thinking teacher, co-located on ONE GPU.
+        batch=64 prompts, max_tokens=1024, greedy, N_SAMPLE=8 perturbation rails, N_ROLLOUT=1.
+NP side: decode_mode=packed_graphed, en_layerwise=false (ALL 28 down_proj layers updated in
+         ONE all-layer step), pack_width=4 (KV-safe), use_cuda_graph=true. GPU 1.
+         Worktree verl via PYTHONPATH=<worktree>/verl (confirmed: ray_trainer + np_worker_extension
+         resolve to .../np-alllayer-graphed/verl; runtime emitted "[npdbg s0 ALL-LAYER GRAPHED L=28 ...]").
+BP side: stock verl PPO token_reward_direct (opd_math_ref.sh), one step. GPU 2.
+Date: 2026-06-06.
+
+RESULT
+------
+NP one-step wall-clock (train/step_time) : 2472.37 s   (~41.2 min)
+NP peak GPU mem (nvidia-smi device peak)  : 82372 MiB  (~80.4 GiB)
+
+BP one-step wall-clock (perf/time_per_step): 53.79 s    (step 1, cold; step 2 steady = 27.54 s)
+BP peak GPU mem (nvidia-smi device peak)   : 71710 MiB  (~70.0 GiB)
+  (verl ALSO reports perf/max_memory_reserved_gb=113.37 GB, but that is PyTorch *reserved*
+   incl. offload/virtual, NOT device-used; the nvidia-smi device peak 71710 MiB is the
+   apples-to-apples figure vs the NP nvidia-smi peak.)
+
+RATIO (NP / BP) : 45.97 x   (vs step-1 BP);  89.78 x vs BP steady-state step-2
+VERDICT         : FAIL   (goal is NP <= BP; NP is ~46x SLOWER one-step)
+
+NP BREAKDOWN (from NP_DEBUG_DECODE [npdbg ...] lines)  -- the residual is attributable
+--------------------------------------------------------------------------------------
+The NP step time is dominated by TWO costs, neither of which BP pays:
+
+(1) DECODE -- the (1+N)-row forward-count floor.
+    16 packed_graphed waves (64 prompts / pack_width 4), each decoding 1 clean + 8 perturbed
+    rows per token through all 28 layers. Per-wave decode dt was flat at ~80-90 s (CUDA-graph
+    capture is amortized after wave 0; the cost is the forward count itself, not the capture):
+      wave dt (s): 90.33 82.20 81.54 80.46 83.50 82.51 86.79 88.32
+                   84.19 88.19 87.21 87.41 89.15 83.83 89.17 83.42
+      SUM decode  = 1368.22 s  (~22.8 min, 55% of step)
+    This is the forward floor the plan flagged: N=8 perturbed rows = 9x the forwards of a single
+    clean decode, x 28 layers, x 64 prompts x up to 1024 tokens.
+
+(2) ASSEMBLE+APPLY -- the all-layer node-perturbation gradient assembly.
+    [npdbg s0 ALL-LAYER] assemble+apply DONE dt=834.84 s nlayer=28   (~13.9 min, 34% of step)
+    One all-layer assemble over nsig=65536 token-signals (64*1024) x 28 layers. Despite the
+    batched-GEMM delta_W (assemble_layer_delta, np_worker_extension.py:1872), the per-token
+    Python reduction loop that builds g_t/x_t rows (lines 1899-1911: 65536 iters x 28 layers
+    ~= 1.8M Python iterations, each with a per-token .to(device) + sample_scale) is NOT folded
+    into the GEMM and remains the bottleneck. It ran ~700-960% CPU for ~14 min. This is the
+    single largest fixable residual: vectorizing the g_t reduction across tokens (one batched
+    sample_scale + one [n_sample]-reduce over the whole [T,n_sample,d_out] stack) would collapse
+    it toward the "sub-10s GEMM" the docstring targets.
+
+    decode (1368.22) + assemble (834.84) = 2203.06 s; the remaining ~269 s of step_time is the
+    inter-wave teacher-scoring / accumulation gaps (GPU idle between decode bursts) + step setup,
+    all inside t0..step_time.
+
+Per-layer sanity: all 28 down_proj layers got dW_norm>0 (1.0 .. 216.0 across depth) and
+train/weight_sync_ok=1.0 -- the all-layer update landed and broadcast correctly.
+
+BP BREAKDOWN (one step = 53.79 s) for contrast -- where BP spends its time:
+    timing_s/gen                = 10.82 s   (vLLM rollout, 64 prompts x up to 1024 tok, greedy)
+    timing_s/compute_log_prob   =  2.45 s   (student logprobs)
+    timing_s/compute_rm_score   = 30.31 s   (TEACHER scoring -- the 4B reward/teacher fwd)
+    timing_s/reward (total)     = 33.92 s
+    timing_s/update_actor       =  8.78 s   (one FSDP backward+optim on the WHOLE 1.7B model)
+    BP does ONE clean forward per token + one true backprop. NP does (1+N)=9 forwards per token
+    AND a node-perturbation gradient ASSEMBLE (no autograd) -- that assemble is the killer.
+
+WHY NP IS ~46x SLOWER (the honest residual)
+-------------------------------------------
+NP pays two costs BP does not, both linear in (tokens x layers):
+  - decode 1368 s : the (1+N)-row forward floor (9x the forwards), x28 layers, packed_graphed.
+  - assemble 835 s: a CPU-bound per-token Python reduction over 65536 token-signals x 28 layers.
+BP's single autograd backward (update_actor) does the SAME "28-layer gradient" in 8.78 s on GPU;
+NP re-derives it from finite differences with a Python token loop, which is ~95x slower for the
+gradient step alone. The headline goal (NP one-step <= BP one-step) is NOT met at batch64/1024.
+The forward floor is fundamental to NP; the 835 s assemble is the largest FIXABLE residual
+(vectorize the g_t reduction into the existing batched GEMM -> docstring target ~sub-10s).
+
+LOGS
+----
+NP log : logs/np_vs_bp/np_20260606_191932.log
+BP log : logs/np_vs_bp/bp_20260606_200956.log
