@@ -1,0 +1,29 @@
+You are a senior ML researcher (NeurIPS/ICML area chair level) brainstorming research ideas for a model-compression project. Be concrete, rigorous, and skeptical. Do NOT use any tools, do NOT read files, do NOT write files — just THINK and return a structured analysis in your text reply.
+
+RESEARCH DIRECTION: "Which MoE expert compression/pruning/merging method really matters for TRAINING-BASED compression?" — does a smart training-free method keep its lead over naive compression after a SHORT amount of recovery training, and what is the recovery trajectory?
+
+FROZEN SETUP:
+- Model: OLMoE-1B-7B-0924-Instruct (16 layers, 64 experts/layer, top-8 routing, NO shared expert; MMLU 51.9, GSM8K 45.5).
+- Compress ONLY MoE experts; attention + router untouched; retain ratio 0.75 (keep 75% of expert params).
+- Training-free eval: MMLU (5-shot) + GSM8K (8-shot CoT).
+- Recovery: continue-train on OpenThoughts3 (original SFT data) ~10000 samples, eval DURING training (recovery curve).
+- Naive baseline = SlimQwen expert-compression part only (frequency / soft-logits / REAP pruning, importance-weighted cosine merge, partial-preservation).
+- 8x A800 80GB available. Existing repo tooling: SVD-LLM-V2, Nystrom MLP compression, SparseGPT, calibration loaders, HF save/reload, LlamaFactory SFT, verl OPD trainer.
+
+CRITICAL PRIOR WORK (this is the hard part — the idea must survive these):
+1. SlimQwen (arXiv 2605.08738, May 2026): ALREADY claims "no single one-shot expert prune/merge method establishes consistent superiority; differences are marginal after continual pretraining." BUT only at 400B-token / 80B-model scale, only whole-expert prune/merge (no intra-expert low-rank, no unstructured), co-varies depth+width+expert, on a model WITH a shared expert.
+2. "A Free Lunch in LLM Compression" (2510.14444): on DENSE models, local reconstruction shrinks the importance of the pruning criterion; Wanda ~= SparseGPT after; effect grows with scale.
+3. "Is Retraining-Free Enough?" (2603.02217, Mar 2026): recovers the ROUTER after expert pruning.
+
+So "does the gap close after training?" is partly answered (SlimQwen: yes, eventually). The novelty must come from: the SHORT-recovery TRAJECTORY (how fast, is there crossover/reordering during training, not just endpoint), covering ALL families (low-rank/shared-base + unstructured, which SlimQwen omits), experts isolated, small MoE; AND/OR a PREDICTIVE question: what property of a one-shot-compressed model predicts its post-training value (reconstruction error vs preserved router behavior vs effective rank vs gradient/loss-landscape curvature)?
+
+Generate 8-12 concrete research ideas. For EACH:
+1. One-sentence summary.
+2. Core hypothesis (what you expect and WHY, mechanistically).
+3. Minimum viable experiment (cheapest test that gives a clear positive OR negative signal).
+4. Contribution type: empirical-finding / new-method / diagnostic / theory.
+5. Risk: LOW/MEDIUM/HIGH and why.
+6. Effort: days/weeks.
+7. The single strongest reviewer objection, and how SlimQwen specifically threatens or doesn't threaten this idea.
+
+Bias HARD toward ideas where the answer matters either way (publishable negative result), and that are NOT defeated by "SlimQwen already showed the gap closes." Favor: trajectory/crossover structure, predictive-property diagnostics, all-families controlled study, and any mechanistic explanation of WHY the gap closes (e.g., router re-routes around damaged experts; surviving capacity relearns; reconstruction error is recoverable but lost diversity is not). At the end, name the TOP 3 you'd actually run and why.

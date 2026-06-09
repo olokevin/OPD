@@ -1,0 +1,92 @@
+**A. Score**
+
+`4.5/10.` The study is controlled in spirit, but the current design is not yet capable of producing a robust, defensible family-level inversion result. Right now, “family effect” is under-identified, the compression budget is not commensurate across families, and the frozen-router protocol structurally advantages some families over others.
+
+**B. Top 5 Must-Fix Issues**
+
+1. **Family-level claim is not identifiable with the current slate.**  
+With mostly `n=1` per family, any observed inversion is a method effect wearing a family label. You cannot honestly say “family-effect dominates criterion-effect” if family and method are nearly collinear.  
+**Fix:** Use at least `2 methods per included family`. If you cannot do that, reduce scope and make a method-level claim only. For a minimal family paper, `3 families x 2 methods` is the floor; `4 x 2` is better.
+
+2. **“Retain 0.75” is not a common budget across these families.**  
+Whole-expert drop, width shrink, and unstructured sparsity do not match on the quantity that actually matters in a top-`k` MoE. Expert drop cuts total storage and candidate support, but largely preserves active dense expert capacity per token; width shrink cuts active capacity; unstructured sparsity cuts nonzeros but not dense FLOPs unless you have sparse kernels. A cross-family inversion at “0.75 retain” could easily be a budget artifact.  
+**Fix:** Predefine two budget axes.  
+`Primary:` storage/nonzero-parameter budget.  
+`Required sensitivity:` routed active-capacity budget, e.g. expected active expert MLP nonzeros or FLOPs per token under top-8 routing.  
+Also standardize the calibration token budget across methods for the main comparison; native paper-specific calibration recipes should be supplementary, not primary.
+
+3. **Frozen router is a major family-specific confound.**  
+Families that preserve all 64 experts keep the router’s support intact. Expert-drop families remove routable destinations, so a frozen router tests “compression + routing mismatch” rather than recoverability. That is not a neutral protocol.  
+**Fix:** Make `experts + router trainable, attention frozen` the main recovery protocol. Keep `router frozen` as an ablation. If you insist on frozen-router as main, then the claim must be narrowed to that exact protocol and not generalized as a family property.
+
+4. **The task/seed design is too thin for a family-level claim.**  
+`MMLU + GSM8K` is not enough. GSM8K is noisy for this model size, and two tasks cannot support “across tasks” language. With only one severity and two tasks, an inversion will look anecdotal even if real.  
+**Fix:** Use at least `4 tasks` and `3 end-to-end seeds`. Minimum acceptable task set: `MMLU`, `GSM8K`, `ARC-C`, `HellaSwag` or `Winogrande`. Define inversion with hierarchical bootstrap CIs over task and seed, not point estimates.
+
+5. **Claim 2 is underpowered and vulnerable to metric fishing.**  
+For step-0 predictors, the independent unit is the compressed checkpoint, not every recovery checkpoint. `6 methods x a few runs` is too small for six correlated diagnostics.  
+**Fix:** Inflate `n` with `retain ratios x seeds`, target at least `36` compressed model instances and preferably `48+`. Pre-register `2 primary MoE-specific predictors`, `2 baselines`, and `1 negative control`. Evaluate with leave-one-family-out prediction of `AURC_0-2k` or `2k-step accuracy`, not just pooled regression p-values.
+
+**C. Minimum Viable but Rigorous Version**
+
+If you want this to fit in about `1–2 GPU-weeks` on `8xA800`, I would cut breadth, strengthen identification, and shorten the horizon.
+
+**Method slate**
+1. Use `6 focal methods` arranged as `3 families x 2 methods`.
+2. A workable slate is:
+   - `expert-removal family:` `random-expert-drop` plus one added `importance-based expert-drop`.
+   - `structural expert-compression family:` `SlimQwen-REAP-prune`, `SlimQwen-merge+partial-preservation`.
+   - `per-expert weight-approximation family:` `SVD-LLM-V2`, `SparseGPT`.
+3. Keep `magnitude` as an auxiliary control only, unless you add a second comparable unstructured sparsity method and make that a real family.
+
+**Compression severities**
+1. Use `2 retain ratios` for the main paper, not one.
+2. My default would be `0.75` and `0.50`; if a tiny pilot shows `0.50` is degenerate for multiple methods, replace it with `0.625`.
+3. Do not claim robustness from a single severity.
+
+**Compression setup**
+1. Main comparison uses a **standardized calibration budget** for every method, same corpus mix and same total calibration tokens.
+2. Native paper-specific calibration recipes go to an appendix sensitivity table.
+
+**Recovery protocol**
+1. Main recovery: `experts + router trainable`, `attention frozen`.
+2. Primary horizon: checkpoints at `0`, `100`, `500`, `2000`.
+3. `AURC_0-2k` and `2k-step accuracy` should be the primary outcomes.
+4. `5k` or `10k` can be supplementary on a subset; they should not dominate the paper.
+
+**Seeds**
+1. Use `3 end-to-end seeds` per method x retain.
+2. Each seed should re-sample any stochastic compression choices and the recovery data order.
+
+**Tasks**
+1. `MMLU`
+2. `GSM8K`
+3. `ARC-C`
+4. `HellaSwag` or `Winogrande`
+
+**What to fit**
+1. Primary trajectory model: `score ~ family * checkpoint + retain + task + (1|method) + (1|seed)`.
+2. Primary summary model: `AURC_0-2k ~ family + retain + task + (1|method) + (1|seed)`.
+3. Variance question: estimate between-family variance versus within-family method variance from the summary model. Do not use layer as pseudo-replication.
+4. Inversion criterion should be pre-registered:
+   - the step-0 winning family is not the 2k-step winning family,
+   - the pairwise contrast between those two families flips sign with `95%` hierarchical-bootstrap CI excluding zero,
+   - the flip appears in a strong majority of `task x seed` cells, e.g. `>=75%`,
+   - and it holds at both retain ratios.
+5. Claim 2 model: predict `AURC_0-2k` from pre-registered step-0 diagnostics with leave-one-family-out validation. Use a small predictor set, not all six metrics in the main claim.
+
+This version gives you about `6 methods x 2 retains x 3 seeds = 36` primary recovery runs, which is the right scale for the compute budget and enough `n` to support a real claim.
+
+**D. Results-to-Claims Matrix**
+
+**(i) If inversion is robust**
+You can claim that, in this `OLMoE-1B` experts-only compression regime with short recovery, one-shot rankings are not reliable and short recovery reorganizes performance at a coarser family level. You can also claim that MoE-aware step-0 diagnostics are more useful than naive reconstruction metrics if the out-of-family predictive test succeeds. You still must bound the claim to this architecture, retain range, and recovery protocol.
+
+**(ii) If inversion is weak, task-specific, or only within-family**
+You cannot claim a family-level inversion. You can claim that recovery can reorder methods, but the effect is method-specific, task-specific, or budget-specific. The right conclusion is that step-0 rankings are sometimes unstable, not that family taxonomy dominates recovery behavior.
+
+**(iii) If there is no inversion and rankings stay stable**
+You should say that, under this controlled MoE compression setup, short recovery mostly preserves step-0 ordering. That does not kill the paper if the study is well-powered; it becomes a negative result against the stitched-benchmark thesis. Claim 2 may still survive if some step-0 MoE diagnostics predict recovery magnitude even when the ranking itself is stable.
+
+The single biggest problem is not compute. It is identifiability. If you do not fix `family replication`, `budget comparability`, and `router bias`, the result will be hard to defend regardless of what the curves look like.
+=== EXIT 0 ===

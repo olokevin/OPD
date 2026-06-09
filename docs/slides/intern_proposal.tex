@@ -1,0 +1,209 @@
+\documentclass[9pt]{beamer}
+\usefonttheme[onlymath]{serif}
+% Theme settings
+\usetheme{metropolis} % Professional, clean theme
+\usepackage[english]{babel}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{mdframed}
+
+% Custom Commands from your report
+\newcommand{\ten}[1]{\bm{\mathcal{#1}}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+
+\title{Improved Recipe for Compress-then-Train}
+\subtitle{Reasoning-aware, training-aware compression with on-policy distillation}
+\author{Yequan Zhao}
+\date{\today}
+
+\begin{document}
+	
+	\maketitle
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Proposed intern project}
+		
+		\textbf{Goal:} a better recipe for \emph{compress-then-train}: optimize for the model \emph{after} training, not only at compression time.
+		
+		\begin{itemize}
+			\item \textbf{Reasoning-aware compression} --- calibrate the compression on full reasoning traces so the model's generation / reasoning ability survives the cut.
+			\item \textbf{Training-aware compression} --- pick the compression that
+			\emph{converges fastest} once training resumes, not just the one with the
+			lowest one-shot error.
+			\item \textbf{Extended training recipe} --- combine off-policy knowledge
+			distillation with \textbf{on-policy distillation (OPD)} to keep improving
+			on reasoning tasks after standard KD plateaus.
+		\end{itemize}
+		
+	\end{frame}
+
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Reasoning-aware compression: calibration preserves generation}
+
+		\textbf{Challenge.} One-shot structured low-rank compression (SVD-attn +
+		Nystr\"om-MLP) is very weak at preserving \emph{reasoning} --- the
+		compressed model loses its ability to terminate a reasoning trace (loops
+		past the answer), collapsing math accuracy.
+
+		\vspace{0.4em}
+		\textbf{Cause.} The calibration covariances were collected on reasoning
+		traces \emph{truncated into fixed-length windows} --- this drops the
+		long-trace tails and lets long traces dominate the token pool, so the
+		covariance no longer reflects the reasoning distribution.
+
+		\vspace{0.4em}
+		\textbf{Fix.} Calibrate on the \emph{full reasoning trace} (no truncation)
+		and \emph{reweight by sequence} (every conversation counts equally, not
+		every token). Pure calibration change --- same method, same budget.
+
+		\vspace{0.5em}
+		{\footnotesize Qwen3-4B$\to$, retain $0.7$, forward-only SVD+Nystr\"om;
+		MATH-500 strict (greedy), C4 PPL.}
+
+		\vspace{0.2em}
+		{\footnotesize
+		\begin{tabular}{@{}lcc@{}}
+			\toprule
+			calibration scheme & MATH-500 & C4 PPL \\
+			\midrule
+			truncated windows (2048)            & 66.0\%          & 103.0 \\
+			full sequence                       & 66.0\%          & 103.0 \\
+			full sequence + sequence-reweight   & \textbf{69.0\%} & \textbf{98.7} \\
+			\bottomrule
+		\end{tabular}}
+
+		\vspace{0.5em}
+		Sequence-reweighting is the decisive axis ($+3$pp MATH, lower PPL); it also
+		removes the looping/termination failure (the model reaches the answer
+		\emph{and} stops). Now the repo default.
+
+	\end{frame}
+
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Training-aware compression}
+
+		Input-output whitened SVD
+		\[
+		\hat{\mat{W}}
+		\;=\;
+		\arg\min_{\hat{\mat{W}}}\;
+		\norm{\,\mat{C}_g^{1/2}\,(\mat{W}-\hat{\mat{W}})\,\mat{C}_x^{1/2}\,}_F^2 ,
+		\]
+		solved by truncated SVD of $\mat{M}=\mat{C}_g^{1/2}\,\mat{W}\,\mat{C}_x^{1/2}$,
+		with $\mat{C}_x=\sum_t\mat{x}_t\mat{x}_t^{\!\top}$ (forward activations) and
+		$\mat{C}_g=\sum_t\mat{g}_t\mat{g}_t^{\!\top}$ (back-propagated loss gradients).
+		
+		\vspace{0.8em}
+		This two-sided whitening is precisely a Hessian estimate for the layer weights:
+		\[
+		\mat{H}_{\mat{W}} \;=\; \mathbb{E}\!\left[\,\mat{x}\mat{x}^{\!\top}
+		\,\otimes\, \mat{g}_y\mat{g}_y^{\!\top}\,\right].
+		\]
+		
+		\vspace{0.4em}
+		So truncation discards the \emph{least loss-sensitive} subspace, and those
+		surviving high-curvature directions are exactly the ones training keeps
+		actively updating.
+		
+		Nystr\"om: build a single joint forward+backward PSD kernel
+		$\mat{K}_{\text{joint}}=\mat{C}_f^{1/2}\mat{C}_b\mat{C}_f^{1/2}$ and select the
+		hidden neurons by Nystr\"om approximation: keeping the directions important to
+		\emph{both} the forward pass and the gradient that trains $\mat{W}_u,\mat{W}_g$.
+		
+	\end{frame}
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{MoE expert compression: doubly-whitened Nystr\"om}
+		
+
+		\vspace{0.5em}
+		{\footnotesize OLMoE-1B-7B, retain $0.5$; eval limit 200/task. After-training =
+			short SFT recovery ($\sim$10k OpenThoughts samples).}
+		
+		\vspace{0.2em}
+		{\footnotesize
+			\begin{tabular}{@{}lcccc@{}}
+				\toprule
+				& \multicolumn{2}{c}{training-free} & \multicolumn{2}{c}{after training} \\
+				\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+				method & MMLU & GSM8K & MMLU & GSM8K \\
+				\midrule
+				original (uncompressed)     & 0.542 & ---   & ---   & ---   \\
+				\midrule
+				Nystr\"om-combined (fwd+bwd) & \textbf{0.382} & \textbf{0.150} & \emph{TBD} & \emph{TBD} \\
+				Nystr\"om (fwd-only)         & 0.341 & 0.135 & \emph{TBD} & \emph{TBD} \\
+				REAP (expert drop)           & 0.289 & 0.000 & \emph{TBD} & \emph{TBD} \\
+				SlimQwen (expert merge)      & 0.269 & 0.005 & \emph{TBD} & \emph{TBD} \\
+				\bottomrule
+		\end{tabular}}
+		
+		\vspace{0.5em}
+		\begin{itemize}
+			\item \textbf{fwd+bwd $>$ fwd-only $>$ expert removal/merge} training-free:
+			joint kernel beats forward-only; both low-rank methods beat coarse
+			whole-expert drop/merge (which collapse at retain $0.5$).
+			\item \textbf{Open question:} does short training reorder these families?
+			Recovery leg is the next run.
+		\end{itemize}
+		
+	\end{frame}
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Training recipe: off-policy KD vs.\ on-policy distillation}
+		
+		\begin{itemize}
+			\item \textbf{Off-policy KD} --- student matches the teacher's traces. 
+			\item \textbf{On-policy distillation (OPD)} --- student \emph{generates} the
+			responses, teacher \emph{scores} them token-by-token. The student is
+			corrected exactly where \emph{it} goes wrong.
+		\end{itemize}
+		
+		\vspace{1em}
+		\begin{mdframed}
+			\textbf{Two regimes, in order:}
+			\begin{itemize}
+				\item \textbf{Stage 1 --- off-policy KD is more efficient.} Cheap dense
+				supervision recovers most of the quality fast.
+				\item \textbf{Stage 2 --- when Stage 1 plateaus, OPD keeps improving} on
+				reasoning tasks
+				% fixing the student's own failure modes that the teacher's traces never expose.
+			\end{itemize}
+		\end{mdframed}
+		
+	\end{frame}
+	
+	% ---------------------------------------------------------------------------
+	\begin{frame}{Broader ideas}
+		
+		% \textbf{Heterogeneous / adaptive compression ratios.} Allocate the budget \emph{across layers and experts} according to training-aware curvature --- spend rank where it converges best after training, not uniformly.
+		
+		Compression-aware training:
+		\begin{itemize}
+			\item Train a 8B model, but contains a good 4B (or more) models -> once for all
+			
+			\item Full-rank training-aware transformation
+			\begin{itemize}
+				\item The parameter trainability (curvature) is ranked: BlockTT (rank by singular value) / Nystrom (rank by row/col leverage score)
+				\item Regularized training: only the information beyond the 4B model capacity goes to 8B only parameters.
+			\end{itemize} 
+			
+			\item Training does two things:
+			\begin{itemize}
+				\item Improve model performance
+				\item We have loss for both 8B and 4B model -> align 4B to 8B progressively
+			\end{itemize}
+			
+			
+			 
+		\end{itemize}
+		
+		
+	\end{frame}
+	
+	\bibliographystyle{alpha}
+	\bibliography{main}
+	
+\end{document}

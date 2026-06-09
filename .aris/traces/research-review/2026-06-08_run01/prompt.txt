@@ -1,0 +1,23 @@
+You are a senior NeurIPS/ICML reviewer. Critique the EXPERIMENTAL DESIGN of this MoE-compression study. Novelty is already settled at 5.5/10 PROCEED-WITH-CAUTION — do NOT re-litigate novelty. Focus ONLY on whether the design will produce a ROBUST, defensible result. Do not use tools; reason and reply in text.
+
+PAPER THESIS: "In a controlled experts-only compression study of small MoE models, short recovery reorganizes method quality primarily at the compression-FAMILY level rather than the step-0 score level, making one-shot rankings unreliable and favoring MoE-specific recoverability diagnostics over naive reconstruction metrics."
+
+MAKE-OR-BREAK RESULT: a ROBUST cross-family INVERSION — step-0 winner FAMILY is consistently NOT the step-k winner family across tasks/seeds, large margins, family-effect dominates criterion-effect throughout recovery. If anecdotal, paper dies as a stitched benchmark.
+
+SETUP:
+- Model: OLMoE-1B-7B-0924-Instruct (16 layers, 64 experts, top-8, NO shared expert). Compress experts only; attn + router FROZEN; retain 0.75. Expert params = 93% of model.
+- 6 methods across 4 families: {SlimQwen-REAP-prune, random-expert-drop (control), SlimQwen-merge+partial-preservation, per-expert SVD-LLM-V2, per-expert SparseGPT, magnitude (control)}.
+- Each method uses its OWN paper calibration recipe (128-1024 x 2048 C4/WikiText).
+- Recovery: short SFT on OpenThoughts3 (original SFT data) ~10000 samples; eval MMLU(5-shot)+GSM8K(8-shot CoT) at steps {0,100,250,500,1k,2k,5k,10k}.
+- 8x A800 80GB.
+- Claim 2 (supporting): step-0 metrics {routed-token curvature, gradient-alignment, inter-expert diversity-retention; baselines reconstruction error + step-0 accuracy; effective rank = negative control} regressed vs AURC / 2k-step accuracy.
+
+ATTACK THESE SPECIFIC DESIGN QUESTIONS:
+1. CONFOUND/BUDGET: each family realizes "retain 0.75" differently — whole-expert drop 64->48 experts, intra-expert shrink intermediate 1024->768, unstructured 25% sparse. Are these comparable (param count vs FLOPs vs effective active-param vs memory)? Note: in a top-8/64 MoE, dropping experts changes the ACTIVE expert pool and may break top-8 routing (only 48 left, still pick 8 — fine; but a token's preferred experts may be gone). Unstructured 25% sparsity gives NO inference speedup without 2:4. How do I match the budget so a family-level inversion isn't a budget/FLOPs artifact? Should I match active-params or total-params or a capacity proxy?
+2. STATISTICS: with ~10k SFT samples + 2 benchmarks, how many seeds / what error bars to call an inversion real? GSM8K on a 1.3B-active model is high-variance. Is MMLU+GSM8K too thin to claim a FAMILY-level (not task-level) effect? How many tasks minimum?
+3. ROUTER FROZEN during recovery: does freezing the router bias which family recovers (favoring methods that didn't disturb routing, e.g. low-rank/unstructured that keep all 64 experts, vs whole-expert-drop that removed routable experts so the frozen router still routes to dead slots)? Is experts-only-frozen-router a defensible recovery protocol or a confound? Should router be trainable?
+4. VARIANCE DECOMPOSITION: 6 methods, mostly 1/family. Can I even separate family-variance from criterion-variance with n=1-2 per family? Do I need >=2-3 methods/family? What's the minimum slate to fit family+criterion+layer effects?
+5. CLAIM 2 PREDICTIVE: ~6 methods x few checkpoints = tiny n. Is regressing AURC on step-0 metrics hopelessly underpowered? How many compressed checkpoints needed (e.g. sweep retain ratios + seeds to inflate n)? How to avoid correlation-fishing across ~6 metrics?
+6. NULL-RESULT RISK: single most likely way this produces a NULL/ambiguous result, and the cheapest design change that de-risks it?
+
+Deliver: (A) experimental-design score /10; (B) top 5 must-fix design issues ranked by severity with the concrete fix for each; (C) the MINIMUM-VIABLE-BUT-RIGOROUS version of the experiment (exact method slate, retain ratios, seeds, tasks, what to fit) that fits in ~1-2 GPU-weeks on 8xA800 and still supports the family-inversion claim; (D) a results-to-claims matrix: what can I claim if (i) inversion is robust, (ii) inversion is weak/only-within-family, (iii) no inversion (rankings stable).

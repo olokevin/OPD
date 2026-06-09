@@ -1,0 +1,42 @@
+**Claim 1**
+
+Borderline publishable, but only as a **carefully framed measurement paper**, not as “we discovered a new compression principle.” The novelty is not the existence of crossover per se; that is already too close to known phenomena from SlimQwen and *A Free Lunch*. The novelty is the **controlled isolation**: experts-only, one MoE, one retain budget, all four compression families, and full short-horizon recovery trajectories. That is real, but it is also easy for a hostile reviewer to call it an obvious benchmark composition.
+
+Closest killer: **SlimQwen** for “one-shot rankings do not survive recovery,” with *A Free Lunch* filling the missing “trajectory/crossover after reconstruction” angle. Together they let a reviewer say: “ranking instability under recovery was already known; you ported it to experts-only MoE and added more method families.”
+
+Strongest rejection:  
+“Nothing conceptually new is shown. It is an ablation-heavy benchmark on a small OLMoE with a single retain ratio and short in-domain recovery, reproducing the already-known fact that post-training changes method rankings. The variance decomposition is bookkeeping, not insight.”
+
+How to narrow it to survive:  
+Frame it as **a controlled empirical study of post-recovery selection bias in experts-only MoE compression**, not as a general claim about compression rankings. Be explicit that the contribution is: training-free ranking is unreliable **in this controlled experts-only regime**, and **compression family** is the right analysis level after short recovery, not criterion.
+
+The single sharpest result that would make it undeniably novel:  
+Show a **systematic cross-family inversion**: the step-0 winner family is consistently not the step-k winner across tasks/seeds, with large margins, and the family-level effect dominates criterion-level effects throughout recovery. If the “winner becomes loser” story is robust, not anecdotal, the paper stops looking like a stitched benchmark.
+
+**Claim 2**
+
+As a **standalone main claim**, I would not trust it to carry a NeurIPS/ICML paper. “Recoverability proxy beats reconstruction error / step-0 accuracy” is too close to an existing template. The fact that your proxy is MoE-specific helps, but not enough by itself unless it is dramatically stronger and clearly actionable.
+
+Closest killer: not one paper, but the cluster of **PRACTISE / RankAdaptor / TraceNAS / reconstruction-error-is-bad**. A hostile reviewer will collapse them into: “predicting post-FT recoverability is already a known genre; this is another proxy.”
+
+Strongest rejection:  
+“This is an incremental predictor paper. The field already knows reconstruction error is weak and recoverability must be estimated more directly. Swapping in curvature/diversity/alignment for prior recoverability features is not enough unless it changes decisions materially.”
+
+How to narrow it to survive:  
+Demote it to a **supporting analysis inside the Claim 1 paper**. Frame it as: among step-0 diagnostics, **MoE-specific structure-preservation metrics** are more informative for short-horizon recovery than naive loss/reconstruction metrics. That is useful as a mechanistic explanation for Claim 1, not a separate flagship contribution.
+
+On effective rank: **drop it from the headline entirely.** At most keep it as a negative-control baseline in one table/appendix row. If you emphasize it, you invite “this was already shown not to predict LM performance.”
+
+**Overall**
+
+Novelty score: **5.5/10**
+
+Verdict: **PROCEED-WITH-CAUTION**
+
+The program is viable if you make **Claim 1 the paper** and **Claim 2 the supporting mechanism**. If you try to sell both as equal first-class contributions, reviewers will say neither is deep enough.
+
+One-sentence framing that maximizes defensible novelty:  
+**“In a controlled experts-only compression study of small MoE models, short recovery reorganizes method quality primarily at the compression-family level rather than the step-0 score level, making one-shot rankings unreliable and favoring MoE-specific recoverability diagnostics over naive reconstruction metrics.”**
+
+If you want the brutally honest bottom line: Claim 1 can survive with sharp enough evidence; Claim 2 probably cannot survive alone.
+=== EXIT 0 ===
