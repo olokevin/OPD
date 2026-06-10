@@ -1,6 +1,9 @@
 # Experiment Results — MoE Expert Compression Recovery Atlas
 
-> Live results log. **Training-free leg (step-0)** ran 2026-06-08 on GPU 1/2/3 via `scripts/moe_compress/run_trainfree_atlas.sh`. Recovery (SFT) leg pending. Reference: uncompressed OLMoE-1B-7B-0924-Instruct MMLU(5-shot,limit200) = **0.542** (matches paper ~54 → eval pipeline validated). Eval limit 200/task (fast first pass; full eval is a follow-up).
+> Live results log. **Training-free leg (step-0)** ran 2026-06-08 on GPU 1/2/3 via `scripts/moe_compress/run_trainfree_atlas.sh`. Eval limit 200/task (fast first pass; full eval is a follow-up).
+>
+> **UNCOMPRESSED OLMoE-1B-7B-0924-Instruct REFERENCE (eval-limit 200, same settings as all compressed rows):**
+> **MMLU 0.549 · GSM8K 0.390 · ARC-C 0.530 · HellaSwag 0.695.** (MMLU matches paper ~54; GSM8K 0.39 vs paper ~45.5 — limit-200 subsample + lm-eval-default 8-shot vs OLMES.) **All compressed/recovered numbers below should be read as a FRACTION of this row** — e.g. @retain 0.5 the methods retain GSM8K: sparsegpt 71% (0.275), nystrom ~55% (0.215), nystrom_combined ~40% (0.155), reap_drop 13% (0.050, after recovery). GSM8K at limit-200 is noisy (±~0.03).
 >
 > ⚠️ **CALIBRATION CAVEAT (the v1 atlas above):** all v1 results used `datasets/OpenThought3-Qwen3-4B/` for calibration — OpenThoughts3 *prompts* with **Qwen3-4B-generated** reasoning traces, NOT OLMoE-native completions.
 

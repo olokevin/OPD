@@ -1,0 +1,65 @@
+es_token vs BP-OPD -- ONE full generation + update step
+=========================================================
+2026-06-09, branch feat/es-token-trainer, 96GB GPUs (ES on GPU 2, BP on GPU 3).
+Both sides: Qwen3-1.7B student + Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500
+teacher, batch=64 prompts, max_tokens=1024 (all 64 ran to the cap; 65,536
+token-records), greedy. Logs: logs/es_vs_bp/{es,bp}_20260609_222448.log.
+
+ES  = es_token graphed packed decode, N_SAMPLE=8 rails, ALL 112 decoder
+      linears perturbed rank-1 per token, pack_width=4 (16 waves), sampled-token
+      teacher loss (student_iw), chunked-GEMM assembly, student+teacher
+      CO-LOCATED on one GPU (GMU 0.55 / 0.30).
+BP  = stock verl PPO token_reward_direct (opd_math_ref.sh), vLLM cudagraph
+      generation, FSDP actor + FSDP teacher reward worker, one GPU.
+
+                          es_token        BP-OPD (step-1, cold)   NP V3 (ref *)
+one-step wall-clock       145.80 s        62.72 s                 2472.4 s
+  generation/decode       128.31 s        11.02 s (gen)           1368 s
+  teacher scoring           4.24 s        41.71 s (reward;        ~250 s
+                                            rm_score 35.7)
+  gradient + update        13.17 s        14.96 s (log_prob 5.2   835 s (assemble)
+                            (assemble       + update_actor 9.8)
+                            + apply)
+peak GPU mem              85,129 MiB      71,710 MiB              82,372 MiB
+tok/s (generation)        ~511 (64 seq    1134                    ~48
+                           / 16 waves)
+
+RATIO es_token / BP(cold step-1)   = 2.33x
+RATIO es_token / BP(steady ~27.5s, prior A800 measurement **) ~= 5.3x
+RATIO NP V3 / BP(cold)             = 45.97x   ->  es_token closes 46x -> 2.3x
+
+ *  NP V3 reference: scripts/zo_opd/results/np_vs_bp_alllayer_graphed.txt
+    (A800-80GB, same batch/length/N; decode included the 896-draw_noise/token
+    host-glue artifact -- see docs/superpowers/plans/2026-06-07-np-decode-
+    host-glue-optimization.md).
+ ** BP steady-state was not re-measured this run (killed after the step-1
+    metric); prior NP-bench steady = 27.54 s on A800-80GB, different card.
+
+Phase analysis
+--------------
+- decode 128.3 s = 16 waves x ~7.92 s, i.e. ~7.8 ms per token-step for
+  36 rows x 28 layers -- AT the memory-bound rail floor (NP isolation OFF-floor
+  was ~12.4 ms/tok on A800). The three NP cost centers are gone by
+  construction: one fused noise draw per (slot, token) instead of 896
+  draw_noise launches (74% of NP decode); no per-token D2H u/x captures
+  (payload is a device-buffer gather, one D2H per wave); no per-token full
+  cuda.synchronize().
+- teacher 4.2 s: sampled-token OPD = ONE prompt_logprobs prefill per rollout.
+  10x FASTER than BP's own teacher phase (41.7 s through the FSDP reward
+  worker + top-k machinery).
+- assemble 13.2 s: seed-regenerated noise + N GEMMs/chunk/layer (~1.5 PFLOP),
+  comparable to BP's backward+optimizer (15.0 s). NP's 835 s Python loop is
+  gone.
+- The remaining 2.3x vs BP is STRUCTURAL, all in decode: the hand-driven
+  serial token loop at pack_width=4 yields ~511 tok/s vs vLLM continuous
+  batching's 1134 tok/s, and each token runs 1+N=9 rows. Levers, in order:
+  pack_width 8+ (teacher on its own GPU, or shrink the full-ctx scratch-KV
+  reservation), overlap teacher prefill with the next wave's decode (4.2 s,
+  minor now), and the (1+N)-row cost is near-free only to N~16.
+
+Correctness context: all gates green (scripts/zo_opd/results/
+es_token_gates.txt) -- sigma=0 == stock greedy, graphed == eager bit-for-bit,
+cosine at 0.98x the rank-1 weight-probe information bound, weight_sync_ok=1.0.
+Known issue: post-run teardown can hang AFTER metrics are logged (driver in
+cleanup futex, engine actor spinning; smoke exited cleanly) -- measurement
+unaffected; killed manually this run. Untriaged (vLLM uni-executor + ray.kill).
