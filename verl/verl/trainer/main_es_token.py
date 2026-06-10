@@ -31,8 +31,9 @@ def run_es_token(config) -> None:
     if not ray.is_initialized():
         for k in ("RAY_ADDRESS", "RAY_HEAD_IP", "RAY_GCS_SERVER_ADDRESS"):
             os.environ.pop(k, None)
-        unique_dir = tempfile.mkdtemp(
-            prefix=f"ray_es_token_session_{int(time.time())}_")
+        # Short prefix: Ray's plasma socket lives under this dir and AF_UNIX
+        # paths are capped at 107 bytes.
+        unique_dir = tempfile.mkdtemp(prefix=f"ray_es_{int(time.time())}_")
         ray.init(address="local", include_dashboard=False,
                  ignore_reinit_error=True, _temp_dir=unique_dir,
                  dashboard_port=None)

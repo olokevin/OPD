@@ -70,6 +70,7 @@ export TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
 export VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-200}
 export NUM_ITERATIONS=${NUM_ITERATIONS:-150}
 export EVAL_INTERVAL=${EVAL_INTERVAL:-25}
+export HELDOUT_PROBE_SIZE=${HELDOUT_PROBE_SIZE:-16}
 
 # ---- logging ----
 export PROJECT_NAME=${PROJECT_NAME:-opd-qwen-math}
@@ -97,6 +98,7 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.num_engines=${NUM_ENGINES} \
     es_token.num_iterations=${NUM_ITERATIONS} \
     es_token.eval_interval=${EVAL_INTERVAL} \
+    es_token.heldout_probe_size=${HELDOUT_PROBE_SIZE} \
     es_token.gpu_fraction=${GPU_FRACTION} \
     es_token.distributed_executor_backend=${EXEC_BACKEND} \
     es_token.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} \
