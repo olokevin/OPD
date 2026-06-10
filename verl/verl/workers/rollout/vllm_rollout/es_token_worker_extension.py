@@ -512,10 +512,13 @@ class WorkerExtension(NPWorkerExtension):
                 payload_buf[:, t] = tok_logp
 
                 toks = next_toks.tolist()   # the one host sync per token
-                for p in active_idx:
+                force_stop = es_cfg.get("force_stop_at")  # test-only: staggered
+                for p in active_idx:                      # EOS gate (parity (c))
                     tok = int(toks[p])
                     clean_tokens[p].append(tok)
-                    if self._np_is_eos(tok, sampling_params):
+                    if self._np_is_eos(tok, sampling_params) or (
+                            force_stop is not None
+                            and len(clean_tokens[p]) >= int(force_stop[p])):
                         states[p]["active"] = False
                     else:
                         self._np_commit_clean(states[p], tok)
