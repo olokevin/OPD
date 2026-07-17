@@ -76,11 +76,9 @@ def attach_masks(model: nn.Module) -> int:
     return n_masked
 
 
-def _apply_weight_masks(model: nn.Module) -> int:
-    """Zero masked weight entries. Use ONLY when weights are full (single-GPU or inside
-    a summon_full_params gather) — never on a live sharded FSDP weight, whose .shape can
-    still read full while .data is a shard (-> masked_fill corrupts memory)."""
-    n = 0
+@torch.no_grad()
+def reapply_masks(model: nn.Module) -> None:
+    """Re-zero masked weights. Call AFTER optimizer.step()."""
     for mod in model.modules():
         if not isinstance(mod, nn.Linear):
             continue
@@ -88,51 +86,20 @@ def _apply_weight_masks(model: nn.Module) -> int:
         if mask is None:
             continue
         w = mod.weight
-        if tuple(w.shape) != tuple(mask.shape) or w.numel() != mask.numel():
-            continue
-        m = mask if mask.dtype == torch.bool else (mask != 0)
-        w.data.masked_fill_(m.to(device=w.device), 0.0)
-        n += 1
-    return n
-
-
-def _is_fsdp(model: nn.Module) -> bool:
-    try:
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-    except Exception:
-        return False
-    return isinstance(model, FSDP) or any(isinstance(m, FSDP) for m in model.modules())
-
-
-@torch.no_grad()
-def reapply_masks(model: nn.Module) -> None:
-    """Re-zero masked weights AFTER optimizer.step().
-
-    The masks are full-shape (attached pre-FSDP). On a SHARDED actor (FSDP1 across
-    >1 GPU) the live ``mod.weight`` is a shard view, so a direct ``masked_fill_`` is
-    a shape/stride mismatch -> CUDA illegal memory access. So under FSDP we ALWAYS
-    gather the full params first (never touch the live sharded weight)."""
-    if _is_fsdp(model):
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        try:
-            with FSDP.summon_full_params(model, writeback=True, offload_to_cpu=False):
-                _apply_weight_masks(model)
-        except Exception as e:  # noqa: BLE001
-            print(f"[sparsity_mask] summon_full_params reapply failed ({e}); "
-                  "skipping re-zero this step", flush=True)
-        return
-    # un-sharded (single-GPU) actor: weights are already full -> mask in place.
-    _apply_weight_masks(model)
+        # DTensor (FSDP2) and FlatParameter (FSDP1) both expose .data; the
+        # zero in-place is safe because we masked at the same shape.
+        w.data.masked_fill_(mask, 0.0)
 
 
 @torch.no_grad()
 def mask_gradients(model: nn.Module) -> None:
-    """Zero gradients at masked positions BEFORE clip / optimizer.step (best-effort).
+    """Zero gradients at masked positions BEFORE clip / optimizer.step.
 
-    Reduces over-clipping from the dense grad_norm. Under FSDP the leaf gradient lives
-    on the FlatParameter (``mod.weight.grad`` is None for the non-leaf view), so this is
-    a no-op there — strict preservation is guaranteed by reapply_masks re-zeroing the
-    weights after the step regardless. Shape-guarded to never touch a sharded grad."""
+    Optional companion to reapply_masks. Without this, grad_norm reflects the
+    full-dense grad and would be clipped too aggressively. With it, the
+    optimizer never updates masked entries, so Adam moments stay zero — both
+    hooks together guarantee strict mask preservation.
+    """
     for mod in model.modules():
         if not isinstance(mod, nn.Linear):
             continue
@@ -140,7 +107,7 @@ def mask_gradients(model: nn.Module) -> None:
         if mask is None:
             continue
         w = mod.weight
-        if w.grad is None or tuple(w.grad.shape) != tuple(mask.shape):
+        if w.grad is None:
             continue
         w.grad.data.masked_fill_(mask, 0.0)
 

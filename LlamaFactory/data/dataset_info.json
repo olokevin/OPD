@@ -13,7 +13,7 @@
     }
   },
   "openthought3_qwen3_4b": {
-    "file_name": "/pscratch/sd/y/yequan/opd/datasets/OpenThought3-Qwen3-4B/data/train.jsonl",
+    "file_name": "/home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"

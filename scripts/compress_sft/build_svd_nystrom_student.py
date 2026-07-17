@@ -184,14 +184,9 @@ def compress(model, tokenizer, *, ratio, objective, skip_last, device, calib_num
                 f"protect={sorted(protect)} (whole layer: attn+MLP)")
 
     texts = _calib_texts(tokenizer, calib_num_seqs * 20)
-    # Default recipe: full sequences, sequence-reweighted (below). The cap DROPS (does
-    # not truncate) traces longer than it. forward caps at 16384 (bs=2, light);
-    # combined runs a full-length backward (bs=1) — caps at 10240 (16384/12386 OOM 80GB).
     bs = 1 if objective == "combined" else 2
-    max_seq_len = 10240 if objective == "combined" else 16384
     loader = build_fullseq_calib_loader(tokenizer, texts, num_seqs=calib_num_seqs,
-                                        length_filter="full", max_seq_len=max_seq_len,
-                                        batch_size=bs)
+                                        length_filter="full", batch_size=bs)
     model.eval()
     if objective == "forward":
         from compress.calibration import collect_covariances_reweighted

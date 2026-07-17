@@ -496,7 +496,6 @@ def _materialize_and_save(model, ckpt_dir: str) -> None:
     complete data without any gather. ZeRO-3 is disallowed by the parser validator.
     """
     import copy
-    import torch
 
     from ..model.compress_setup import _ensure_compress_on_path
     _ensure_compress_on_path()
@@ -508,21 +507,14 @@ def _materialize_and_save(model, ckpt_dir: str) -> None:
     ckpt = pathlib.Path(ckpt_dir)
     ckpt.mkdir(parents=True, exist_ok=True)
 
-    # Deep-copy on CPU to avoid doubling GPU memory; detach grads first. Materialize
-    # in FP32: the BTT/SVD materialize does `V_r @ U_r` matmuls, and bf16 GEMM on CPU
-    # is pathologically slow on torch>=2.12 (effectively hangs for ~140 SVD linears).
-    # FP32 CPU GEMM (MKL) is fast; we cast the dense result back to the model's dtype
-    # before saving so the on-disk checkpoint stays bf16. Keeping it on CPU avoids
-    # doubling GPU memory at save time (the optimizer states are still resident).
-    orig_dtype = next(model.parameters()).dtype
-    peer = copy.deepcopy(model).to("cpu", dtype=torch.float32)
+    # Deep-copy on CPU to avoid doubling GPU memory; detach grads first.
+    peer = copy.deepcopy(model).to("cpu")
     has_btt = any(isinstance(m, BTTLinear) for m in peer.modules())
     has_svd = any(isinstance(m, SVDCompressedLinear) for m in peer.modules())
     if has_btt:
         materialize_calibrated_btt_to_linear(peer)
     if has_svd:
         materialize_svd_to_linear(peer)
-    peer.to(dtype=orig_dtype)
     peer.save_pretrained(str(ckpt))
     del peer
 
@@ -537,19 +529,6 @@ class CompressSaveCallback(TrainerCallback):
     def __init__(self, finetuning_args):
         del finetuning_args   # currently unused; accepted for symmetry
                               # with CompressNormalizeCallback's signature.
-
-    def on_train_begin(self, args, state, control, model=None, **kwargs):
-        # Save a `checkpoint-0-merged` of the freshly-compressed (but untrained)
-        # model so it can be benchmark-evaluated as the post-compression baseline.
-        # ONLY on a fresh start (global_step == 0); on resume_from_checkpoint the
-        # model already holds trained weights, so re-saving here would be wrong.
-        if not getattr(state, "is_world_process_zero", False):
-            return
-        if state.global_step != 0:
-            return
-        out = pathlib.Path(args.output_dir) / "checkpoint-0-merged"
-        out.mkdir(parents=True, exist_ok=True)
-        self._dump(model, str(out), self._extract_tokenizer(kwargs))
 
     def on_save(self, args, state, control, model=None, **kwargs):
         if not getattr(state, "is_world_process_zero", False):
@@ -567,11 +546,8 @@ class CompressSaveCallback(TrainerCallback):
             return
         import shutil
         root = pathlib.Path(args.output_dir)
-        # Keep `checkpoint-0-merged` (the post-compression baseline) permanently;
-        # only rotate the trained (step > 0) merged dirs.
         merged = sorted(
-            (p for p in root.glob("checkpoint-*-merged")
-             if p.is_dir() and int(p.name.split("-")[1]) > 0),
+            (p for p in root.glob("checkpoint-*-merged") if p.is_dir()),
             key=lambda p: int(p.name.split("-")[1]),
         )
         for old in merged[:-keep]:

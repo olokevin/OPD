@@ -11,27 +11,19 @@ set -u
 OPD_REPO=/global/u1/y/yequan/Project/OPD
 DATA_ROOT=/pscratch/sd/y/yequan/opd
 ACCOUNT=m4788_g
-ALLOC_NODES=${ALLOC_NODES:-4}   # 4 nodes/16 GPU (8 nodes total across the 2 jobs is allowed)
+ALLOC_NODES=2
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-30}
 STALL_LIMIT=${STALL_LIMIT:-3}
 
-# ---- recipe config: combined-calib compressed student -> OPD on the SAME
-# ---- OpenThought3 prompts as the compress_sft run (env-overridable). ----
+# ---- recipe config (exported -> inside.sh -> env.sh -> on_policy_distillation.sh) ----
 export ENV_SCRIPT=opd/compress/opd_2node_env_compress.sh
-# Freeze the zero-padded MLP columns: set here (BEFORE ray start) so the ray-start
-# srun forwards it -> raylet -> actors (rayenv re-exports it). The driver env also
-# sets it, but that's after ray start so the actors wouldn't see it.
-export SPARSEGPT_PRESERVE_MASK=1
-# student rebuilt with the new calibration (combined, 128 seqs, drop cap) — see
-# nersc_build_students / the c128 build job. Distinct path so the old DAPO student stays.
-export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-${DATA_ROOT}/compress_opd/students/svd_nystrom_r07_combined_pad}
-export CKPT_PATH=${CKPT_PATH:-${DATA_ROOT}/checkpoints/opd_compress_svd_nystrom_combined_ot3}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-opd_compress_svd_nystrom_combined_ot3}
-export WANDB_RUN_ID=${WANDB_RUN_ID:-opd_compress_svd_nystrom_combined_ot3}
-export TRAIN_DATASET=${TRAIN_DATASET:-datasets/OpenThoughts3_opd.parquet}
-export TRAIN_DATASET_NAME=${TRAIN_DATASET_NAME:-OpenThoughts3}
-export TEST_FILE=${TEST_FILE:-'["datasets/test_data/AIME24/test.parquet", "datasets/test_data/AIME25/test.parquet", "datasets/test_data/AMC23/test.parquet", "datasets/test_data/MATH-500/test.parquet"]'}
-export LR=${LR:-1e-6}
+export ACTOR_MODEL_PATH=${DATA_ROOT}/compress_opd/students/svd_nystrom_r07_combined
+export CKPT_PATH=${DATA_ROOT}/checkpoints/opd_compress_svd_nystrom_combined
+export EXPERIMENT_NAME=opd_compress_svd_nystrom_combined
+export WANDB_RUN_ID=opd_compress_svd_nystrom_combined
+export TRAIN_DATASET=datasets/dapo-math-17k.parquet
+export TRAIN_DATASET_NAME=DAPO-Math-17k
+export LR=1e-6
 export SAVE_FREQ=${SAVE_FREQ:-10}
 export TEST_FREQ=${TEST_FREQ:-20}
 
@@ -40,8 +32,8 @@ ITERFILE=${CKPT}/latest_checkpointed_iteration.txt
 mkdir -p "$CKPT" "${DATA_ROOT}/logs"
 cur_iter() { cat "$ITERFILE" 2>/dev/null | tr -dc '0-9' || echo 0; }
 
-# Student is built INSIDE the first allocation by build_then_opd_inside.sh (if missing),
-# so no pre-check here — on resume it already exists and the build is skipped.
+if [ ! -f "${ACTOR_MODEL_PATH}/config.json" ]; then
+  echo "=== ERROR: compressed student missing: $ACTOR_MODEL_PATH (run nersc_build_students.sh first) ==="; exit 1; fi
 
 # Keep ONLY the latest checkpoint (the resumed-from ckpt lingers; prune older).
 prune_loop() {
@@ -69,7 +61,7 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   echo "=== attempt $ATTEMPT $(date) | start_iter=${START_ITER} | runlog=$RUNLOG ==="
   salloc --nodes "$ALLOC_NODES" --qos interactive --time 4:00:00 \
          --constraint 'gpu&hbm80g' --gpus-per-node=4 --account "$ACCOUNT" \
-         bash "$OPD_REPO/slurm/opd/compress/build_then_opd_inside.sh" > "$RUNLOG" 2>&1
+         bash "$OPD_REPO/slurm/opd/opd_2node_inside.sh" > "$RUNLOG" 2>&1
   RC=$?
   END_ITER=$(cur_iter); END_ITER=${END_ITER:-0}
   TOTAL=$(grep -oE "Total training steps: [0-9]+" "$RUNLOG" 2>/dev/null | grep -oE "[0-9]+" | tail -1)

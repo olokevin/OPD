@@ -57,13 +57,7 @@ DTYPE_MAP = {
 # model loading / param accounting
 # --------------------------------------------------------------------------- #
 def load_model(model_name: str, dtype: torch.dtype, device: str):
-    # sdpa attention is O(seq) memory; the transformers default can be eager
-    # (O(seq^2)), which OOMs the combined fwd+bwd calibration on long traces.
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype, attn_implementation="sdpa")
-    except (ValueError, TypeError):
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
     return model.to(device)
 
 
@@ -269,17 +263,14 @@ def eval_cell(model, tokenizer, *, device: str, math_limit: int,
 # calibration loader (OpenThought3 math traces — the held-fixed calibration)
 # --------------------------------------------------------------------------- #
 def build_calib_loader(calib: str, tokenizer, *, num_seqs: int, max_length: int,
-                       batch_size: int, seed: int = 3, length: str = "full",
-                       max_seq_len: int | None = None):
+                       batch_size: int, seed: int = 3, length: str = "full"):
     """OpenThought3 (default, the held-fixed calibration) or C4.
 
     length:
       - "full"   : DEFAULT (2026-06-04) — full un-windowed sequences (one per
                    conversation), pad+mask collated, paired with the new
                    sequence-reweighted covariance collection. Beats the window
-                   scheme on reasoning (FULLSEQ_CALIB_RESULTS.md). max_seq_len=None
-                   (default) keeps every trace at full length; set an int to DROP
-                   (never truncate) traces longer than it.
+                   scheme on reasoning (FULLSEQ_CALIB_RESULTS.md).
       - "lt2048" : full sequences but only conversations < 2048 tokens (best
                    strict-MATH variant in the tune).
       - "window2048" : legacy 2048-token windows (the pre-2026-06-04 behavior;
@@ -292,15 +283,13 @@ def build_calib_loader(calib: str, tokenizer, *, num_seqs: int, max_length: int,
             from layer_sensitivity import _openthought3_texts
             path = REPO_ROOT / "datasets" / "OpenThought3-Qwen3-4B" / "data" / "train.jsonl"
             texts = _openthought3_texts(tokenizer, path, n=num_seqs * 20)
-            # bs=1 for "full": a full-length backward over a 4B model is the
-            # memory ceiling for the combined/bwd path; batching would OOM. With
-            # max_seq_len=None (never truncate) very long traces can OOM even at
-            # bs=1 — lower num_seqs or pass a max_seq_len cap if so. lt2048 is
-            # short enough to batch.
+            # batch_size=1 for "full" (truncated to 4096): a 4096-token backward
+            # over a 4B model is the memory ceiling for the combined/bwd path;
+            # batching would OOM. lt2048 is short enough to batch.
             bs = 4 if length == "lt2048" else 1
             return build_fullseq_calib_loader(
                 tokenizer, texts, num_seqs=num_seqs, length_filter=length,
-                max_seq_len=max_seq_len, batch_size=bs)
+                batch_size=bs)
         # legacy windowed escape hatch
         from layer_sensitivity import build_openthought3_loader
         return build_openthought3_loader(

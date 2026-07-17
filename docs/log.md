@@ -95,28 +95,3 @@ Created `docs/wiki/reasoning_aware_compress_calib.md` consolidating the durable 
 
 ## [2026-06-05] ingest | compress_sft — in-process svd_nystrom compress-then-train (Qwen3 PASS, OLMoE fused-expert blocked)
 New LlamaFactory `finetuning_type: svd_nystrom` (branch `compress_sft`, worktree `OPD-compress-sft` off `np-v2-cudagraph-rails`): compress at model-init with SVD-LLM-V2 on `self_attn` + Nystrom/MoDeGPT on MLP (retain 0.7, sequence-reweighted full-seq OpenThought3 calib), keeping factors **trainable** (SVD `U_r/V_r` + Nystrom-shrunk MLP Linears), then SFT on OpenThoughts3. Two objectives: `svd_v2` (forward) / `svd_v2_combined` (fwd+bwd). Last-layer skip is **attn-only** (SVD is shape-preserving; MLP shrinks uniformly so the saved checkpoint keeps one global `intermediate_size`, updated to the Nystrom `k`). `CompressSaveCallback` writes a smaller dense HF checkpoint (SVD→dense, Nystrom passthrough). Eval = MATH-500@4096 + **MMLU-Pro** via the ttrl grader (LlamaFactory eval CLI is disabled in this fork); mid-training growth via val-loss (wandb) + post-hoc `sweep_sft_ckpts.sh`. wandb project `compress_sft_{model}`. **Qwen3-4B-Base smoke PASS for both objectives** (36 triplets, 140 trainable SVD attn, intermediate_size 9728→6810, save/reload 0 missing/0 unexpected). **OLMoE-1B-7B BLOCKED**: transformers 5.2 stores its 64 experts as fused 3D tensors (`OlmoeExperts.gate_up_proj/down_proj`), not `nn.Linear` triplets → `find_mlp_triplets` finds 0; added a fast-fail `_assert_no_fused_experts` guard; per-expert fused-tensor (or unfuse-at-load) Nystrom is the follow-up. Files: `LlamaFactory/src/llamafactory/{model/compress_setup.py,hparams/finetuning_args.py,hparams/parser.py,model/adapter.py}`, `LlamaFactory/examples/compress_train/*.yaml`, `scripts/opd/math/compressed_opd/{run_compress_sft.sh,eval_mmlu_pro.py,sweep_sft_ckpts.sh,_smoke_svd_nystrom.py}`. Results: `docs/results/compress_sft.md`.
-
-## [2026-06-08] ingest | compress_sft retain-0.7 4-node relaunch + unified train/eval wandb
-Stopped the retain-0.6 1-node jobs; relaunched forward+combined at retain 0.7, 4 nodes/16 GPU
-each concurrent (proved interactive allows 8 nodes: node=4 is per-JOB, MaxJobsPU=2, no per-user
-cap — corrected the old "4-node total" claim). Global batch held at 64 (accum 8→2 for world16).
-Added AIME24 to eval; eval now at step-0 (post-compression baseline via on_train_begin) + each
-saved ckpt; train AND eval log to ONE wandb run via log_train_to_wandb.py. Updated
-results/compress_sft.md + memory nersc-compress-sft.
-
-## [2026-06-08] ingest | calibration default (128/full/never-truncate/seq-reweight) + docs/exp_entries.md
-Killed the stuck step-0 eval jobs. Made the default calibration 128 reasoning traces, full
-sequences NEVER truncated (max_seq_len=None), sequence-reweighted — in compress_setup.py
-(compress_sft), both build_svd_nystrom_student.py, and compress_common.build_calib_loader
-(so compress_opd inherits it); bumped nersc compress_sft YAMLs calib_num_seqs 16->128.
-Flagged combined-path OOM risk (full backward over 4B). New docs/exp_entries.md: setting +
-standard/SLURM run entries for compress_sft, compress_opd, opd(full/LoRA/FURA). Indexed it.
-
-## [2026-06-08] ingest | calib cap = DROP-not-truncate, combined 8192/bs=1, eval contracts in exp_entries
-Changed the calibration length cap to DROP (filter out) traces longer than the cap instead of
-truncating them (build_fullseq_calib_loader 'full' path, src/compress/loaders.py — submodule).
-forward: no cap (full). combined: drop > 8192 + bs=1 (set in compress_setup + both build scripts).
-Verified live on an 80GB A100: of 2560 candidates, 40 (>8192, up to 12386 tok) dropped, longest
-kept 8170 — peak-mem test running. Added Eval recipes to docs/exp_entries.md: MATH = wiki contract
-(greedy 2048, non-thinking, ttrl); AIME/AMC = OPD-val (avg@16, temp 1.0, top_p 0.95, ~31744, vLLM);
-MMLU = LlamaFactory common (5-shot, A-D choice-logprob) — with current-impl divergences flagged.

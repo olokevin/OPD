@@ -7,10 +7,6 @@ and the **Knowledge system** section of `CLAUDE.md` for the maintenance workflow
 Every page below is LLM-maintained. When you ingest a source or file a query answer,
 add/update its row here and append a line to `log.md`.
 
-**Runbook:** [exp_entries.md](exp_entries.md) — per-experiment setting + run entries
-(standard / SLURM) for `compress_sft`, `compress_opd`, and `opd` (full/LoRA/FURA). The
-shared default calibration (128 full-seq, never-truncated, sequence-reweighted) is defined there.
-
 ---
 
 ## Wiki — design docs (`docs/wiki/`)
