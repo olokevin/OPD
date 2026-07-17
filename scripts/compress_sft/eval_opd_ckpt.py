@@ -44,10 +44,13 @@ def linear_sparsity(model, skip=("lm_head",)):
 
 
 @torch.no_grad()
-def eval_math500(model, tokenizer, device, limit, max_new_tokens, batch_size):
+def eval_bench(model, tokenizer, device, bench, limit, max_new_tokens, batch_size):
+    """Greedy-generate + ttrl_math grade a benchmark whose parquet has the
+    MATH-500 schema (`prompt` chat list + `reward_model.ground_truth`). Used for
+    both MATH-500 and AIME24."""
     import pandas as pd
     from verl.utils.reward_score.ttrl_math import compute_score
-    df = pd.read_parquet(REPO_ROOT / "datasets" / "test_data" / "MATH-500" / "test.parquet")
+    df = pd.read_parquet(REPO_ROOT / "datasets" / "test_data" / bench / "test.parquet")
     if limit > 0:
         df = df.iloc[:limit]
     prompts, gts = [], []
@@ -82,13 +85,17 @@ def eval_math500(model, tokenizer, device, limit, max_new_tokens, batch_size):
             res = compute_score(resp, str(gt))
             n_correct += int(res.get("acc", False))
         done = min(i + batch_size, n_total)
-        print(f"  MATH-500 {done}/{n_total}  acc={n_correct / done:.4f}", flush=True)
+        print(f"  {bench} {done}/{n_total}  acc={n_correct / done:.4f}", flush=True)
     return n_correct / n_total if n_total else 0.0
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--tokenizer", default=None,
+                    help="tokenizer source; defaults to --model-dir. Use the base "
+                         "model id (e.g. Qwen/Qwen3-4B) when the ckpt tokenizer was "
+                         "saved by a newer transformers than the eval env supports.")
     ap.add_argument("--metrics-json", required=True)
     ap.add_argument("--label", required=True, help="short label for the run")
     ap.add_argument("--device", default="cuda")
@@ -98,8 +105,13 @@ def main():
     ap.add_argument("--math-limit", type=int, default=200)
     ap.add_argument("--math-max-new-tokens", type=int, default=2048)
     ap.add_argument("--math-batch-size", type=int, default=16)
+    ap.add_argument("--aime-limit", type=int, default=30,
+                    help="AIME24 problems (full set is 30); <=0 means all")
+    ap.add_argument("--aime-max-new-tokens", type=int, default=4096)
+    ap.add_argument("--aime-batch-size", type=int, default=8)
     ap.add_argument("--skip-ppl", action="store_true")
     ap.add_argument("--skip-math", action="store_true")
+    ap.add_argument("--skip-aime", action="store_true")
     args = ap.parse_args()
 
     dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
@@ -107,8 +119,13 @@ def main():
     print(f"=== Eval {args.label} ===")
     print(f"Loading {args.model_dir} in {args.dtype} on {args.device}")
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-    model = AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=dtype).to(args.device)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model_dir)
+    # svd_nystrom merged ckpts have HETEROGENEOUS MLP widths (shrunk layers + a
+    # full last layer) -> not from_pretrained-loadable; load_compressed_merged
+    # resizes per-layer MLPs to the saved shapes (falls back to from_pretrained when
+    # the checkpoint is homogeneous).
+    from hetero_load import load_compressed_merged
+    model = load_compressed_merged(args.model_dir, dtype=dtype, device=args.device)
     total, nonzero = count_params(model)
     lin_z_frac, lin_tot, lin_z = linear_sparsity(model)
     print(f"Params: total={total / 1e9:.3f}B  nonzero={nonzero / 1e9:.3f}B "
@@ -124,11 +141,19 @@ def main():
 
     math_acc = None
     if not args.skip_math:
-        math_acc = eval_math500(model, tokenizer, device=args.device,
-                                limit=args.math_limit,
-                                max_new_tokens=args.math_max_new_tokens,
-                                batch_size=args.math_batch_size)
+        math_acc = eval_bench(model, tokenizer, device=args.device, bench="MATH-500",
+                              limit=args.math_limit,
+                              max_new_tokens=args.math_max_new_tokens,
+                              batch_size=args.math_batch_size)
         print(f"MATH-500 ({args.math_limit} greedy) = {math_acc * 100:.2f}%")
+
+    aime_acc = None
+    if not args.skip_aime:
+        aime_acc = eval_bench(model, tokenizer, device=args.device, bench="AIME24",
+                              limit=args.aime_limit,
+                              max_new_tokens=args.aime_max_new_tokens,
+                              batch_size=args.aime_batch_size)
+        print(f"AIME24 ({args.aime_limit} greedy) = {aime_acc * 100:.2f}%")
 
     metrics = {
         "label": args.label,
@@ -140,6 +165,7 @@ def main():
         "linear_total_B": lin_tot / 1e9,
         "c4_ppl": ppl,
         "math500_acc": math_acc,
+        "aime24_acc": aime_acc,
         "elapsed_s": time.time() - t0,
     }
     Path(args.metrics_json).parent.mkdir(parents=True, exist_ok=True)

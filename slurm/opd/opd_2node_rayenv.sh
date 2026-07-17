@@ -46,6 +46,11 @@ export FI_CXI_DEFAULT_CQ_SIZE=131072
 export NCCL_TIMEOUT=7200 TORCH_NCCL_BLOCKING_WAIT=1 TORCH_DISTRIBUTED_DEFAULT_TIMEOUT=7200
 export OMP_NUM_THREADS=8
 
+# Pass the SparseGPT/zero-pad mask-preservation flag through to the RAY ACTORS
+# (they inherit the raylet env, NOT the driver — so the compress controller exports
+# SPARSEGPT_PRESERVE_MASK=1 and this re-exports it here; default 0 for other recipes).
+export SPARSEGPT_PRESERVE_MASK=${SPARSEGPT_PRESERVE_MASK:-0}
+
 # JIT / framework caches on node-local /tmp (flock works there, unlike GPFS).
 _C=/tmp/${USER}/zo_cache
 export TRITON_CACHE_DIR=${_C}/triton TORCHINDUCTOR_CACHE_DIR=${_C}/inductor

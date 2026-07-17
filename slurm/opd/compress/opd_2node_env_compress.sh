@@ -40,11 +40,12 @@ export USE_KL=${USE_KL:-False}
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
 
 # ---- full model (no PEFT) ----
+export SPARSEGPT_PRESERVE_MASK=1   # freeze the zero-padded MLP columns (Option B)
 export PEFT_MODE=none
 
 # wandb/project: own project for the compress thread (rayenv pins WANDB_PROJECT;
 # override it here so these runs don't land in the 1.7B project).
-export PROJECT_NAME=${PROJECT_NAME:-opd_compress_svd_nystrom}
+export PROJECT_NAME=${PROJECT_NAME:-nersc_compress_opd_qwen4b}
 export WANDB_PROJECT=${PROJECT_NAME}
 
 # Non-thinking + keep ONLY the latest checkpoint + auto-resume + 4B memory-fit

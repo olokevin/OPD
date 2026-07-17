@@ -57,7 +57,7 @@ if str(REPO_ROOT / "verl") not in sys.path:
 # Reuse the A/B/D mechanism-fix drivers' shared eval/calib helpers — they bake
 # in the operating-point protocol (last-layer skip, MATH-500 + C4 PPL contract,
 # OpenThought3 sequence/full calibration default).
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "opd" / "math" / "compressed_opd"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "reasoning_aware_compress"))
 
 import compress_common as cc  # noqa: E402
 
@@ -121,6 +121,47 @@ def patch_uniform_intermediate(model) -> int:
     k = sizes.pop()
     model.config.intermediate_size = int(k)
     return int(k)
+
+
+def zero_pad_mlps(model) -> "tuple[int, int]":
+    """Zero-pad every shrunk MLP up to config.intermediate_size so the model is a
+    STOCK Qwen3 (uniform width) with the padded columns EXACTLY zero. Unlike
+    patch_uniform_intermediate (which shrinks the config and requires uniform/
+    skip_last=0 compression), this KEEPS the last layer dense (skip_last=1) by
+    padding the shrunk layers instead. The padding is preserved (frozen at zero)
+    during OPD via verl's SPARSEGPT_PRESERVE_MASK=1, so the model stays effectively
+    compressed while remaining vLLM/from_pretrained-loadable. Returns (n_padded, I)."""
+    import torch.nn as nn
+    I = int(model.config.intermediate_size)
+    n_padded = 0
+    for m in model.modules():
+        if not (hasattr(m, "gate_proj") and hasattr(m, "up_proj") and hasattr(m, "down_proj")):
+            continue
+        w = m.gate_proj.weight.shape[0]
+        if w >= I:
+            continue  # already full width (e.g. the protected last layer)
+        H_in = m.gate_proj.weight.shape[1]      # hidden size (gate/up in_features)
+        H_out = m.down_proj.weight.shape[0]     # hidden size (down out_features)
+        dev, dt = m.gate_proj.weight.device, m.gate_proj.weight.dtype
+        for name in ("gate_proj", "up_proj"):   # [w, H] -> [I, H], zero rows w:I
+            old = getattr(m, name)
+            new = nn.Linear(H_in, I, bias=old.bias is not None, device=dev, dtype=dt)
+            with torch.no_grad():
+                new.weight.zero_()
+                new.weight[:w].copy_(old.weight)
+                if old.bias is not None:
+                    new.bias.zero_(); new.bias[:w].copy_(old.bias)
+            setattr(m, name, new)
+        old = m.down_proj                        # [H, w] -> [H, I], zero cols w:I
+        new = nn.Linear(I, H_out, bias=old.bias is not None, device=dev, dtype=dt)
+        with torch.no_grad():
+            new.weight.zero_()
+            new.weight[:, :w].copy_(old.weight)
+            if old.bias is not None:
+                new.bias.copy_(old.bias)
+        m.down_proj = new
+        n_padded += 1
+    return n_padded, I
 
 
 def compress_svd_nystrom(model, attn_fwd_cov, mlp_stats, *, ratio, device, protect,
@@ -233,6 +274,13 @@ def main():
                          "to the uniform Nystrom width, so the checkpoint loads as a "
                          "stock Qwen3ForCausalLM (required for the verl actor). Use "
                          "with --skip-last-layers 0 so the MLP width is uniform.")
+    ap.add_argument("--save-zero-padded", action="store_true",
+                    help="before save, merge SVD-V2 attn factors to dense AND zero-pad "
+                         "the shrunk MLPs up to config.intermediate_size, keeping the "
+                         "last layer dense (skip_last=1). Loads as a stock Qwen3 (vLLM/"
+                         "verl); the zero padding is frozen during OPD via "
+                         "SPARSEGPT_PRESERVE_MASK=1, so it stays effectively compressed. "
+                         "This is the SAME compression as the compress_sft run.")
     ap.add_argument("--save-dir", required=True,
                     help="HF model dir for the compressed student (verl actor input)")
     ap.add_argument("--metrics-json", default=None)
@@ -268,10 +316,14 @@ def main():
     m0 = copy.deepcopy(base_cpu).to(device)
 
     def _calib():
+        # cap = DROP (never truncate) traces longer than it. forward caps at 16384;
+        # combined runs a full-length backward (cc forces bs=1 on the full path) —
+        # caps at 10240 (16384 and a real 12386-token trace OOM an 80GB GPU).
+        msl = 10240 if args.objective == "combined" else 16384
         return cc.build_calib_loader(
             args.calib, tokenizer, num_seqs=args.calib_num_seqs,
             max_length=args.calib_max_length, batch_size=args.calib_batch_size,
-            seed=args.calib_seed, length=args.calib_length,
+            seed=args.calib_seed, length=args.calib_length, max_seq_len=msl,
         )
 
     attn_bwd_cov = None
@@ -349,6 +401,14 @@ def main():
             k = patch_uniform_intermediate(model)
             logger.info(f"stock-dense save: merged {n_merged} SVD attn modules; "
                         f"config.intermediate_size -> {k}")
+        elif args.save_zero_padded:
+            # Keep the last layer dense (skip_last=1): merge attn to dense, then
+            # zero-pad the shrunk MLPs up to config.intermediate_size so the model is
+            # a stock Qwen3 with frozen-zero padding (SPARSEGPT_PRESERVE_MASK=1 in OPD).
+            n_merged = merge_svd_to_dense(model)
+            n_pad, I = zero_pad_mlps(model)
+            logger.info(f"zero-padded save: merged {n_merged} SVD attn modules; "
+                        f"zero-padded {n_pad} shrunk MLPs -> uniform {I}")
         logger.info(f"Saving HF weights -> {save_dir}")
         model.save_pretrained(str(save_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(save_dir))

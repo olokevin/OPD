@@ -193,18 +193,37 @@ def _init_compress_svd_nystrom(model, model_args, fa):
         f"protect={sorted(protect)}"
     )
 
-    # --- sequence-reweighted FULL-seq calibration loader (wiki §5 default) ---
+    # --- DEFAULT calibration recipe (see docs/exp_entries.md) -----------------
+    # Full sequences, sequence-reweighted covariance, calib_num_seqs from the YAML
+    # (default 128). The cap DROPS (does not truncate) traces longer than it. forward
+    # caps at 16384 (bs=2, no backward — light). combined runs a full-length CE
+    # backward (bs=1): 16384 and even a real 12386-token trace OOM an 80GB GPU, so
+    # combined caps at 10240 (verified: the 10205-token ceiling fits at bs=1).
     texts = _render_calib_texts(
         tokenizer, fa.calib_traces_path, n=int(fa.calib_num_seqs) * 20,
     )
-    # combined/backward path: bs=1 + truncate to 4096 to keep the backward in mem.
     calib_batch_size = 1 if objective == "combined" else 2
+    calib_max_seq_len = 10240 if objective == "combined" else 16384
     loader = build_fullseq_calib_loader(
         tokenizer, texts,
         num_seqs=int(fa.calib_num_seqs),
         length_filter="full",
+        max_seq_len=calib_max_seq_len,   # cap = DROP longer traces (never truncate)
         batch_size=calib_batch_size,
     )
+
+    # --- DDP serialization of the GPU-heavy compress ---
+    # Calibration (forward/backward passes) runs concurrently on all ranks fine, but
+    # CONCURRENT multi-rank SVD (cusolver) during the compress reproducibly kills one
+    # rank mid-loop with NO python traceback on torch2.12/NCCL2.29 (single-process
+    # compress is fine; verified). So all ranks calibrate concurrently, then run the
+    # nystrom+SVD compress ONE RANK AT A TIME with a barrier between (each waits at most
+    # a few minutes, well under the PG timeout). Every rank still compresses (identical
+    # structure); only the GPU SVD concurrency is removed.
+    import torch.distributed as _dist
+    _is_dist = _dist.is_available() and _dist.is_initialized()
+    _world = _dist.get_world_size() if _is_dist else 1
+    _rank = _dist.get_rank() if _is_dist else 0
 
     model.eval()
     if objective == "forward":
@@ -225,15 +244,17 @@ def _init_compress_svd_nystrom(model, model_args, fa):
             f"{len(down_cov)} mlp-down ({n_dense_mlp} MLP triplets left dense: "
             "protected last layer + any unrouted MoE experts)."
         )
-        nystrom_compress_model(
-            model, {k: v.clone() for k, v in down_cov.items()},
-            sparsity=1.0 - ratio, skip_layers=skip, device=device,
-        )
-        svd_llm_v2_compress_model(
-            model, {k: v.clone() for k, v in attn_cov.items()},
-            compression_ratio=ratio, skip_layers=skip, device=device,
-            objective="forward",
-        )
+
+        def _do_compress():
+            nystrom_compress_model(
+                model, {k: v.clone() for k, v in down_cov.items()},
+                sparsity=1.0 - ratio, skip_layers=skip, device=device,
+            )
+            svd_llm_v2_compress_model(
+                model, {k: v.clone() for k, v in attn_cov.items()},
+                compression_ratio=ratio, skip_layers=skip, device=device,
+                objective="forward",
+            )
     else:  # combined (forward + backward)
         from compress.calibration import (
             collect_both_covariances_from_loader,
@@ -260,15 +281,25 @@ def _init_compress_svd_nystrom(model, model_args, fa):
             f"{len(mlp_stats)} mlp-down ({n_dense_mlp} MLP triplets left dense: "
             "protected last layer + any unrouted MoE experts)."
         )
-        nystrom_combined_compress_model(
-            model, mlp_stats, sparsity=1.0 - ratio, skip_layers=skip, device=device,
-        )
-        svd_llm_v2_compress_model(
-            model, {k: v.clone() for k, v in attn_fwd.items()},
-            compression_ratio=ratio, skip_layers=skip, device=device,
-            objective="combined",
-            backward_covariances={k: v.clone() for k, v in attn_bwd.items()},
-        )
+
+        def _do_compress():
+            nystrom_combined_compress_model(
+                model, mlp_stats, sparsity=1.0 - ratio, skip_layers=skip, device=device,
+            )
+            svd_llm_v2_compress_model(
+                model, {k: v.clone() for k, v in attn_fwd.items()},
+                compression_ratio=ratio, skip_layers=skip, device=device,
+                objective="combined",
+                backward_covariances={k: v.clone() for k, v in attn_bwd.items()},
+            )
+
+    # rank-by-rank GPU SVD (no concurrent cusolver across ranks)
+    for _r in range(_world):
+        if _r == _rank:
+            logger.info(f"compress_setup[svd_nystrom]: rank {_rank}/{_world} compressing")
+            _do_compress()
+        if _is_dist:
+            _dist.barrier()
     del loader
     _empty_cache()
 

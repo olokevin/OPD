@@ -120,6 +120,9 @@ def eval_mmlu_pro(model, tokenizer, device, limit, max_new_tokens, batch_size):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--tokenizer", default=None,
+                    help="tokenizer source; defaults to --model-dir (use base model "
+                         "id when the eval env's transformers can't read the ckpt one).")
     ap.add_argument("--metrics-json", required=True)
     ap.add_argument("--label", required=True, help="short label for the run")
     ap.add_argument("--device", default="cuda")
@@ -136,8 +139,10 @@ def main():
     print(f"=== Eval MMLU-Pro {args.label} ===")
     print(f"Loading {args.model_dir} in {args.dtype} on {args.device}")
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-    model = AutoModelForCausalLM.from_pretrained(args.model_dir, torch_dtype=dtype).to(args.device)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model_dir)
+    # heterogeneous svd_nystrom merged ckpt -> custom loader (see hetero_load).
+    from hetero_load import load_compressed_merged
+    model = load_compressed_merged(args.model_dir, dtype=dtype, device=args.device)
 
     acc, n, cat_acc = eval_mmlu_pro(
         model, tokenizer, device=args.device, limit=args.limit,
