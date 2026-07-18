@@ -36,7 +36,7 @@ export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=1
 # export CUDA_VISIBLE_DEVICES=1,2,3,4
 export PYTHONUNBUFFERED=1
-export PROJECT_NAME='OnPolicyDistillation' # TODO
+export PROJECT_NAME=${PROJECT_NAME:-OnPolicyDistillation} # TODO
 export TORCH_NCCL_BLOCKING_WAIT=1
 export NCCL_TIMEOUT=7200
 export TORCH_DISTRIBUTED_DEBUG=INFO
@@ -50,9 +50,9 @@ export GRPO_OUTCOME_WEIGHT=1.0
 # export SWANLAB_RUN_ID="jri5qia6iy67v7su0zjsv"
 
 
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESP_LENGTH=7168  # TODO: 31744 /15360 / 7168 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=31744 # TODO: 15360 / 7168 / 3072
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+export MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-7168}  # TODO: 31744 /15360 / 7168 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-31744} # TODO: 15360 / 7168 / 3072
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
@@ -139,6 +139,14 @@ export VAL_N=${VAL_N:-16}
 export VAL_TEMPERATURE=${VAL_TEMPERATURE:-1.0}
 export VAL_TOP_P=${VAL_TOP_P:-0.95}
 export EXTRA_HYDRA_ARGS=${EXTRA_HYDRA_ARGS:-}
+
+# GRPO objective knobs. TRAIN_BATCH_SIZE defaults to MINI_BATCH_SIZE*PARALLEL_SIZE
+# for back-compat, but can be set independently (SimpleRL-Zoo uses a large rollout
+# train_batch_size with a smaller ppo_mini_batch_size=MINI_BATCH_SIZE).
+export TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-$(( MINI_BATCH_SIZE * PARALLEL_SIZE ))}
+export ENTROPY_COEFF=${ENTROPY_COEFF:-0}          # verl default; SimpleRL-Zoo uses 0.001
+export KL_LOSS_COEF=${KL_LOSS_COEF:-0.005}        # used only when USE_KL=True
+export KL_LOSS_TYPE=${KL_LOSS_TYPE:-low_var_kl}
 
 export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
@@ -258,8 +266,8 @@ fi
 KL_ARGS=""
 if [ "$USE_KL" = "True" ]; then
     KL_ARGS="actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.005 \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl"
+    actor_rollout_ref.actor.kl_loss_coef=$KL_LOSS_COEF \
+    actor_rollout_ref.actor.kl_loss_type=$KL_LOSS_TYPE"
 else
     KL_ARGS="actor_rollout_ref.actor.use_kl_loss=False"
 fi
@@ -272,6 +280,19 @@ fi
 
 PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
+
+# The apply_chat_template_kwargs.enable_thinking flag is a Qwen3-only chat-template
+# control. Qwen2.5 / Llama / etc. templates don't take it (Qwen2.5 silently ignores
+# it; other templates may reject unknown kwargs), so only pass it for Qwen3 models.
+# ENABLE_THINKING can force it on/off explicitly; unset -> auto-detect from the path.
+if [ -n "${ENABLE_THINKING:-}" ]; then
+    THINKING_ARG="++data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING"
+elif printf '%s' "$ACTOR_MODEL_PATH" | grep -qiE 'qwen-?3'; then
+    THINKING_ARG="++data.apply_chat_template_kwargs.enable_thinking=False"
+else
+    THINKING_ARG=""
+fi
+echo "THINKING_ARG: ${THINKING_ARG:-<skipped: non-Qwen3 actor>}"
 
 
 ray start --head
@@ -286,13 +307,13 @@ python3 -m verl.trainer.main_ppo \
     data.shuffle=False \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
-    data.train_batch_size=$((${MINI_BATCH_SIZE}*${PARALLEL_SIZE})) \
+    data.train_batch_size=$TRAIN_BATCH_SIZE \
     data.max_prompt_length=$MAX_PROMPT_LENGTH \
     data.max_response_length=$MAX_RESP_LENGTH \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    ++data.apply_chat_template_kwargs.enable_thinking=False \
+    $THINKING_ARG \
     actor_rollout_ref.model.path=$ACTOR_MODEL_PATH \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_activation_offload=True \
@@ -300,6 +321,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.lr=$LR \
     $LR_ARGS \
     actor_rollout_ref.actor.ppo_mini_batch_size=$MINI_BATCH_SIZE \
+    actor_rollout_ref.actor.entropy_coeff=$ENTROPY_COEFF \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PPO_MAX_TOKEN_LEN_PER_GPU \

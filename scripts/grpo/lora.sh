@@ -1,8 +1,11 @@
 #!/bin/bash
 # scripts/grpo/lora.sh — LoRA GRPO (zero-RL) on Qwen2.5-7B.
 #
-# Same GRPO base + SimpleRL-Zoo / slurm-fura-aligned setting as full.sh, but with
-# PEFT_MODE=lora (only the LoRA adapters train). No tensor parallel.
+# Same GRPO base + SimpleRL-Zoo Qwen2.5-7B RL recipe as full.sh (dataset, batch
+# sizes, KL/entropy, epochs, response length), but with PEFT_MODE=lora (only the
+# LoRA adapters train). Two deliberate deviations from full.sh: no tensor
+# parallel (PARALLEL_SIZE=1) and a higher LR (PEFT adapters need a larger step
+# than a 5e-7 full-FT LR).
 #
 # Override per-run, e.g. `LORA_RANK=64 LORA_ALPHA=128 bash scripts/grpo/lora.sh`.
 set -euo pipefail
@@ -15,26 +18,29 @@ set -a  # auto-export every assignment below to grpo.sh
 # ---- models + data ----
 ACTOR_MODEL_PATH=Qwen/Qwen2.5-7B
 HF_HOME=${HF_HOME:-/data/yequan/huggingface}
-TRAIN_DATASET_NAME=DAPO-Math-17k
-TRAIN_DATASET=datasets/dapo-math-17k.parquet   # same file as the slurm fura launch
+TRAIN_DATASET_NAME=MATH            # simplelr_math_35 -> math-lv3to5 + MATH-500 eval
 PROJECT_NAME=grpo-qwen25-7b
 
-# ---- hyperparameters (SimpleRL-Zoo / slurm fura aligned) ----
+# ---- hyperparameters (SimpleRL-Zoo Qwen2.5-7B recipe; LR raised for LoRA) ----
 MAX_PROMPT_LENGTH=1024
-MAX_RESP_LENGTH=7168
-MAX_VAL_RESP_LENGTH=7168
+MAX_RESP_LENGTH=8192
+MAX_VAL_RESP_LENGTH=8192
 TEMPERATURE=1.0
 N_RESPONSES=8
-MINI_BATCH_SIZE=64
-LR=1e-5                            # LoRA typically uses a higher LR than full-FT
-TOTAL_EPOCHS=1
-USE_KL=False
+TRAIN_BATCH_SIZE=1024
+MINI_BATCH_SIZE=256
+LR=1e-5                            # LoRA LR (NOT the 5e-7 full-FT LR)
+TOTAL_EPOCHS=20
+USE_KL=True
+KL_LOSS_COEF=1e-4
+KL_LOSS_TYPE=low_var_kl
+ENTROPY_COEFF=0.001
 MODEL_DTYPE=bfloat16
 VAL_N=8
 VAL_TEMPERATURE=1.0
 VAL_TOP_P=0.95
-SAVE_FREQ=20
-TEST_FREQ=20
+SAVE_FREQ=5
+TEST_FREQ=5
 IS_PLOT=False
 
 # ---- no tensor parallel ----
@@ -46,7 +52,7 @@ NNODES=${NNODES:-1}
 ACTOR_PARAM_OFFLOAD=False
 ACTOR_OPTIM_OFFLOAD=False
 REF_PARAM_OFFLOAD=True
-GPU_MEMORY_UTILIZATION=0.7
+GPU_MEMORY_UTILIZATION=0.75
 
 # ---- PEFT: LoRA ----
 PEFT_MODE=lora
