@@ -69,10 +69,58 @@ from compress.calibration import (  # noqa: E402
 )
 from compress.compress_model import MethodSpec  # noqa: E402
 from compress.svd.svd_llm_v2 import svd_llm_v2_compress_model  # noqa: E402
+from compress.svd.svd_linear import SVDCompressedLinear  # noqa: E402
 from compress.structured.nystrom import (  # noqa: E402
     nystrom_compress_model,
     nystrom_combined_compress_model,
 )
+import torch.nn as nn  # noqa: E402
+
+
+def merge_svd_to_dense(model) -> int:
+    """Materialize every SVDCompressedLinear (attn q/k/v/o_proj after SVD-V2)
+    back into a STANDARD nn.Linear by computing the exact dense weight.
+
+    SVDCompressedLinear.forward is  y = (x @ V_r) [* svd_s] @ U_r + bias, with
+    V_r:(d_in, rank), U_r:(rank, d_out) -> equivalent to nn.Linear with
+    W.T = V_r @ (diag(svd_s) @) U_r, i.e. W = (V_r @ Us).T of shape (d_out, d_in).
+    This is an EXACT reparametrization (identical forward), so the model's
+    function — and therefore its eval — is unchanged; it just becomes a stock
+    dense checkpoint that AutoModelForCausalLM/verl can load. Returns #merged."""
+    targets = [(n, m) for n, m in model.named_modules()
+               if isinstance(m, SVDCompressedLinear)]
+    for name, mod in targets:
+        V_r = mod.V_r.data.float()                 # (d_in, rank)
+        U_r = mod.U_r.data.float()                 # (rank, d_out)
+        if getattr(mod, "svd_s", None) is not None:
+            U_r = mod.svd_s.data.float().unsqueeze(1) * U_r
+        W = (V_r @ U_r).t().contiguous()           # (d_out, d_in)
+        d_out, d_in = W.shape
+        lin = nn.Linear(d_in, d_out, bias=mod.bias is not None)
+        with torch.no_grad():
+            lin.weight.copy_(W.to(mod.U_r.dtype))
+            if mod.bias is not None:
+                lin.bias.copy_(mod.bias.data)
+        lin = lin.to(device=mod.U_r.device, dtype=mod.U_r.dtype)
+        parent = model.get_submodule(name.rsplit(".", 1)[0])
+        setattr(parent, name.rsplit(".", 1)[-1], lin)
+    return len(targets)
+
+
+def patch_uniform_intermediate(model) -> int:
+    """Set config.intermediate_size to the (uniform) post-Nystrom MLP width so a
+    stock Qwen3ForCausalLM rebuilds with the right shape on reload. Requires the
+    compression to be uniform across layers (build with --skip-last-layers 0)."""
+    sizes = {m.gate_proj.weight.shape[0] for m in model.modules()
+             if hasattr(m, "gate_proj") and hasattr(m, "up_proj") and hasattr(m, "down_proj")}
+    if len(sizes) != 1:
+        raise ValueError(
+            f"non-uniform MLP intermediate sizes {sorted(sizes)} cannot be saved as "
+            f"a stock Qwen3 (one config.intermediate_size). Rebuild with "
+            f"--skip-last-layers 0 for a stock-dense save.")
+    k = sizes.pop()
+    model.config.intermediate_size = int(k)
+    return int(k)
 
 
 def compress_svd_nystrom(model, attn_fwd_cov, mlp_stats, *, ratio, device, protect,
@@ -175,7 +223,16 @@ def main():
     ap.add_argument("--math-max-new-tokens", type=int, default=2048)
     ap.add_argument("--math-batch-size", type=int, default=16)
     ap.add_argument("--skip-math", action="store_true")
+    ap.add_argument("--skip-ppl", action="store_true",
+                    help="skip C4 PPL (the only metric needing internet/C4) — "
+                         "use on offline compute nodes")
     ap.add_argument("--skip-save", action="store_true")
+    ap.add_argument("--save-stock-dense", action="store_true",
+                    help="before save, merge SVD-V2 attn factors (U_r/V_r) into "
+                         "dense nn.Linear weights and patch config.intermediate_size "
+                         "to the uniform Nystrom width, so the checkpoint loads as a "
+                         "stock Qwen3ForCausalLM (required for the verl actor). Use "
+                         "with --skip-last-layers 0 so the MLP width is uniform.")
     ap.add_argument("--save-dir", required=True,
                     help="HF model dir for the compressed student (verl actor input)")
     ap.add_argument("--metrics-json", default=None)
@@ -271,20 +328,28 @@ def main():
         model, tokenizer, device=device, math_limit=args.math_limit,
         math_max_new_tokens=args.math_max_new_tokens,
         math_batch_size=args.math_batch_size, ppl_seqlen=args.ppl_seqlen,
-        skip_math=args.skip_math,
+        skip_math=args.skip_math, skip_ppl=args.skip_ppl,
     )
     macc = "-" if metrics["math500_acc"] is None else f"{metrics['math500_acc'] * 100:.2f}%"
+    cppl = "-" if metrics["c4_ppl"] is None else f"{metrics['c4_ppl']:.4f}"
     logger.info(f"PRE-OPD: nz={metrics['params_nonzero_B']:.3f}B "
-                f"c4_ppl={metrics['c4_ppl']:.4f} math={macc}")
+                f"c4_ppl={cppl} math={macc}")
 
     # ---- save compressed HF dir (verl actor input) -------------------------- #
     if not args.skip_save:
         save_dir = Path(args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
+        if args.save_stock_dense:
+            # SVD-V2 leaves attn as factorized SVDCompressedLinear (U_r/V_r) and
+            # Nystrom shrinks the MLP width — neither is a stock Qwen3 layer, so a
+            # naive save is NOT loadable by AutoModelForCausalLM. Merge the attn
+            # factors back to dense nn.Linear (exact, no quality change) and patch
+            # config.intermediate_size to the uniform Nystrom width.
+            n_merged = merge_svd_to_dense(model)
+            k = patch_uniform_intermediate(model)
+            logger.info(f"stock-dense save: merged {n_merged} SVD attn modules; "
+                        f"config.intermediate_size -> {k}")
         logger.info(f"Saving HF weights -> {save_dir}")
-        # SVD-V2 + Nystrom mutate `nn.Linear.weight` in place (rank-truncated or
-        # neuron-subsampled-then-reconstructed); shapes are unchanged, so the
-        # resulting state_dict is a drop-in dense HF checkpoint.
         model.save_pretrained(str(save_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(save_dir))
 
