@@ -1,0 +1,74 @@
+### ============================== FOLLOW-UP / BLOCKED ==============================
+### OLMoE-1B-7B on transformers>=5.2 stores its 64 experts as FUSED 3D tensors
+### (OlmoeExperts.gate_up_proj/down_proj, NOT per-expert nn.Linear). The current
+### svd_nystrom Nystrom path requires UNFUSED gate/up/down nn.Linear triplets, so
+### this config fails fast at model-init (NotImplementedError) until fused-expert
+### per-expert Nystrom is implemented. Kept here as the spec for that follow-up.
+### See docs/results/compress_sft.md (OLMoE follow-up) for the unfuse plan.
+### ================================================================================
+###
+### Reasoning-aware compress-then-train: OLMoE-1B-7B, FORWARD+BACKWARD combined.
+### SVD on self_attn + Nystrom on EACH MoE expert, retain 0.7, then SFT on OpenThoughts3.
+### Launch in the `sft` conda env (download the model first):
+###   HF_HOME=/data/yequan/huggingface huggingface-cli download allenai/OLMoE-1B-7B-0924
+###   CUDA_VISIBLE_DEVICES=4 WANDB_PROJECT=compress_sft_olmoe_1b7b \
+###     llamafactory-cli train examples/compress_train/olmoe_compressed_combined_sft.yaml
+
+### model
+model_name_or_path: allenai/OLMoE-1B-7B-0924
+trust_remote_code: true
+
+### method — in-process SVD(attn)+Nystrom(per-expert) compression, factors trainable
+stage: sft
+do_train: true
+finetuning_type: svd_nystrom
+calib_mode: svd_v2_combined   # forward+backward (joint Nystrom kernel + doubly-whitened SVD)
+compression_ratio: 0.7
+skip_last_layers: 1
+trainable_type: all
+train_position: output
+s_merged_to: frozen
+calib_source: traces
+calib_traces_path: /home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl
+calib_num_seqs: 512
+deepspeed: examples/deepspeed/ds_z2_offload_config.json
+flash_attn: auto
+enable_liger_kernel: false
+
+### dataset
+dataset: openthought3_qwen3_4b
+template: olmo
+cutoff_len: 4096
+preprocessing_num_workers: 64
+dataloader_num_workers: 64
+
+### output
+output_dir: /data/yequan/compress_sft/sft/olmoe_1b7b/combined_r0.7
+logging_steps: 5
+save_steps: 200
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: true
+report_to: wandb
+run_name: olmoe_1b7b_compress_combined_r0.7_sft
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 2
+gradient_checkpointing: true
+learning_rate: 1.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval — mid-training val-loss growth curve to wandb
+val_size: 0.02
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 100
+
+### swanlab off (we use wandb)
+use_swanlab: false

@@ -1,0 +1,77 @@
+### Reasoning-aware compress-then-train: Qwen3-4B-Base, FORWARD+BACKWARD combined.
+### SVD on self_attn + Nystrom on MLP, retain 0.7, then SFT on OpenThoughts3.
+### Launch in the `sft` conda env:
+###   CUDA_VISIBLE_DEVICES=2 WANDB_PROJECT=compress_sft_qwen3_4b_base \
+###     llamafactory-cli train examples/compress_train/qwen3_4b_compressed_combined_sft.yaml
+
+### model
+model_name_or_path: Qwen/Qwen3-4B-Base
+trust_remote_code: true
+
+### method — in-process SVD(attn)+Nystrom(mlp) compression, factors trainable
+stage: sft
+do_train: true
+finetuning_type: svd_nystrom
+calib_mode: svd_v2_combined    # forward+backward (doubly-whitened SVD + joint Nystrom)
+compression_ratio: 0.7
+skip_last_layers: 1
+trainable_type: all
+train_position: output
+s_merged_to: frozen
+calib_source: traces
+calib_traces_path: /home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl
+calib_num_seqs: 128
+# NO deepspeed: single-GPU. DeepSpeed ZeRO-2 corrupts the SVDCompressedLinear
+# custom params (U_r/V_r) -> loss 49->NaN; plain single-GPU bf16 trains cleanly.
+flash_attn: fa2              # FlashAttention-2 (installed in sft env) — faster, less mem
+enable_liger_kernel: false   # disabled: caused illegal-mem-access on the Nystrom-shrunk MLP
+
+### dataset
+dataset: openthought3_qwen3_4b
+template: qwen3
+enable_thinking: false
+cutoff_len: 10240            # 99.4% of OpenThought3 responses fit (p99=9061; <4% truncated at 4096)
+preprocessing_num_workers: 64
+dataloader_num_workers: 64
+
+### output
+output_dir: /data/yequan/compress_sft/sft/qwen3_4b_base/combined_r0.7
+logging_steps: 5
+save_steps: 200             # periodic compressed-format checkpoint for resume
+save_total_limit: 1         # keep ONLY the latest checkpoint (factored + -merged)
+save_only_model: false      # also save optimizer/scheduler so resume continues exactly
+plot_loss: true
+overwrite_output_dir: true
+report_to: wandb
+run_name: qwen3_4b_base_compress_combined_r0.7_sft
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16    # effective batch 16; batch 1 fits 10240 ctx on one 96GB GPU
+gradient_checkpointing: true
+learning_rate: 1.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval — val-loss every 200 steps + TRUE task accuracy every 1000 steps
+val_size: 0.01
+per_device_eval_batch_size: 4
+eval_strategy: steps
+eval_steps: 200
+
+### in-trainer TRUE task accuracy -> wandb (eval/math500_acc, eval/mmlu_pro_acc,
+### eval/aime24_avg8, eval/aime25_avg8, eval/amc23_avg8). HF generate + ttrl grader
+### (graded in the verl env via subprocess). ~20-30 min/eval; interval kept wide.
+task_eval_steps: 1000
+task_eval_math_limit: 100
+task_eval_mmlu_limit: 200
+task_eval_aime_amc: true
+task_eval_aime_amc_k: 8
+task_eval_max_new_tokens: 4096
+
+### swanlab off (we use wandb)
+use_swanlab: false

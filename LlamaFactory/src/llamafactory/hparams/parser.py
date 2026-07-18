@@ -382,7 +382,7 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
     if training_args.deepspeed is not None and (finetuning_args.use_galore or finetuning_args.use_apollo):
         raise ValueError("GaLore and APOLLO are incompatible with DeepSpeed yet.")
 
-    if finetuning_args.finetuning_type in ("blocktt", "svd"):
+    if finetuning_args.finetuning_type in ("blocktt", "svd", "svd_nystrom"):
         ds_path = training_args.deepspeed if isinstance(training_args.deepspeed, str) else ""
         if ds_path and ("z3" in ds_path or "zero3" in ds_path):
             raise ValueError(

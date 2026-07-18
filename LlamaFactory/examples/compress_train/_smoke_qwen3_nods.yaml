@@ -1,0 +1,53 @@
+### SMOKE: svd_nystrom forward, NO DeepSpeed, tiny calib, 10 steps — test if the
+### loss=49->0/NaN was a DeepSpeed artifact. Launch in sft env (no torchrun needed):
+###   CUDA_VISIBLE_DEVICES=6 HF_HOME=/data/yequan/huggingface WANDB_MODE=offline \
+###     llamafactory-cli train examples/compress_train/_smoke_qwen3_nods.yaml
+
+### model
+model_name_or_path: Qwen/Qwen3-4B-Base
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: svd_nystrom
+calib_mode: svd_v2
+compression_ratio: 0.7
+skip_last_layers: 1
+trainable_type: all
+train_position: output
+s_merged_to: frozen
+calib_source: traces
+calib_traces_path: /home/yequan/Project/compression/OPD/datasets/OpenThought3-Qwen3-4B/data/train.jsonl
+calib_num_seqs: 16
+flash_attn: sdpa
+enable_liger_kernel: false
+
+### dataset
+dataset: openthought3_qwen3_4b
+template: qwen3
+enable_thinking: false
+cutoff_len: 4096
+max_samples: 200
+preprocessing_num_workers: 16
+dataloader_num_workers: 16
+
+### output
+output_dir: /data/yequan/compress_sft/smoke/qwen3_nods
+logging_steps: 1
+max_steps: 10
+overwrite_output_dir: true
+save_only_model: true
+report_to: none
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+gradient_checkpointing: true
+learning_rate: 1.0e-5
+lr_scheduler_type: cosine
+warmup_ratio: 0.0
+bf16: true
+ddp_timeout: 180000000
+
+use_swanlab: false

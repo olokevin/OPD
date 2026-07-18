@@ -105,10 +105,16 @@ def create_gsm8k_prompt_processor(
         1. verl parquet format: {"prompt": [{"role": "user", "content": "..."}], "reward_model": {"ground_truth": "..."}}
         2. Simple format: {"question": "...", "answer": "..."}
         """
-        # Check for verl parquet format
-        if "prompt" in task_data and isinstance(task_data["prompt"], (list, tuple)):
+        # Check for verl parquet format. The parquet `prompt` column loads as a
+        # numpy.ndarray of dicts (not list/tuple), so accept any non-string
+        # sequence here -- the old `(list, tuple)`-only check silently fell through
+        # to the empty-`problem` branch below, producing a blank "Problem: " prompt.
+        _p = task_data.get("prompt", None)
+        _is_msg_seq = (_p is not None and not isinstance(_p, str)
+                       and hasattr(_p, "__len__") and len(_p) > 0)
+        if _is_msg_seq:
             # verl format - use existing prompt messages
-            messages = list(task_data["prompt"])
+            messages = list(_p)
             if not isinstance(messages[0], dict):
                 # Numpy array of dicts
                 messages = [dict(m) for m in messages]
@@ -223,10 +229,16 @@ def create_math_prompt_processor(
         1. verl parquet format: {"prompt": [{"role": "user", "content": "..."}], "reward_model": {"ground_truth": "..."}}
         2. Simple format: {"problem": "...", "answer": "..."}
         """
-        # Check for verl parquet format
-        if "prompt" in task_data and isinstance(task_data["prompt"], (list, tuple)):
+        # Check for verl parquet format. The parquet `prompt` column loads as a
+        # numpy.ndarray of dicts (not list/tuple), so accept any non-string
+        # sequence here -- the old `(list, tuple)`-only check silently fell through
+        # to the empty-`problem` branch below, producing a blank "Problem: " prompt.
+        _p = task_data.get("prompt", None)
+        _is_msg_seq = (_p is not None and not isinstance(_p, str)
+                       and hasattr(_p, "__len__") and len(_p) > 0)
+        if _is_msg_seq:
             # verl format - use existing prompt messages
-            messages = list(task_data["prompt"])
+            messages = list(_p)
             if not isinstance(messages[0], dict):
                 # Numpy array of dicts
                 messages = [dict(m) for m in messages]

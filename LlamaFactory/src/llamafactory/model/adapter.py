@@ -360,11 +360,11 @@ def init_adapter(
         model = _setup_lora_tuning(
             config, model, model_args, finetuning_args, is_trainable, cast_trainable_params_to_fp32
         )
-    elif finetuning_args.finetuning_type in ["blocktt", "svd"]:
+    elif finetuning_args.finetuning_type in ["blocktt", "svd", "svd_nystrom"]:
         from .compress_setup import init_compress_model
         if cast_trainable_params_to_fp32:
             logger.info_rank0(
-                "BlockTT/SVD modules have their own dtype policy "
+                "BlockTT/SVD/SVD-Nystrom modules have their own dtype policy "
                 "(set in compress.integration); skipping the blanket "
                 "fp32 cast applied to other finetuning_types."
             )

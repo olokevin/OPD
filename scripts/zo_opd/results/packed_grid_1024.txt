@@ -1,0 +1,59 @@
+/home/yequan/miniconda3/envs/verl/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+INFO 06-04 22:03:38 [__init__.py:216] Automatically detected platform cuda.
+INFO 06-04 22:03:41 [utils.py:233] non-default args: {'dtype': 'bfloat16', 'enable_prefix_caching': True, 'gpu_memory_utilization': 0.55, 'disable_log_stats': True, 'enforce_eager': True, 'worker_extension_cls': 'verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension', 'model': 'Qwen/Qwen3-1.7B'}
+WARNING 06-04 22:03:41 [model.py:371] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 06-04 22:03:42 [model.py:547] Resolved architecture: Qwen3ForCausalLM
+`torch_dtype` is deprecated! Use `dtype` instead!
+INFO 06-04 22:03:42 [model.py:1510] Using max model len 40960
+INFO 06-04 22:03:42 [scheduler.py:205] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 06-04 22:03:42 [__init__.py:381] Cudagraph is disabled under eager mode
+INFO 06-04 22:03:43 [core.py:77] Initializing a V1 LLM engine (v0.11.0) with config: model='Qwen/Qwen3-1.7B', speculative_config=None, tokenizer='Qwen/Qwen3-1.7B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=Qwen/Qwen3-1.7B, enable_prefix_caching=True, chunked_prefill_enabled=True, pooler_config=None, compilation_config={"level":0,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":null,"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":[],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":0,"local_cache_dir":null}
+W0604 22:03:46.284000 501560 site-packages/torch/utils/cpp_extension.py:2425] TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+W0604 22:03:46.284000 501560 site-packages/torch/utils/cpp_extension.py:2425] If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'] to specific architectures.
+INFO 06-04 22:03:46 [worker_base.py:243] Injected <class 'verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_ensure_np_state', '_np_build_attn_metadata', '_np_build_attn_metadata_packed', '_np_build_attn_metadata_persistent', '_np_capture_step', '_np_commit_clean', '_np_fill_u_buf', '_np_is_eos', '_np_prefill', '_np_prefill_packed', '_np_replay_step', '_np_run_forward', '_np_sample_clean', '_np_slot_for_position', '_np_step_forward', '_np_step_forward_graph', '_np_step_forward_packed', 'apply_node_update', 'assemble_and_apply', 'broadcast_layer_weights', 'get_worker_ip', 'init_inter_engine_group', 'install_perturb_layers', 'last_changed_frac', 'layer_weight_norm', 'run_np_decode', 'run_np_decode_graphed', 'run_np_decode_packed']
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 06-04 22:03:46 [parallel_state.py:1208] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+WARNING 06-04 22:03:47 [topk_topp_sampler.py:59] FlashInfer is available, but it is not enabled. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please set VLLM_USE_FLASHINFER_SAMPLER=1.
+INFO 06-04 22:03:47 [gpu_model_runner.py:2602] Starting to load model Qwen/Qwen3-1.7B...
+INFO 06-04 22:03:47 [gpu_model_runner.py:2634] Loading model from scratch...
+INFO 06-04 22:03:47 [cuda.py:325] Using Flash Attention backend on V1 engine.
+INFO 06-04 22:03:47 [weight_utils.py:392] Using model weights format ['*.safetensors']
+Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:00<00:00,  2.57it/s]
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:00<00:00,  5.14it/s]
+
+INFO 06-04 22:03:48 [default_loader.py:267] Loading weights took 0.49 seconds
+INFO 06-04 22:03:48 [gpu_model_runner.py:2653] Model loading took 3.2152 GiB and 1.015730 seconds
+INFO 06-04 22:03:49 [gpu_worker.py:298] Available KV cache memory: 42.24 GiB
+INFO 06-04 22:03:50 [kv_cache_utils.py:1087] GPU KV cache size: 395,472 tokens
+INFO 06-04 22:03:50 [kv_cache_utils.py:1091] Maximum concurrency for 40,960 tokens per request: 9.66x
+2026-06-04 22:03:50,203 - INFO - autotuner.py:256 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-06-04 22:03:50,324 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process ends
+All deep_gemm operations loaded successfully!
+WARNING 06-04 22:03:50 [cudagraph_dispatcher.py:106] cudagraph dispatching keys are not initialized. No cudagraph will be used.
+INFO 06-04 22:03:50 [core.py:210] init engine (profile, create kv cache, warmup model) took 1.47 seconds
+INFO 06-04 22:03:50 [llm.py:306] Supported_tasks: ('generate',)
+# packed grid: model=Qwen/Qwen3-1.7B layer=model.layers.0.mlp.down_proj max_tokens=1024 pack_width=8
+ batch  rails    s/step     tok/s   peakGB    SM%
+     1      8    13.842      74.0    48.93   31.8
+     2      8    18.460     110.9    48.93   27.9
+     4      8    26.255     156.0    48.94   23.8
+     8      8    42.145     194.4    48.96   20.6
+    16      8    89.291     183.5    48.96   22.1
+     1     16    21.839      46.9    48.93   29.8
+     2     16    27.981      73.2    48.94   23.7
+     4     16    42.676      96.0    48.96   21.1
+     8     16    72.184     113.5    49.01   19.1
+    16     16   147.812     110.8    49.01   20.0
+     1     64    43.069      23.8    48.96   22.5
+     2     64    70.263      29.1    49.00   18.8
+     4     64   131.785      31.1    49.08   17.5
+     8     64   246.688      33.2    49.25   17.7
+    16     64   607.732      27.0    49.25   17.8
+[rank0]:[W604 22:31:00.997868606 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

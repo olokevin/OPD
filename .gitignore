@@ -18,7 +18,6 @@ logs/
 
 outputs/
 ref/
-src/
 *.whl
 
 output/
@@ -239,3 +238,4 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Git worktrees
 .worktrees/
+.claude/worktrees/

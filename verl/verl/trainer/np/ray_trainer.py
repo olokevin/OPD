@@ -33,7 +33,13 @@ class NPNcclLLM(LLM):
     prefix caching ON (shared-prefix decode across the 1+n_sample row batch)."""
 
     def __init__(self, *args, **kwargs):
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # With the Ray distributed executor, Ray re-derives the worker's device
+        # from the placement group, so we drop CUDA_VISIBLE_DEVICES to avoid a
+        # conflicting pin. With the uni (in-process) executor there is no child
+        # worker -- popping it would send vLLM to physical GPU0 regardless of the
+        # CUDA_VISIBLE_DEVICES the launcher set, so KEEP the pin in that case.
+        if os.environ.get("NP_KEEP_CUDA_VISIBLE", "0") != "1":
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         kwargs["enforce_eager"] = True
         kwargs["enable_prefix_caching"] = True
@@ -44,12 +50,12 @@ class RayNPTrainer:
     """Node-Perturbation trainer using Ray for distributed execution.
 
     Per step, for each active layer:
-      1. n_rollout x run_np_decode on engine 0 -> (clean_tokens, candidate_logits, captured_u).
+      1. n_rollout x run_np_decode on engine 0 -> (clean_tokens, candidate_logits,
+         captured_u, captured_x). u_t AND x_t are captured in the SAME perturbed
+         forward (no separate capture re-decode).
       2. For each rollout: score per-step candidate logits against the teacher
          (TeacherScorer) -> (L_q_per_step, L_clean_per_step).
-      3. _capture_x: re-run the clean sequence in mode=capture to extract per-step
-         x_t into the active layer.
-      4. assemble_and_apply: build δW from (L_q, L_clean, u, x) and apply locally
+      3. assemble_and_apply: build δW from (L_q, L_clean, u, x) and apply locally
          on engine 0; broadcast the updated layer to all other engines.
     """
 
@@ -108,9 +114,12 @@ class RayNPTrainer:
             "worker_extension_cls",
             "verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension",
         )
+        # When co-locating the teacher on the same GPU (single-GPU-per-run sweeps),
+        # request a fractional GPU per engine so student + teacher fit one device.
+        gpu_frac = float(self.np_config.get("gpu_fraction", 1.0))
 
         pgs = [
-            placement_group([{"GPU": 1, "CPU": 0}], lifetime="detached")
+            placement_group([{"GPU": gpu_frac, "CPU": 0}], lifetime="detached")
             for _ in range(num_engines)
         ]
         ray.get([pg.ready() for pg in pgs])
@@ -124,11 +133,16 @@ class RayNPTrainer:
             for pg in pgs
         ]
 
+        # With backend="ray", vLLM spawns a child RayWorkerWrapper that demands a
+        # FULL GPU, which cannot fit a fractional PG bundle. For tensor_parallel=1
+        # use "uni" (in-process worker): the engine actor itself owns the GPU slice
+        # granted by its PG, so co-locating student+teacher on one fractional GPU works.
+        exec_backend = self.np_config.get("distributed_executor_backend", "ray")
         engines = [
             ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(NPNcclLLM).remote(
                 model=model_path,
                 tensor_parallel_size=1,
-                distributed_executor_backend="ray",
+                distributed_executor_backend=exec_backend,
                 worker_extension_cls=worker_ext,
                 dtype=precision,
                 gpu_memory_utilization=self.np_config.get("gpu_memory_utilization", 0.9),
@@ -152,7 +166,8 @@ class RayNPTrainer:
             "verl.workers.rollout.vllm_rollout.np_worker_extension.WorkerExtension",
         )
 
-        pg = placement_group([{"GPU": 1, "CPU": 0}], lifetime="detached")
+        gpu_frac = float(self.np_config.get("gpu_fraction", 1.0))
+        pg = placement_group([{"GPU": gpu_frac, "CPU": 0}], lifetime="detached")
         ray.get(pg.ready())
         strategy = PlacementGroupSchedulingStrategy(
             placement_group=pg,
@@ -162,14 +177,15 @@ class RayNPTrainer:
         # vLLM caps prompt_logprobs at 20 by default; the teacher needs to return
         # the OPD top-k set (np.log_prob_top_k, default 256), so raise the cap.
         top_k = int(self.np_config.get("log_prob_top_k", 256))
+        exec_backend = self.np_config.get("distributed_executor_backend", "ray")
         engine = ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(NPNcclLLM).remote(
             model=model_path,
             tensor_parallel_size=1,
-            distributed_executor_backend="ray",
+            distributed_executor_backend=exec_backend,
             worker_extension_cls=worker_ext,
             dtype=precision,
-            gpu_memory_utilization=self.np_config.get("teacher_gpu_memory_utilization",
-                                                     self.np_config.get("gpu_memory_utilization", 0.9)),
+            gpu_memory_utilization=(self.np_config.get("teacher_gpu_memory_utilization")
+                                    or self.np_config.get("gpu_memory_utilization", 0.9)),
             max_logprobs=max(20, top_k),
         )
         self.teacher_engine = engine
@@ -329,6 +345,31 @@ class RayNPTrainer:
 
         return metrics
 
+    def _heldout_kl(self, fixed_prompts, layer_name, sp, np_cfg):
+        """Mean clean teacher-KL over a FIXED set of prompts (no perturbation).
+
+        This is the honest training-progress signal: per-step train/L_clean_mean is
+        on the step's shifting prompt batch, so it cannot show learning. Here we
+        re-decode the SAME held-out prompts every probe and average the clean-row
+        reverse-KL to the teacher -> a curve that should DECREASE if the LR trains
+        and INCREASE if it diverges. Greedy clean decode, so it is deterministic
+        given the (frozen) weights.
+        """
+        if not fixed_prompts or self.scorer is None:
+            return None
+        kls = []
+        for prompt in fixed_prompts:
+            pid = (prompt["prompt_token_ids"] if isinstance(prompt, dict) else prompt)
+            out = ray.get(self.engines[0].collective_rpc.remote(
+                "run_np_decode", args=(pid, sp, layer_name, np_cfg, 0)))[0]
+            if not out["clean_tokens"]:
+                continue
+            full = list(pid) + list(out["clean_tokens"])
+            _, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
+            if L_clean:
+                kls.append(float(np.mean(L_clean)))
+        return float(np.mean(kls)) if kls else None
+
     # ---------------------------------------------------------------- workers
 
     def init_workers(self, model_path: str):
@@ -379,21 +420,6 @@ class RayNPTrainer:
 
     # --------------------------------------------------------- capture helper
 
-    def _capture_x(self, engine, prompt_ids, clean_tokens, layer_name, np_cfg):
-        """Re-run the fixed [prompt + clean response] once with mode=capture.
-
-        Thin wrapper around the worker-extension method `run_capture_pass`. The
-        engine replays the committed sequence one step at a time using
-        `_np_step_forward(..., n_sample=0)` (single clean row, no perturbed
-        companions) -- on each step the PerturbedLinear hook records the clean
-        row's input x_t for `layer_name`. Returns list[Tensor[d_in]] (CPU),
-        aligned with `clean_tokens`.
-        """
-        return ray.get(engine.collective_rpc.remote(
-            "run_capture_pass",
-            args=(prompt_ids, clean_tokens, layer_name, np_cfg),
-        ))[0]
-
     # ---------------------------------------------------------------- fit
 
     def fit(self):
@@ -428,6 +454,13 @@ class RayNPTrainer:
             prompts = [d.get("prompt", d.get("context")) for d in self.train_data]
 
         cfg = self.np_config
+        # Fixed held-out prompts for the honest progress probe (last N, never used
+        # in update batches). Distinct slice so the probe measures generalization-ish
+        # loss, not memorized batches. Disabled if too few prompts.
+        n_heldout = int(cfg.get("heldout_probe_size", 16))
+        heldout_prompts = prompts[-n_heldout:] if len(prompts) > 2 * n_heldout else []
+        if heldout_prompts:
+            prompts = prompts[: len(prompts) - n_heldout]
         trainer_total_epochs = self.config.trainer.get("total_epochs", None)
         trainer_test_freq = self.config.trainer.get("test_freq", None)
         num_iterations = trainer_total_epochs if trainer_total_epochs else cfg.num_iterations
@@ -449,43 +482,168 @@ class RayNPTrainer:
             sample_method=cfg.sample_method,
         )
 
+        batch_size = int(cfg.get("batch_size", 1))
+        normalize_anp = bool(cfg.get("normalize_anp", False))
+        verify_update = bool(cfg.get("verify_update", True))
+        # V2 decode-driver selection (spec §6). Default 'eager' = V1 (parity oracle).
+        decode_mode = cfg.get("decode_mode", "eager")
+        use_cuda_graph = bool(cfg.get("use_cuda_graph", False))
+        pack_width = int(cfg.get("pack_width", 8))
+        if decode_mode not in ("eager", "graphed", "packed"):
+            raise ValueError(
+                f"np.decode_mode={decode_mode!r} must be 'eager', 'graphed', "
+                f"or 'packed'.")
+        # Packed mode needs the rollout-id helper; import once (pure-Python, no
+        # GPU deps) rather than per-step inside the layer loop.
+        if decode_mode == "packed":
+            from verl.workers.rollout.vllm_rollout.np_worker_extension import (
+                _assign_rollout_ids,
+            )
+        # Env-gated per-prompt boundary instrumentation (decode / score / assemble).
+        # Removable: set NP_DEBUG_DECODE=1 only when diagnosing a stall.
+        NP_DEBUG_DECODE = os.environ.get("NP_DEBUG_DECODE", "0") == "1"
         progress_bar = tqdm(range(num_iterations), desc="NP Training")
         for step in progress_bar:
             t0 = time.time()
             active = active_layers_for_step(
                 matched, step, cfg.en_layerwise_perturbation)
             dw_norms: Dict[str, float] = {}
+            w_deltas: Dict[str, float] = {}
+            w_changed_fracs: Dict[str, float] = {}
+            w_sync_ok: Dict[str, bool] = {}
             L_clean_means: List[float] = []
             for layer_name in active:
-                prompt = prompts[step % len(prompts)]
-                pid = (prompt["prompt_token_ids"]
-                       if isinstance(prompt, dict) else prompt)
-
+                # Accumulate batch_size distinct prompts (one update per step).
+                # Each prompt contributes n_rollout rollouts (default 1). The
+                # per-token signals from ALL prompts/rollouts are concatenated and
+                # fed once to assemble_and_apply -> a single delta_W per step, i.e.
+                # a true mini-batch of effective size batch_size * n_rollout prompts.
                 L_q_steps: List[Any] = []
                 L_clean_steps: List[float] = []
                 u_steps: List[Any] = []
                 x_steps: List[Any] = []
 
-                for r in range(int(cfg.n_rollout)):
-                    out = ray.get(self.engines[0].collective_rpc.remote(
-                        "run_np_decode",
-                        args=(pid, sp, layer_name, np_cfg, r),
-                    ))[0]
-                    full = list(pid) + list(out["clean_tokens"])
-                    L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
-                    L_q_steps += L_q
-                    L_clean_steps += L_clean
-                    u_steps += [out["captured_u"][t]
-                                for t in range(len(out["candidate_logits"]))]
-                    x_steps += self._capture_x(
-                        self.engines[0], pid, out["clean_tokens"], layer_name, np_cfg)
+                if decode_mode == "packed":
+                    all_pids = [
+                        (prompts[(step * batch_size + b) % len(prompts)])
+                        for b in range(batch_size)
+                    ]
+                    all_pids = [
+                        (p["prompt_token_ids"] if isinstance(p, dict) else p)
+                        for p in all_pids
+                    ]
+                    rollout_ids_full = _assign_rollout_ids(
+                        step, batch_size, int(cfg.n_rollout))
+                    # n_rollout>1: expand prompts to (prompt,rollout) slots.
+                    if int(cfg.n_rollout) > 1:
+                        slot_pids, slot_rids = [], []
+                        for b in range(batch_size):
+                            for r in range(int(cfg.n_rollout)):
+                                slot_pids.append(all_pids[b])
+                                slot_rids.append(
+                                    rollout_ids_full[b * int(cfg.n_rollout) + r])
+                    else:
+                        slot_pids, slot_rids = all_pids, rollout_ids_full
+
+                    for w0 in range(0, len(slot_pids), pack_width):
+                        wave_pids = slot_pids[w0:w0 + pack_width]
+                        wave_rids = slot_rids[w0:w0 + pack_width]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step} L={layer_name} "
+                                  f"wave {w0}-{w0+len(wave_pids)}/{len(slot_pids)}] "
+                                  f"packed decode start", flush=True)
+                            _tw = time.time()
+                        out = ray.get(self.engines[0].collective_rpc.remote(
+                            "run_np_decode_packed",
+                            args=(wave_pids, sp, layer_name, np_cfg, wave_rids),
+                        ))[0]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step}] wave decode done "
+                                  f"dt={time.time()-_tw:.2f}s", flush=True)
+                        if NP_DEBUG_DECODE:
+                            _tsw = time.time()
+                        for pidx in range(len(wave_pids)):
+                            if not out["clean_tokens"][pidx]:
+                                continue
+                            full = (list(wave_pids[pidx])
+                                    + list(out["clean_tokens"][pidx]))
+                            L_q, L_clean = self.scorer.score_rollout(
+                                full, out["candidate_logits"][pidx])
+                            L_q_steps += L_q
+                            L_clean_steps += L_clean
+                            nT = len(out["candidate_logits"][pidx])
+                            u_steps += [out["captured_u"][pidx][t]
+                                        for t in range(nT)]
+                            x_steps += [out["captured_x"][pidx][t]
+                                        for t in range(nT)]
+                        if NP_DEBUG_DECODE:
+                            print(f"[npdbg s{step}] wave score done "
+                                  f"dt={time.time()-_tsw:.2f}s", flush=True)
+                else:
+                    for b in range(batch_size):
+                        prompt = prompts[(step * batch_size + b) % len(prompts)]
+                        pid = (prompt["prompt_token_ids"]
+                               if isinstance(prompt, dict) else prompt)
+                        for r in range(int(cfg.n_rollout)):
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} L={layer_name} b{b}/{batch_size} "
+                                      f"r{r}] decode start plen={len(pid)}", flush=True)
+                                _td = time.time()
+                            if decode_mode == "graphed":
+                                out = ray.get(self.engines[0].collective_rpc.remote(
+                                    "run_np_decode_graphed",
+                                    args=(pid, sp, layer_name, np_cfg, r, use_cuda_graph),
+                                ))[0]
+                            else:
+                                out = ray.get(self.engines[0].collective_rpc.remote(
+                                    "run_np_decode",
+                                    args=(pid, sp, layer_name, np_cfg, r),
+                                ))[0]
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] decode done "
+                                      f"ntok={len(out['clean_tokens'])} "
+                                      f"dt={time.time()-_td:.2f}s", flush=True)
+                                _ts = time.time()
+                            if not out["clean_tokens"]:
+                                continue  # empty rollout -> no signal
+                            full = list(pid) + list(out["clean_tokens"])
+                            L_q, L_clean = self.scorer.score_rollout(full, out["candidate_logits"])
+                            if NP_DEBUG_DECODE:
+                                print(f"[npdbg s{step} b{b}] score done "
+                                      f"dt={time.time()-_ts:.2f}s", flush=True)
+                            L_q_steps += L_q
+                            L_clean_steps += L_clean
+                            # u_t and x_t are both captured inside run_np_decode (same
+                            # forward) -- no separate capture re-decode (see deleted
+                            # _capture_x / run_capture_pass). Aligned per step.
+                            u_steps += [out["captured_u"][t]
+                                        for t in range(len(out["candidate_logits"]))]
+                            x_steps += [out["captured_x"][t]
+                                        for t in range(len(out["candidate_logits"]))]
+
+                if not L_q_steps:
+                    continue  # nothing decoded this step
+
+                if NP_DEBUG_DECODE:
+                    print(f"[npdbg s{step} L={layer_name}] batch decode+score DONE; "
+                          f"assemble start nsig={len(L_q_steps)} "
+                          f"u_steps={len(u_steps)}", flush=True)
+                    _ta = time.time()
+
+                # Weight norm BEFORE the update (engine 0) for the propagation check.
+                w_before = (ray.get(self.engines[0].collective_rpc.remote(
+                    "layer_weight_norm", args=(layer_name,)))[0]
+                    if verify_update else None)
 
                 dw = ray.get(self.engines[0].collective_rpc.remote(
                     "assemble_and_apply",
                     args=(layer_name, L_q_steps, L_clean_steps, u_steps, x_steps,
-                          float(cfg.sigma), cfg.grad_estimate_sample, True,
+                          float(cfg.sigma), cfg.grad_estimate_sample, normalize_anp,
                           cfg.token_agg, float(cfg.lr), cfg.get("update_clip")),
                 ))[0]
+                if NP_DEBUG_DECODE:
+                    print(f"[npdbg s{step} L={layer_name}] assemble+apply DONE "
+                          f"dt={time.time()-_ta:.2f}s dW={dw:.3e}", flush=True)
                 dw_norms[layer_name] = dw
                 # Broadcast updated layer from engine 0 to all engines.
                 ray.get([
@@ -493,6 +651,22 @@ class RayNPTrainer:
                                              args=(layer_name, 0))
                     for e in self.engines
                 ])
+                # Verify: (1) the update LANDED -- measured by the fraction of weight
+                # ELEMENTS that changed (the norm difference badly under-reports this;
+                # a 20%-of-elements bf16 update can show ~0 norm delta), (2) every
+                # other engine now holds the SAME weight (broadcast worked, so the
+                # next run_np_decode on any engine reads the updated param).
+                if verify_update:
+                    w_changed_fracs[layer_name] = ray.get(
+                        self.engines[0].collective_rpc.remote("last_changed_frac"))[0]
+                    norms = ray.get([
+                        e.collective_rpc.remote("layer_weight_norm", args=(layer_name,))
+                        for e in self.engines
+                    ])
+                    norms = [n[0] for n in norms]
+                    w_deltas[layer_name] = abs(norms[0] - w_before)
+                    w_sync_ok[layer_name] = all(
+                        abs(n - norms[0]) < 1e-3 for n in norms)
                 if L_clean_steps:
                     L_clean_means.append(float(np.mean(L_clean_steps)))
 
@@ -503,12 +677,34 @@ class RayNPTrainer:
             }
             for k, v in dw_norms.items():
                 train_metrics[f"train/dW_norm/{k}"] = v
+            for k, v in w_deltas.items():
+                train_metrics[f"train/weight_delta/{k}"] = v
+            for k, v in w_changed_fracs.items():
+                train_metrics[f"train/weight_changed_frac/{k}"] = v
             if L_clean_means:
                 train_metrics["train/L_clean_mean"] = float(np.mean(L_clean_means))
+            if w_deltas:
+                train_metrics["train/weight_delta_mean"] = float(np.mean(list(w_deltas.values())))
+            if w_changed_fracs:
+                train_metrics["train/weight_changed_frac_mean"] = float(np.mean(list(w_changed_fracs.values())))
+            if w_sync_ok:
+                all_synced = all(w_sync_ok.values())
+                train_metrics["train/weight_sync_ok"] = 1.0 if all_synced else 0.0
+                if not all_synced:
+                    print(f"[WARN step {step}] weight broadcast OUT OF SYNC across "
+                          f"engines for {[k for k,v in w_sync_ok.items() if not v]} "
+                          f"-- next rollout would use stale weights!")
+            # A nonzero dW that changed ZERO weight elements = a true bf16 no-op.
+            # (weight_delta/norm is NOT used here -- it under-reports element changes.)
+            for k, v in dw_norms.items():
+                if verify_update and v > 0 and w_changed_fracs.get(k, 0.0) == 0.0:
+                    print(f"[WARN step {step}] dW_norm={v:.3e} for {k} but 0% of "
+                          f"weight elements changed -- true bf16 no-op (lr too small).")
             logger.log(data=train_metrics, step=step)
 
             progress_bar.set_postfix({
                 "dW": f"{max(dw_norms.values()) if dw_norms else 0:.3e}",
+                "chg%": f"{100*train_metrics.get('train/weight_changed_frac_mean', 0.0):.1f}",
                 "L_clean": f"{train_metrics.get('train/L_clean_mean', 0.0):.3f}",
                 "time": f"{iter_time:.2f}s",
             }, refresh=False)
@@ -516,6 +712,14 @@ class RayNPTrainer:
             if eval_interval and (step % eval_interval == 0 or step == num_iterations - 1):
                 eval_metrics = self._evaluate_model(self.engines[0], self.eval_data, step, logger)
                 logger.log(data=eval_metrics, step=step)
+                # Honest progress signal: clean teacher-KL on FIXED held-out prompts.
+                if heldout_prompts:
+                    probe_layer = active[0] if active else matched[0]
+                    hk = self._heldout_kl(heldout_prompts, probe_layer, sp, np_cfg)
+                    if hk is not None:
+                        logger.log(data={"eval/heldout_kl": hk}, step=step)
+                        print(f"[Probe @ step {step}] heldout_kl={hk:.4f} "
+                              f"(fixed {len(heldout_prompts)} prompts; lower=better)")
 
             gc.collect()
             torch.cuda.empty_cache()

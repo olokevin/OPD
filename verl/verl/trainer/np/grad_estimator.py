@@ -16,15 +16,30 @@ def sample_scale(
     sigma: float,
     mode: str,                    # "average" | "grpo"
 ) -> torch.Tensor:
-    """Per-sample scalar weighting of u_q. Lower L is better (minimization)."""
+    """Per-sample scalar weighting of u_q. Lower L is better (minimization).
+
+    Both modes are one-sided finite differences and MUST keep the 1/sigma factor
+    so the scale carries the units of a directional derivative (dL/dy ~ (L_q-L0)/sigma).
+    Without 1/sigma the resulting delta_W is off the true-gradient scale by ~sigma,
+    which (combined with the dropped 1/sigma) is what made the old grpo path need an
+    absurd lr. See scripts/zo_opd/results/ANALYSIS.md.
+      - average: (L_q - L_clean) / sigma         (baseline = clean row's loss)
+      - grpo:    (L_q - mean_q) / sigma          (mean-centered advantage, then /sigma)
+                 drops the 1/std z-scoring -- the `1/std` self-amplification (low-signal
+                 tokens, std->0 => 1/std->inf) made the /std/sigma form diverge by
+                 ~step 30 at every tested lr; the /sigma-only form trained cleanly and
+                 monotonically at lr=3e-2. See docs/results/zo_opd.md sec 5-6.
+    """
     if mode == "average":
         if L_clean is None:
             raise ValueError("average mode requires L_clean baseline")
         return (L_q - float(L_clean)) / sigma
     if mode == "grpo":
+        # (L_q - mean_q) / sigma  -- mean-centered advantage on the finite-difference
+        # scale. The 1/std z-scoring is DROPPED: it blows up on low-signal tokens
+        # (std->0) and self-amplifies into divergence over a full layer round-robin.
         mean = L_q.mean()
-        std = L_q.std(unbiased=False) + 1e-8
-        return (L_q - mean) / std
+        return (L_q - mean) / sigma
     raise ValueError(f"unknown grad_estimate_sample mode: {mode!r}")
 
 

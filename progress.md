@@ -49,6 +49,14 @@
 | C4 PPL of compressed teacher | P1 | eval_c4_ppl.py | reasonable PPL | not yet run | pending |
 | qFurA OPD e2e | P2 | qfura.sh | trains like FurA | not yet run | pending |
 | NP/ES real OPD train | P3 | opd_np.sh / es.sh | matches dense-OPD reward | smoke only | pending |
+| SparseGPT V1 (OpenThought3 cached) re-build | P1 | build_sparsegpt_student.py | match prior 45% / PPL 82 | nz 1.697B, C4 PPL 82.05, MATH-500 45.0% | ✓ (2026-06-01) |
+| SparseGPT V2 (Qwen3-4B fresh gen) build | P1 | 128 user prompts → Qwen3-4B T=0.6,top_p=1.0,max=3072 | reasonable / +V1 | nz 1.697B, C4 PPL 82.69, MATH-500 49.0% (+4pp vs V1) | ✓ (2026-06-01) |
+| OPD-V1 train step 2 lands | P1 | opd_sparsegpt.sh + optim_offload + ppo_max=16384 | no OOM | step1 t-rew 0.500 / step2 0.502; ~7min/step | ✓ (2026-06-01) |
+| OPD-V2 train step 3 lands | P1 | same w/ V2 student | no OOM | step1 t-rew 0.539 → step2 0.533 → step3 ongoing; ~5min/step | ✓ (2026-06-01) |
+| SparseGPT mask-preservation patch | P1 | sparsity_mask.py + dp_actor + fsdp_workers | weights stay zero after step | smoke test: 252 modules masked, post-step ratio z_now/z_expected=1.0 | ✓ (2026-06-01) |
+| OPD-V2 finishes 138 steps (masked) | P1 | opd_sparsegpt.sh w/ SPARSEGPT_PRESERVE_MASK=1 | clean finish, sparsity preserved | step 138 mean@4=53.05%, maj@4=54.58%, best@4=66.06% | ✓ (2026-06-02) |
+| V2 ckpt apples-to-apples eval | P1 | merge FSDP→HF, eval_opd_ckpt.py | match build-script recipe | linear_zero_frac=64.00%, C4 PPL 82.67, MATH-500 greedy 51.0% (+2.0pp vs 49.0% pre-OPD) | ✓ (2026-06-02) |
+| OPD-V1 finishes 138 steps | P1 | opd_sparsegpt.sh w/ mask | clean finish | CRASHED at step 90 (ActorUnavailableError / raylet term); 18 mid-evals plateau 49-52% mean@4; no ckpt saved | ✗ (2026-06-02) |
 
 ## Error Log (ALL errors, with project + attempt — avoid repetition)
 | Timestamp | Project | Error | Attempt | Resolution |
@@ -59,6 +67,10 @@
 | 2026-05-30 | P2 | KeyError ..._fsdp_wrapped_module... on weight-sync | 2 | complete weight export + strip qualname (F2.4) |
 | 2026-05-31 | P2 | element 0 does not require grad (gradckpt+frozen embed) | 3 | enable_input_require_grads() (F2.5) |
 | 2026-05-31 | P1,P2 | FSDP1 Cannot writeback when param shape changes (frozen embed) | 3 | FSDP2 (C1 / F2.7) — decisive |
+| 2026-06-01 | P1 | vLLM Engine init fails: ninja build flashinfer JIT (math.h not found) | 1 | VLLM_USE_FLASHINFER_SAMPLER=0 + VLLM_ATTENTION_BACKEND=FLASH_ATTN (known repo workaround) |
+| 2026-06-01 | P1 | OPD step 2 update_actor OOM at 121 GB reserved (4B-dense SparseGPT student + 4B teacher on 93 GB H100) | 1 | optim_offload=True + ppo_max_token_len_per_gpu=16384 + max_num_batched_tokens=16384 + gpu_mem_util=0.40 (mirror btt_v2_combined config) |
+| 2026-06-01 | P1 | verl actor Adam silently re-densifies SparseGPT zeros (∂L/∂W on zero weight ≠ 0; Adam moments amplify) — dense-run "OPD" was actually 4B-effective by step 5 | 1 | Patch: sparsity_mask.py + post-step reapply_masks hook in dp_actor._optimizer_step + attach_masks hook in fsdp_workers (gated by SPARSEGPT_PRESERVE_MASK=1). Restart from saved SparseGPT students. |
+| 2026-06-02 | P1 | OPD-V1 raylet termination / ActorUnavailableError at step ~90 (transient Ray bug, possibly CPU mem pressure from concurrent V1+V2+eval) | 1 | No ckpt saved; descope V1 to its 18 mid-evals (clear plateau 49-52% mean@4). V2 finished cleanly. |
 
 ## 5-Question Reboot Check
 | Question | Answer |

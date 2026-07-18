@@ -520,6 +520,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
 
+        # SparseGPT preservation: when SPARSEGPT_PRESERVE_MASK=1 is set, attach
+        # a buffer for every Linear weight that's already zero so the actor
+        # _optimizer_step can re-zero those entries after each Adam update.
+        # Activated only on the actor module — the ref/reward models don't
+        # update so they don't need it. Must happen BEFORE FSDP wrapping so
+        # the buffer is attached to the original nn.Linear objects.
+        if role == "actor":
+            from verl.workers.sparsity_mask import attach_masks, is_enabled as _sparsity_enabled
+            if _sparsity_enabled():
+                attach_masks(actor_module)
+
         # We wrap FSDP for rollout as well
         mixed_precision_config = fsdp_config.get("mixed_precision", None)
         if mixed_precision_config is not None:

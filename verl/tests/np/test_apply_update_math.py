@@ -1,9 +1,66 @@
+import pytest
 import torch
+from verl.trainer.np.grad_estimator import accumulate_delta_w, sample_scale
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
     PerturbedLinear,
     WorkerExtension,
     assemble_layer_delta,
 )
+
+
+def _assemble_ref_cpu_loop(L_q, L_clean, u, x, sigma, sample_mode, normalize,
+                           token_agg, eps=1e-6):
+    """The original per-token CPU torch.outer accumulation -- the parity oracle
+    the batched (GEMM) assemble_layer_delta must reproduce. Kept inline in the
+    test so the production path can drop the slow loop entirely."""
+    d_out = u[0].shape[1]
+    d_in = x[0].shape[0]
+    dw = torch.zeros(d_out, d_in, dtype=torch.float32)
+    T = max(len(L_q), 1)
+    for Lq, Lc, uu, xx in zip(L_q, L_clean, u, x):
+        scales = sample_scale(Lq.float(), Lc, sigma, sample_mode)
+        accumulate_delta_w(dw, scales=scales, u=uu.float(), x_t=xx.float(),
+                           normalize=normalize, eps=eps)
+    if token_agg == "mean":
+        dw.div_(T)
+    return dw
+
+
+@pytest.mark.parametrize("sample_mode", ["average", "grpo"])
+@pytest.mark.parametrize("normalize", [False, True])
+@pytest.mark.parametrize("token_agg", ["sum", "mean"])
+@pytest.mark.parametrize(
+    "device",
+    ["cpu"] + (["cuda"] if torch.cuda.is_available() else []),
+)
+def test_batched_assemble_matches_cpu_loop(sample_mode, normalize, token_agg, device):
+    """The GEMM-batched assemble_layer_delta must match the per-token CPU loop
+    across every (sample_mode, normalize, token_agg) combination, on CPU and GPU.
+    This is the parity gate for moving the 5-min CPU-bound assemble onto the GPU."""
+    torch.manual_seed(0)
+    T, n_sample, d_out, d_in = 37, 8, 64, 48
+    sigma = 0.01
+    L_q = [torch.randn(n_sample) for _ in range(T)]
+    L_clean = [float(torch.randn(())) for _ in range(T)]
+    u = [torch.randn(n_sample, d_out) for _ in range(T)]
+    x = [torch.randn(d_in) for _ in range(T)]
+
+    ref = _assemble_ref_cpu_loop(L_q, L_clean, u, x, sigma, sample_mode,
+                                 normalize, token_agg)
+    got = assemble_layer_delta(L_q, L_clean, u, x, sigma=sigma,
+                               sample_mode=sample_mode, normalize=normalize,
+                               token_agg=token_agg, device=device)
+    assert got.device.type == "cpu", "assemble must return a CPU tensor"
+    # CPU sequential rank-1 adds vs the GPU GEMM reduce in a different float32
+    # order, so parity is at fp32-epsilon, NOT bit-identity. The scale-free
+    # metric is the relative Frobenius norm (~1.4e-7 measured across all modes);
+    # absolute atol must track the (sum-agg) magnitude, hence atol=1e-3.
+    rel_fro = (got - ref).norm() / (ref.norm() + 1e-12)
+    assert rel_fro < 1e-5, (
+        f"batched assemble diverged from CPU loop "
+        f"(mode={sample_mode} norm={normalize} agg={token_agg} dev={device}): "
+        f"rel_fro={rel_fro:.2e} max|d|={(got - ref).abs().max():.2e}")
+    assert torch.allclose(got, ref, atol=1e-3, rtol=1e-4)
 
 
 def test_assemble_layer_delta_single_token():

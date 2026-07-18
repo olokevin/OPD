@@ -10,6 +10,9 @@ DEFAULT_GPU_IDS = [0, 1, 2, 3, 4, 5, 6, 7]
 DEFAULT_ENABLE_THINKING = False
 DEFAULT_ENABLE_REJECTION_SAMPLING = True
 DEFAULT_MAX_ATTEMPTS_PER_ROLLOUT = 3
+DEFAULT_GENERATE_RATIO = 0.1
+DEFAULT_MAX_TOKENS = 7168
+DEFAULT_MAX_MODEL_LEN = 10480
 
 
 # ───────────────────────── Rejection Sampling Filters ─────────────────────────
@@ -152,6 +155,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_ATTEMPTS_PER_ROLLOUT,
         help="Maximum retry count for each rollout slot when rejection sampling is enabled.",
     )
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=None,
+        help="Use only the first N rows of the input parquet. Overrides --generate-ratio. "
+        "Default: use all rows.",
+    )
+    parser.add_argument(
+        "--generate-ratio",
+        type=float,
+        default=DEFAULT_GENERATE_RATIO,
+        help="Fraction of the input parquet to use, taken as the first ratio*len rows "
+        "(ignored when --num-prompts is set). Default: 0.1.",
+    )
+    parser.add_argument(
+        "--output-jsonl",
+        default=None,
+        help="Explicit path for the final merged JSONL dataset. "
+        "Default: output/<model_name>/DAPO.jsonl.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Max new tokens to generate per response. Default: 7168.",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=DEFAULT_MAX_MODEL_LEN,
+        help="vLLM max_model_len (prompt + generation). Must exceed --max-tokens. "
+        "Default: 10480.",
+    )
     return parser
 
 
@@ -167,6 +203,7 @@ def worker(
     enable_thinking: bool = False,
     enable_rejection_sampling: bool = True,
     max_attempts_per_rollout: int = 10,  # Maximum retry count for each rollout slot
+    max_model_len: int = DEFAULT_MAX_MODEL_LEN,
 ):
     """A single worker process that owns its GPU and streams rollout outputs to disk."""
 
@@ -177,6 +214,10 @@ def worker(
     os.environ["VLLM_PORT"] = str(port_offset)
     os.environ["MASTER_PORT"] = str(port_offset)
     os.environ["NCCL_PORT"] = str(port_offset)
+
+    # Use vLLM's native PyTorch sampler instead of FlashInfer's, whose runtime JIT
+    # nvcc compile fails on hosts without full C/C++ dev headers (math.h missing).
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
     from vllm import LLM, SamplingParams  # Delayed import so env vars are already in effect
     import gc
@@ -231,7 +272,7 @@ def worker(
         llm = LLM(
             model=model_path,
             tensor_parallel_size=len(gpu_ids),
-            max_model_len=10480,
+            max_model_len=max_model_len,
             trust_remote_code=True,
             gpu_memory_utilization=0.9
         )
@@ -359,9 +400,10 @@ def main():
     model_path = args.model_path
     model_name     = os.path.basename(model_path.rstrip("/"))
     base_dir       = f"output/{model_name}"
-    output_jsonl   = os.path.join(base_dir, "DAPO.jsonl")
+    output_jsonl   = args.output_jsonl or os.path.join(base_dir, "DAPO.jsonl")
     temp_dir       = os.path.join(base_dir, "temp_rollout")
     os.makedirs(base_dir, exist_ok=True)  # Ensure the model-named output directory exists
+    os.makedirs(os.path.dirname(output_jsonl) or ".", exist_ok=True)
 
     # GPU IDs used by each worker (one instance per GPU)
     gpu_ids_all = args.gpu_ids
@@ -371,10 +413,11 @@ def main():
     enable_thinking = args.enable_thinking
     enable_rejection_sampling = args.enable_rejection_sampling
     max_attempts_per_rollout = args.max_attempts_per_rollout
+    max_model_len = args.max_model_len
 
     sampling_params_kwargs = dict(
         temperature=1.0,
-        max_tokens=7168,
+        max_tokens=args.max_tokens,
         top_k=-1,
         top_p=0.95
     )
@@ -389,8 +432,23 @@ def main():
     print(f"Loading data: {input_parquet}...")
     df = pd.read_parquet(input_parquet)
     prompts_raw = df["prompt"].tolist()
-    total_data  = len(prompts_raw)
-    print(f"Loaded {total_data} samples and assigned them to {num_workers} workers.")
+    full_data = len(prompts_raw)
+
+    # -------------------- Subset selection (first N raw rows) --------------------
+    # --num-prompts takes precedence; otherwise use --generate-ratio. Selecting the
+    # *first* N rows keeps global_index stable so checkpoint resume stays consistent.
+    if args.num_prompts is not None:
+        n_select = min(args.num_prompts, full_data)
+        select_desc = f"--num-prompts={args.num_prompts}"
+    else:
+        n_select = min(int(full_data * args.generate_ratio), full_data)
+        select_desc = f"--generate-ratio={args.generate_ratio}"
+    prompts_raw = prompts_raw[:n_select]
+    total_data = len(prompts_raw)
+    print(
+        f"Loaded {full_data} rows; selected first {total_data} via {select_desc} "
+        f"and assigned them to {num_workers} workers."
+    )
 
     num_rollouts = 1
 
@@ -467,6 +525,7 @@ def main():
                     enable_thinking=enable_thinking,
                     enable_rejection_sampling=enable_rejection_sampling,
                     max_attempts_per_rollout=max_attempts_per_rollout,
+                    max_model_len=max_model_len,
                 ),
             )
             p.start()
