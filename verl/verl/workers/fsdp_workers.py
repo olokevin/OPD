@@ -376,8 +376,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
+        # BlockTT / SVD PEFT adapters decompose the REAL weight matrices at
+        # apply() time (SVD needs actual values), so they cannot use meta-tensor
+        # init. Small models with tied embeddings already avoid meta init, but
+        # large ones (e.g. Qwen2.5-7B, tie_word_embeddings=False) would meta-init
+        # and then crash in blocktt.apply's model.to(cuda) with "Cannot copy out
+        # of meta tensor". Force real weights on CPU for those modes.
+        _peft_cfg = self.config.get("peft", None)
+        _peft_mode = _peft_cfg.get("mode", "none") if _peft_cfg is not None else "none"
+        _peft_needs_real_weights = str(_peft_mode) in ("blocktt", "svd")
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=(not actor_model_config.tie_word_embeddings) and not _peft_needs_real_weights,
+            mesh=self.device_mesh,
         )
 
         with init_context(), warnings.catch_warnings():

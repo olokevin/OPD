@@ -32,6 +32,7 @@ What we ran and what we learned. Append-mostly; each session adds a dated block.
 | [compress_sft](results/compress_sft.md) | **Compress-then-train** (branch `compress_sft`): new LlamaFactory `finetuning_type: svd_nystrom` compresses in-process at model-init (SVD-attn + Nystrom-MLP, retain 0.7, seq-reweighted full-seq calib) keeping factors **trainable**, then SFT on OpenThoughts3; eval MATH-500@4096 + MMLU-Pro → wandb `compress_sft_{model}`. Qwen3-4B fwd+combined smoke PASS (intermediate_size 9728→6810, save/reload clean). OLMoE blocked: fused 3D experts on tfm 5.2 → fast-fail guard + follow-up. |
 | [zo_opd](results/zo_opd.md) | ZO-NP OPD runs (Qwen3-1.7B student): NP-vs-BP gradient scaling, LR search, self-amplifying divergence. |
 | [fura_opd](results/fura_opd.md) | _(placeholder — FurA/LoRA OPD results, empty)_ |
+| [fura_grpo](results/fura_grpo.md) | **Full vs FURA (BlockTT) zero-RL GRPO on Qwen2.5-7B** (MATH lv3–5, 138 steps), wandb `nersc_grpo_qwen2p5_7b`. New `slurm/grpo/` infra. Fixes: grpo.sh RAY_EXTERNAL + overridable ckpt/exp + exit-code propagation; `fsdp_workers.py` real-weight init for blocktt/svd (meta-tensor crash on 7B). **[2026-07-18 COMPLETE]** MATH-500 acc@4 Full 0.526→0.668 / FURA 0.498→0.633. Benchmarks mean@16 (Full/FURA): AMC23 0.362/0.345, AIME24 0.060/0.081, Minerva 0.276/0.247, Olympiad 0.307/0.281 — FURA ≈ full at a fraction of trainable params. |
 
 ## ARIS threads — agent-generated research docs (`docs/aris/{project}/`)
 

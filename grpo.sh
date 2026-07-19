@@ -31,9 +31,21 @@ fi
 # Make compress/ package importable when PEFT_MODE=blocktt|svd is enabled.
 export PYTHONPATH="$(dirname "$(realpath "$0")")/src${PYTHONPATH:+:$PYTHONPATH}"
 
-ray stop --force
+# Ray isolation. RAY_EXTERNAL=1: a Ray cluster (head + workers) was already
+# started outside this script (multi-node bootstrap) and RAY_ADDRESS points at
+# it — do NOT stop it and do NOT start a new head. RAY_ISOLATE=1: private per-run
+# head. Otherwise keep the original single-run behavior. Mirrors
+# on_policy_distillation.sh so grpo.sh can run under the 2-node inside.sh.
+export RAY_ISOLATE=${RAY_ISOLATE:-0}
+export RAY_EXTERNAL=${RAY_EXTERNAL:-0}
+if [ "$RAY_ISOLATE" != "1" ] && [ "$RAY_EXTERNAL" != "1" ]; then
+    ray stop --force
+fi
 export RAY_memory_usage_threshold=0.99
-export CUDA_LAUNCH_BLOCKING=1
+# Disable Ray's worker-OOM memory monitor (cgroup v2 misreads usage on NERSC and
+# SIGKILLs the raylet mid-step); real OOMs still surface as CUDA errors.
+export RAY_memory_monitor_refresh_ms=${RAY_memory_monitor_refresh_ms:-0}
+export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-1}
 # export CUDA_VISIBLE_DEVICES=1,2,3,4
 export PYTHONUNBUFFERED=1
 export PROJECT_NAME=${PROJECT_NAME:-OnPolicyDistillation} # TODO
@@ -148,7 +160,9 @@ export ENTROPY_COEFF=${ENTROPY_COEFF:-0}          # verl default; SimpleRL-Zoo u
 export KL_LOSS_COEF=${KL_LOSS_COEF:-0.005}        # used only when USE_KL=True
 export KL_LOSS_TYPE=${KL_LOSS_TYPE:-low_var_kl}
 
-export CKPT_PATH=${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
+# CKPT_PATH is overridable: pin a fixed dir in the env for a stable checkpoint
+# dir across relaunches (required for resume_mode=auto). Unset -> timestamped.
+export CKPT_PATH=${CKPT_PATH:-${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)}
 export OUTLINES_CACHE_DIR=~/.cache/outlines/$(uuidgen)
 export NCCL_DEBUG=WARN
 
@@ -159,7 +173,9 @@ export SWANLAB_LOG_DIR=${PROJECT_PATH}/swanlab_log
 export HYDRA_FULL_ERROR=1
 
 
-export EXPERIMENT_NAME=${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)
+# EXPERIMENT_NAME overridable too: pin it (with CKPT_PATH) so relaunches share
+# one stable name + wandb run. Unset -> the original timestamped default.
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)}
 
 # ---- PEFT ----
 export PEFT_MODE=${PEFT_MODE:-none}
@@ -278,7 +294,9 @@ if [ "$LR_SCHEDULER" = "cosine" ]; then
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03"
 fi
 
-PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))
+# Overridable so wrapper scripts can cap the per-GPU dynamic-batch token budget
+# for OOM control (the default floor of 32768 can be too large for a 7B actor).
+PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))}
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 # The apply_chat_template_kwargs.enable_thinking flag is a Qwen3-only chat-template
@@ -295,7 +313,21 @@ fi
 echo "THINKING_ARG: ${THINKING_ARG:-<skipped: non-Qwen3 actor>}"
 
 
-ray start --head
+if [ "$RAY_EXTERNAL" = "1" ]; then
+    # Multi-node: cluster already up, RAY_ADDRESS points at the head. Just attach.
+    echo "RAY_EXTERNAL=1: attaching driver to pre-started cluster RAY_ADDRESS=${RAY_ADDRESS}"
+elif [ "$RAY_ISOLATE" = "1" ]; then
+    _gpu0=${CUDA_VISIBLE_DEVICES%%,*}
+    export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
+    export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_grpo_gpu${_gpu0:-0}}
+    rm -rf "$RAY_TMPDIR"; mkdir -p "$RAY_TMPDIR"
+    unset RAY_ADDRESS
+    ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TMPDIR" \
+        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE"
+    export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
+else
+    ray start --head
+fi
 sleep 5
 
 
@@ -365,9 +397,10 @@ python3 -m verl.trainer.main_ppo \
     reward_model.micro_batch_size_per_gpu=24 \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
-    trainer.val_before_train=False \
+    trainer.val_before_train=${VAL_BEFORE_TRAIN:-False} \
+    ++trainer.val_only=${VAL_ONLY:-False} \
     trainer.log_val_generations=2 \
-    trainer.logger=['console','swanlab'] \
+    trainer.logger=${TRAINER_LOGGER:-['console','swanlab']} \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.validation_data_dir=validation_log/$EXPERIMENT_NAME \
@@ -380,6 +413,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.is_plot=$IS_PLOT \
     $PEFT_ARGS \
     $EXTRA_HYDRA_ARGS
+# Capture the trainer exit code immediately: the trailing `if` below would
+# otherwise become the script's last command and mask a driver crash as exit 0
+# (a false success that makes the auto-resume controller stop instead of retry).
+TRAINER_RC=$?
 
 # Log the end time for local runs.
 if [ -z "$SLURM_JOB_ID" ]; then
@@ -387,3 +424,5 @@ if [ -z "$SLURM_JOB_ID" ]; then
     echo "End time: $(date)"
     echo "=========================================="
 fi
+
+exit $TRAINER_RC

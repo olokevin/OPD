@@ -28,7 +28,7 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_DISA
 # trainer loop + wandb logging run inside the TaskRunner ACTOR, so these must be
 # on the raylet, not just the driver.)
 export WANDB_MODE=offline
-export WANDB_PROJECT=nersc_opd_qwen4b_1p7b
+export WANDB_PROJECT=${WANDB_PROJECT:-nersc_opd_qwen4b_1p7b}
 export WANDB_DIR=${DATA_ROOT}/wandb
 export WANDB_RUN_ID=${WANDB_RUN_ID:-nersc_opd_qwen4b_1p7b_2node}
 export WANDB_RESUME=allow
