@@ -10,8 +10,20 @@
 #     --entropy_coeffient 0.001 --rollout_gpu_memory_util 0.75 --rollout_tp 2 --save_freq 5
 #
 # with defaults LR=5e-7, ppo_mini_batch_size=256, kl_loss_type=low_var_kl,
-# total_epochs=20, dataset=simplelr_math_35 (MATH lv3-5). ONE deliberate deviation:
-# no tensor parallel (PARALLEL_SIZE=1) per the run requirement, vs their rollout_tp=2.
+# total_epochs=20, dataset=simplelr_math_35 (MATH lv3-5). We also match SimpleRL's
+# clip_ratio=0.2 and kl_ctrl.kl_coef=0.001 (both are verl defaults, so left implicit),
+# shuffle the train set (SHUFFLE=True), and drop grpo.sh's default rollout-IS
+# correction (ROLLOUT_IS=none) since it is a verl-fork addition absent from the
+# SimpleRL-Zoo GRPO objective.
+#
+# Deliberate/unavoidable deviations:
+#   - no tensor parallel (PARALLEL_SIZE=1) per the run requirement, vs rollout_tp=2.
+#   - EVAL: this uses verl's in-training validation (val_kwargs), NOT SimpleRL's
+#     offline math_eval pipeline. verl val applies the model chat template (adds a
+#     "You are a helpful assistant." system prompt) whereas SimpleRL evaluates with
+#     the `qwen25-math-cot` template (instruction in system, raw question in user),
+#     and their reported MATH-500 is greedy pass@1 / temp1.0-topp0.95, not n=8. To
+#     compare against their table numbers, eval offline with their pipeline+template.
 #
 # Override per-run, e.g. `CUDA_VISIBLE_DEVICES=0,1,2,3 N_GPUS_PER_NODE=4 bash scripts/grpo/full.sh`.
 set -euo pipefail
@@ -27,6 +39,13 @@ HF_HOME=${HF_HOME:-/data/yequan/huggingface}
 # SimpleRL-Zoo trains on simplelr_math_35 (MATH level 3-5). In this repo the MATH
 # branch routes to datasets/train_data/math-lv3to5/train.parquet + MATH-500 eval.
 TRAIN_DATASET_NAME=MATH
+# Use the SimpleRL-Zoo `qwen25-math-cot`-structured prompt copies (instruction in
+# the system turn, raw question in user) instead of the shared OPD parquets (which
+# bake the instruction into the user turn and trigger a "You are a helpful assistant."
+# system prompt). Regenerate with: scripts/grpo/prep_simplerl_prompts.py.
+# Scoped to this GRPO run only — OPD runs keep using the un-suffixed shared parquets.
+TRAIN_DATASET=datasets/train_data/math-lv3to5_simplerl/train.parquet
+TEST_FILE='["datasets/test_data/MATH-500_simplerl/test.parquet"]'
 PROJECT_NAME=grpo-qwen25-7b
 
 # ---- hyperparameters (exact SimpleRL-Zoo Qwen2.5-7B recipe) ----
@@ -43,6 +62,8 @@ USE_KL=True                       # GRPO uses KL loss
 KL_LOSS_COEF=1e-4                 # --kl_loss_coef 0.0001 (0.5B-14B models)
 KL_LOSS_TYPE=low_var_kl
 ENTROPY_COEFF=0.001               # --entropy_coeffient 0.001
+SHUFFLE=True                      # SimpleRL-Zoo shuffles the train set
+ROLLOUT_IS=none                   # drop the verl-fork IS correction (not in SimpleRL-Zoo GRPO)
 MODEL_DTYPE=bfloat16
 VAL_N=8
 VAL_TEMPERATURE=1.0

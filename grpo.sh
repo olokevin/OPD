@@ -160,6 +160,15 @@ export ENTROPY_COEFF=${ENTROPY_COEFF:-0}          # verl default; SimpleRL-Zoo u
 export KL_LOSS_COEF=${KL_LOSS_COEF:-0.005}        # used only when USE_KL=True
 export KL_LOSS_TYPE=${KL_LOSS_TYPE:-low_var_kl}
 
+# Data shuffling. Defaults to False to preserve prior behavior for existing OPD
+# runs; SimpleRL-Zoo shuffles, so its GRPO wrappers set SHUFFLE=True.
+export SHUFFLE=${SHUFFLE:-False}
+# Rollout importance-sampling correction (verl-fork addition, NOT part of the
+# SimpleRL-Zoo recipe). Defaults on to preserve prior behavior; set
+# ROLLOUT_IS=none to drop the correction entirely (SimpleRL-aligned GRPO).
+export ROLLOUT_IS=${ROLLOUT_IS:-token}
+export ROLLOUT_IS_THRESHOLD=${ROLLOUT_IS_THRESHOLD:-2.0}
+
 # CKPT_PATH is overridable: pin a fixed dir in the env for a stable checkpoint
 # dir across relaunches (required for resume_mode=auto). Unset -> timestamped.
 export CKPT_PATH=${CKPT_PATH:-${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}_peft-${PEFT_MODE:-none}-$(date +%Y-%m-%d_%H-%M-%S)}
@@ -299,6 +308,15 @@ fi
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))}
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
+# Rollout IS-correction args. ROLLOUT_IS=none disables the correction (SimpleRL-Zoo
+# GRPO has no such term); any other value passes it through as before.
+ROLLOUT_IS_ARGS=""
+if [ "$ROLLOUT_IS" != "none" ]; then
+    ROLLOUT_IS_ARGS="++algorithm.rollout_correction.rollout_is=$ROLLOUT_IS \
+    ++algorithm.rollout_correction.rollout_is_threshold=$ROLLOUT_IS_THRESHOLD"
+fi
+echo "ROLLOUT_IS_ARGS: ${ROLLOUT_IS_ARGS:-<disabled>}"
+
 # The apply_chat_template_kwargs.enable_thinking flag is a Qwen3-only chat-template
 # control. Qwen2.5 / Llama / etc. templates don't take it (Qwen2.5 silently ignores
 # it; other templates may reject unknown kwargs), so only pass it for Qwen3 models.
@@ -334,9 +352,8 @@ sleep 5
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
-    ++algorithm.rollout_correction.rollout_is=token \
-    ++algorithm.rollout_correction.rollout_is_threshold=2.0 \
-    data.shuffle=False \
+    $ROLLOUT_IS_ARGS \
+    data.shuffle=$SHUFFLE \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
     data.train_batch_size=$TRAIN_BATCH_SIZE \

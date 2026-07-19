@@ -25,6 +25,11 @@ set -a  # auto-export every assignment below to grpo.sh
 ACTOR_MODEL_PATH=Qwen/Qwen2.5-7B
 HF_HOME=${HF_HOME:-/data/yequan/huggingface}
 TRAIN_DATASET_NAME=MATH            # simplelr_math_35 -> math-lv3to5 + MATH-500 eval
+# SimpleRL-Zoo `qwen25-math-cot`-structured prompt copies (see full.sh / scripts/
+# grpo/prep_simplerl_prompts.py). Kept identical to full.sh so the common training
+# setting matches; OPD runs keep using the un-suffixed shared parquets.
+TRAIN_DATASET=datasets/train_data/math-lv3to5_simplerl/train.parquet
+TEST_FILE='["datasets/test_data/MATH-500_simplerl/test.parquet"]'
 PROJECT_NAME=grpo-qwen25-7b
 
 # ---- hyperparameters (SimpleRL-Zoo Qwen2.5-7B recipe; LR raised for FurA) ----
@@ -41,6 +46,8 @@ USE_KL=True
 KL_LOSS_COEF=1e-4
 KL_LOSS_TYPE=low_var_kl
 ENTROPY_COEFF=0.001
+SHUFFLE=True                      # match full.sh: SimpleRL-Zoo shuffles the train set
+ROLLOUT_IS=none                   # match full.sh: drop the verl-fork IS correction
 MODEL_DTYPE=bfloat16
 VAL_N=8
 VAL_TEMPERATURE=1.0
