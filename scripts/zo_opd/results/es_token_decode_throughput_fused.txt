@@ -1,0 +1,56 @@
+es_token decode throughput, FUSED Triton rail kernel -- 2026-08-22 11:13:14
+GPU 6 (NVIDIA H100 NVL)
+Qwen3-1.7B bf16, 112 matched decoder linears, greedy, sigma=0.01,
+graphed packed decode, EOS disabled; ms/token-step from the T=64 -> T=320 slope.
+Baseline (PyTorch rail op): es_token_decode_throughput.txt
+==============================================================
+### n_sample=0 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=0 rows_per_token=4
+[packed N=0] T=64: 0.223s   T=320: 0.977s
+[packed N=0] ms/token-step = 2.943   clean tok/s = 1359.1   row-steps/s = 1359.1
+RESULT {"n_sample": 0, "pack_width": 4, "rows_per_token": 4, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.22329611517488956, "t_long_s": 0.9767185915261507, "ms_per_token_step": 2.943056548247114, "clean_tok_per_s": 1359.1312074456748, "row_steps_per_s": 1359.1312074456748, "full_call_tok_per_s": 1310.510530981051}
+
+### n_sample=1 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=1 rows_per_token=8
+[packed N=1] T=64: 0.253s   T=320: 1.129s
+[packed N=1] ms/token-step = 3.424   clean tok/s = 1168.3   row-steps/s = 2336.7
+RESULT {"n_sample": 1, "pack_width": 4, "rows_per_token": 8, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.2526195766404271, "t_long_s": 1.1290756445378065, "ms_per_token_step": 3.4236565152241383, "clean_tok_per_s": 1168.3415033643146, "row_steps_per_s": 2336.683006728629, "full_call_tok_per_s": 1133.6707209940528}
+
+### n_sample=2 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=2 rows_per_token=12
+[packed N=2] T=64: 0.257s   T=320: 1.144s
+[packed N=2] ms/token-step = 3.462   clean tok/s = 1155.6   row-steps/s = 3466.7
+RESULT {"n_sample": 2, "pack_width": 4, "rows_per_token": 12, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.25747125688940287, "t_long_s": 1.1436188844963908, "ms_per_token_step": 3.4615141703397967, "clean_tok_per_s": 1155.5636646743362, "row_steps_per_s": 3466.690994023009, "full_call_tok_per_s": 1119.2539904267728}
+
+### n_sample=4 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=4 rows_per_token=20
+[packed N=4] T=64: 0.265s   T=320: 1.200s
+[packed N=4] ms/token-step = 3.651   clean tok/s = 1095.5   row-steps/s = 5477.4
+RESULT {"n_sample": 4, "pack_width": 4, "rows_per_token": 20, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.26500742323696613, "t_long_s": 1.1997533664107323, "ms_per_token_step": 3.651351340522524, "clean_tok_per_s": 1095.484829303658, "row_steps_per_s": 5477.42414651829, "full_call_tok_per_s": 1066.8859415909283}
+
+### n_sample=8 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=8 rows_per_token=36
+[packed N=8] T=64: 0.279s   T=320: 1.274s
+[packed N=8] ms/token-step = 3.885   clean tok/s = 1029.7   row-steps/s = 9267.1
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.2790495716035366, "t_long_s": 1.273539555259049, "ms_per_token_step": 3.884726498654345, "clean_tok_per_s": 1029.6735179131879, "row_steps_per_s": 9267.06166121869, "full_call_tok_per_s": 1005.0728261358454}
+
+### n_sample=16 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=16 rows_per_token=68
+[packed N=16] T=64: 0.298s   T=320: 1.388s
+[packed N=16] ms/token-step = 4.259   clean tok/s = 939.1   row-steps/s = 15965.5
+RESULT {"n_sample": 16, "pack_width": 4, "rows_per_token": 68, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.298035042360425, "t_long_s": 1.3883886532858014, "ms_per_token_step": 4.259193792677252, "clean_tok_per_s": 939.1448698289149, "row_steps_per_s": 15965.462787091554, "full_call_tok_per_s": 921.9320519299221}
+
+### n_sample=32 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=32 rows_per_token=132
+[packed N=32] T=64: 0.346s   T=320: 1.679s
+[packed N=32] ms/token-step = 5.208   clean tok/s = 768.0   row-steps/s = 25343.9
+RESULT {"n_sample": 32, "pack_width": 4, "rows_per_token": 132, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.3455623099580407, "t_long_s": 1.6789014274254441, "ms_per_token_step": 5.208355927607045, "clean_tok_per_s": 767.9966683532286, "row_steps_per_s": 25343.890055656546, "full_call_tok_per_s": 762.4033067640248}
+
+---- pack_width sweep at N=8 ----
+### n_sample=8 pack_width=8 
+[cfg] matched_layers=112 pack_width=8 n_sample=8 rows_per_token=72
+[packed N=8] T=64: 0.358s   T=320: 1.522s
+[packed N=8] ms/token-step = 4.547   clean tok/s = 1759.2   row-steps/s = 15833.0
+RESULT {"n_sample": 8, "pack_width": 8, "rows_per_token": 72, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.35802647564560175, "t_long_s": 1.5221753753721714, "ms_per_token_step": 4.547456639556913, "clean_tok_per_s": 1759.225130463144, "row_steps_per_s": 15833.026174168295, "full_call_tok_per_s": 1681.8035828322875}
+
+done 11:16:44

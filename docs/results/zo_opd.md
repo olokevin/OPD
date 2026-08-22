@@ -221,6 +221,143 @@ config — the same warning appears in the 2026-06-09 BP log — and is an artif
   inherits `enforce_eager=True` and is ~3× pessimistic; both variants are recorded in
   `es_token_stock_batch.txt` to make the trap explicit.
 
+## Session 2026-08-22 — the fixed rail overhead: diagnosis and a fused kernel
+
+§2 left an unexplained shape: turning rails on at all cost **+3.41 ms/token-step**
+(N=0 → N=1) while 31 further rails cost only **+3.08 ms**. A near-fixed cost that does not
+scale with the work being done is a launch-overhead signature, not an arithmetic one — at N=1 the
+rail op touches at most 4 rows of ≤6144 elements per layer, microseconds of actual math.
+Harnesses: `scripts/zo_opd/es_token_checks/{bench_rail_op.py,check_rail_op_parity.py}`;
+raw record `scripts/zo_opd/results/es_token_rail_op.txt`.
+
+### 6.1 It is not the RNG
+
+The natural suspicion is the per-token noise draw — if Rademacher noise were generated on the host
+and copied to the device, 0.92 M values per (slot, token) would be fatal. It is not:
+`draw_noise` builds a `torch.Generator(device=cuda)` and draws **on the GPU**, and the isolation
+measurement (§3) prices the whole fused draw at **0.199 ms**, paid identically at N=0 — so it is
+not in the N=0 → N=1 delta at all. It remains a real but secondary cost (§6.5).
+
+### 6.2 It is CUDA-graph node count
+
+Replaying the shipping rail op alone at the true Qwen3-1.7B shapes for all 112 matched linears
+(`bench_rail_op.py`, CUDA-graphed) reproduces the end-to-end delta almost exactly — **3.376 ms at
+N=1** against the 3.41 ms measured in the live decode. The PyTorch formulation
+
+```python
+x_p   = x[pri]                                  # gather
+v_eff = R[rail] * v[pidx]                       # 2 gathers + mul
+alpha = (x_p * v_eff).sum(dim=-1, keepdim=True) # mul + reduce
+u_eff = S[rail] * u[pidx]                       # 2 gathers + mul
+y[pri] = y[pri] + sigma * alpha * u_eff         # gather + 2 mul + add + index_put
+```
+
+issues **14 kernels per layer**. Profiler counts, one decode token, N=1:
+
+| kernel class | count | total | per call |
+|---|---|---|---|
+| `vectorized_gather_kernel` | 672 | 1207.8 µs | 1.80 µs |
+| `elementwise_kernel<128,4>` (non-vectorised) | 224 | 602.9 µs | 2.69 µs |
+| `vectorized_elementwise_kernel<8>` | 336 | 545.3 µs | 1.62 µs |
+| `index_elementwise_kernel` (the `index_put`) | 112 | 530.0 µs | 4.73 µs |
+| `reduce_kernel` (the `alpha` sum) | 112 | 508.7 µs | 4.54 µs |
+| remaining elementwise | 112 | 184.1 µs | 1.64 µs |
+| **total** | **1568** | **3578.8 µs** | **2.28 µs** |
+
+1568 graph nodes at ~2.3 µs each *is* the 3.4 ms. Two secondary findings fall out: over half the
+launches are **gathers of operands that do not depend on the layer's activations** (`R[rail]`,
+`v[pidx]`, `S[rail]`, `u[pidx]` — pure functions of the token), and the `elementwise_kernel<128,4>`
+rows are the *non-vectorised* path, taken because `noise_buf[:, off:off+d]` is a strided view
+(row stride `d_total` = 917 504).
+
+This also explains the sub-linear rail scaling: extra rails only make each of those 1568 kernels
+slightly wider, and they are all far below the width where the GPU notices.
+
+### 6.3 Fixes considered, all measured
+
+`bench_rail_op.py` replays each candidate in a CUDA graph at the real shapes;
+`check_rail_op_parity.py` checks each against the shipping op in fp32 (each variant compared in
+*its own* row layout, since v3+ reorder the packed rows). Rail-op time only, ms:
+
+| variant | idea | N=1 | N=8 | N=32 | speedup @N=1 |
+|---|---|---|---|---|---|
+| `v0_current` | shipping PyTorch branch | 3.376 | 4.646 | 5.225 | 1.00× |
+| `v1_flat` | one broadcast kernel builds `sign*noise` for **all** layers into a flat `[P, d_total]`; each layer reads views | 2.373 | 3.581 | 4.276 | 1.42× |
+| `v2_fused` | v1 + `vecdot` / `addcmul_` per layer | 1.992 | 3.135 | 3.847 | 1.69× |
+| `v3_contig` | v2 + `[clean \| perturbed]` row layout so `x_p`/`y_p` are slices, not gather/scatter | 1.138 | 2.110 | 2.597 | 2.97× |
+| `v4_bmm` | v3 + batched GEMV for `alpha` | 0.765 | 1.147 | 1.937 | 4.41× |
+| `v5_blocked` | per-layer **contiguous** noise blocks (restores the vectorised elementwise path) | 1.527 | 2.695 | 3.033 | 2.21× |
+| `v6_triton` | one fused Triton kernel/layer (needs the v3 layout) | 0.491 | 0.874 | 1.225 | 6.88× |
+| **`v7_triton_rowidx`** | fused Triton that **reads the row indices**, so no layout change and no `[P, d_total]` buffer | 0.478 | 0.790 | 0.870 | 7.06× |
+| **`v7` tuned** | `BLOCK_IN=BLOCK_OUT=4096, num_warps=16` | **0.313** | **0.472** | **0.560** | **10.79×** |
+
+All variants reproduce the shipping op to ≤3.0e-06 relative error.
+
+**Why v7 wins.** It collapses the whole per-layer op into one launch: one program per perturbed
+row, which reads that row's `(rail, slot)` from the index tensors and forms the sign-modulated
+noise *on the fly*. That removes all six operand gathers, the strided-view penalty, the separate
+reduce, and the `index_put` — and because it addresses rows through `pri` it needs **no change to
+the packed row layout** (so none of the NP-inherited attention/KV metadata is touched) and never
+materialises the `[P, d_total]` sign×noise buffer that v1–v6 need (235 MB at N=32).
+
+**Why the tuning matters so much.** The grid is only `P = bucket × n_sample` programs — 4 at the
+shipping N=1. The kernel is latency-bound, not occupancy-bound, so large blocks that cut the number
+of reduction iterations beat the usual "more, smaller programs" instinct: 4096/4096/16 warps is
+1.47× faster than the conventional 1024/1024/4.
+
+### 6.4 Result — the fixed overhead is 7× smaller and the goal is met
+
+Shipped as `verl/verl/trainer/es_token/rail_kernel.py`, called from
+`ESTokenLinear.forward`; the PyTorch branch is retained as a fallback when Triton is unavailable or
+the tensors are not row-contiguous. Same protocol as §2.
+
+| N | before | after | speedup | rail overhead vs N=0 |
+|---|---|---|---|---|
+| 0 (clean only) | 2.939 | 2.943 | 1.00× | — |
+| **1** | 6.347 | **3.424** | **1.85×** | 3.408 → **0.481 ms** (7.1× less) |
+| 2 | 6.698 | 3.462 | 1.93× | 3.759 → 0.519 |
+| 4 | 7.264 | 3.651 | 1.99× | 4.325 → 0.708 |
+| **8** (shipping) | 7.600 | **3.885** | **1.96×** | 4.661 → 0.942 |
+| 16 | 8.170 | 4.259 | 1.92× | 5.231 → 1.316 |
+| 32 | 9.429 | 5.208 | 1.81× | 6.490 → 2.265 |
+| 8 @ `pack_width=8` | 8.449 | 4.547 | 1.86× | — |
+
+**The goal — a single rail costing close to clean-only decode, under 3.5 ms/token-step — is met at
+3.424 ms**, i.e. +0.481 ms over clean decode instead of +3.408 ms. Clean throughput at the shipping
+N=8 rises 526 → 1,030 tok/s.
+
+**One full OPD step** (batch 64 × 1024, N=8, all 112 linears, co-located 4B teacher, same GPU and
+config as §4):
+
+| | before | after | speedup |
+|---|---|---|---|
+| **step_time** | 147.54 s | **89.59 s** | **1.65×** |
+| decode | 129.59 s | 72.00 s | 1.80× (16 waves, 7.85 → 4.25 s each) |
+| teacher | 4.22 s | 3.95 s | — |
+| assemble | 13.65 s | 13.56 s | — |
+| peak GPU mem | 85,129 MiB | 85,107 MiB | — |
+| **ratio vs BP-OPD** (61.86 s) | **2.39×** | **1.45×** | |
+
+Correctness is unchanged and checked three ways: the 19 CPU tests still pass; `check_rail_op_parity.py`
+matches the shipping op to ≤3.0e-06 for every variant; and on GPU all three parity gates still pass
+(σ=0 ≡ stock greedy, graphed ≡ eager **bit-for-bit** with payload max|diff| 0.000e+00, staggered-EOS
+bit-for-bit). The step's `L_clean_mean` is **bit-identical** to the pre-optimisation run
+(0.2556177764199674) — the clean trajectory is untouched — while `dW_norm_mean` moves 239.726 →
+239.514 because the rail now accumulates in fp32 rather than bf16.
+
+### 6.5 What is left
+
+1. **The noise draw — 0.199 ms**, now ~14% of the N=1 step and the largest remaining fixed cost.
+   `draw_noise` materialises an **int64** `randint` buffer (7.34 MB per slot at `d_total` = 917,504)
+   and then runs a five-kernel cast/scale/copy chain: ~42 MB of traffic and ~6 kernels per slot per
+   token. Drawing straight into the bf16 buffer, or folding a Philox stream into the rail kernel
+   itself, removes most of it. The same routine regenerates noise for every token during assembly,
+   so this also attacks the 13.6 s assemble phase. Constraint: decode and assembly must keep
+   regenerating **bit-identical** noise, so both call sites have to move together.
+2. **`pack_width`** is now unambiguously the dominant wall-clock lever (§2): decode is still 80% of
+   the step, and the full-context scratch-KV reservation caps concurrency at 4–8 slots while BP runs
+   64.
+
 ---
 
 # ZO-NP (zeroth-order node-perturbation) OPD — results

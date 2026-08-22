@@ -27,6 +27,7 @@ y[rail n] += sigma_l * ((r_n ⊙ v_t)ᵀ x) * (s_n ⊙ u_t)     -- rank-1 ΔW, n
 |---|---|
 | `verl/verl/trainer/es_token/{signs,seeding,grad_estimator}.py` | Hadamard rails, fused token-noise seeding/layout, losses/scales/assembly math (pure, CPU-tested) |
 | `verl/verl/trainer/es_token/ray_trainer.py` | `RayESTokenTrainer(RayNPTrainer)` + `SampledTokenTeacher`; fit = decode waves → teacher prefill → scales → assemble RPC → per-layer NCCL broadcast; logs `train/{decode,teacher,assemble}_s` |
+| `verl/verl/trainer/es_token/rail_kernel.py` | Fused Triton rank-1 rail op — ONE launch per layer (was ~14 PyTorch kernels); see §7 |
 | `verl/verl/workers/rollout/vllm_rollout/es_token_worker_extension.py` | `ESTokenLinear` + `WorkerExtension(NPWorkerExtension)`: install/capture/replay/eager-oracle/orchestrator/`es_assemble_and_apply` |
 | `verl/verl/trainer/main_es_token.py`, `config/es_token_trainer.yaml`, `scripts/zo_opd/opd_es_token.sh` | entry / config / launcher |
 | `scripts/zo_opd/es_token_checks/{check_es_parity,check_es_grad_cosine}.py`, `bench_es_token_vs_bp.sh` | gates + headline bench |
@@ -83,3 +84,41 @@ Standalone profile of the three axes, on H100 NVL, filed in
 | `sweep_stock_batch.sh` | stock vLLM tok/s vs concurrency, eager **and** cudagraph | 1,413 → 13,975 tok/s for B=4 → 64; eager stock is 3× pessimistic (a measurement trap) |
 | `sweep_decode_isolation.sh` | `ES_BENCH_SKIP_NOISE` deltas | 36% bare decode / 4% noise / 60% rail compute |
 | `bench_es_token_vs_bp.sh` | one full OPD step vs BP-OPD | 147.54 s vs 61.86 s = 2.39× (June's 2.33× reproduced) |
+
+## 7. Fused rail kernel (2026-08-22) — the fixed rail overhead, removed
+
+The 2026-08-21 profile found a cost shaped like launch overhead, not arithmetic: turning rails on at
+all cost **+3.41 ms/token-step** (N=0 → N=1) while 31 further rails cost only +3.08 ms. Diagnosis
+(full record: [results/zo_opd.md §6](../results/zo_opd.md), raw
+`scripts/zo_opd/results/es_token_rail_op.txt`):
+
+- **Not the RNG.** `draw_noise` already draws on the GPU (`torch.Generator(device=cuda)`); the fused
+  per-token draw costs 0.199 ms and is paid at N=0 too, so it is not in the delta.
+- **It is CUDA-graph node count.** The PyTorch rail branch issues **14 kernels per layer** — six of
+  them gathers of operands (`R[rail]`, `v[pidx]`, `S[rail]`, `u[pidx]`) that depend only on the
+  token, plus a strided-view penalty because `noise_buf[:, off:off+d]` has row stride `d_total`.
+  At 112 layers that is **1568 graph nodes per decode token at ~2.3 µs each = the 3.4 ms**.
+
+`rail_kernel.py` collapses the per-layer op into **one Triton launch**: one program per perturbed
+row, which reads its `(rail, slot)` from the index tensors and forms the sign-modulated noise on the
+fly. Because it addresses rows through `perturbed_row_idx` it needs **no change to the packed row
+layout** (none of the NP-inherited attention/KV metadata is touched) and never materialises a
+`[P, d_total]` sign×noise buffer. Tuned to `BLOCK_IN = BLOCK_OUT = 4096, num_warps = 16` — the grid
+is only `bucket × n_sample` programs, so the kernel is latency-bound and large blocks beat occupancy.
+
+| | before | after |
+|---|---|---|
+| rail op alone, N=1 | 3.376 ms | **0.313 ms** (10.8×) |
+| decode ms/token-step, N=1 | 6.347 | **3.424** (rail overhead 3.408 → **0.481**) |
+| decode ms/token-step, N=8 | 7.600 | **3.885** |
+| **one OPD step** (64×1024, N=8) | **147.54 s** | **89.59 s** (1.65×) |
+| — decode | 129.59 s | 72.00 s |
+| **ratio vs BP-OPD** (61.86 s) | 2.39× | **1.45×** |
+
+All gates re-run and still green: 19/19 CPU tests, `check_rail_op_parity.py` ≤3.0e-06 vs the shipping
+op, and on GPU σ=0 ≡ stock greedy / graphed ≡ eager bit-for-bit / staggered-EOS bit-for-bit. The
+step's `L_clean_mean` is bit-identical to the pre-optimisation run (the clean trajectory is
+untouched); `dW_norm_mean` shifts 239.726 → 239.514 because the rail now accumulates in fp32.
+
+Remaining: the noise draw (0.199 ms, an int64 `randint` plus a five-kernel cast chain, also paid per
+token during assembly) and `pack_width`, which is now unambiguously the dominant wall-clock lever.

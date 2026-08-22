@@ -30,6 +30,7 @@ import os
 import torch
 
 from verl.trainer.es_token.grad_estimator import assemble_chunk
+from verl.trainer.es_token.rail_kernel import apply_rail, rail_supported
 from verl.trainer.es_token.seeding import build_noise_layout, draw_token_noise
 from verl.trainer.es_token.signs import build_layer_signs
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
@@ -79,14 +80,23 @@ class ESTokenLinear(torch.nn.Module):
 
         off_u, d_out, off_v, d_in = st["es_layout"][self.name]
         nb = st["es_noise_buf"]                       # [bucket, d_total]
-        u = nb[:, off_u:off_u + d_out]                # [bucket, d_out] view
-        v = nb[:, off_v:off_v + d_in]                 # [bucket, d_in]  view
-        S, R = st["es_signs"][self.name]              # [N, d_out], [N, d_in]
         sigma = st["es_sigma_buf"][self.name]         # [1] device tensor
         pri = st["perturbed_row_idx"]                 # [P]
         rail = st["es_rail_idx"]                      # [P]
         pidx = st["es_prompt_idx"]                    # [P]
 
+        sf = st.get("es_signs_flat")
+        if sf is not None and rail_supported(x, y):
+            # ONE fused launch for the whole rail op (see rail_kernel.py). The
+            # PyTorch form below issues ~14 kernels per layer, which at 112
+            # layers made the decode CUDA-graph node-bound.
+            apply_rail(x, y, nb, sf, sigma, pri, rail, pidx,
+                       off_u, d_out, off_v, d_in, nb.stride(0), sf.stride(0))
+            return _repack(y, bias, was_tuple)
+
+        u = nb[:, off_u:off_u + d_out]                # [bucket, d_out] view
+        v = nb[:, off_v:off_v + d_in]                 # [bucket, d_in]  view
+        S, R = st["es_signs"][self.name]              # [N, d_out], [N, d_in]
         x_p = x[pri]                                  # [P, d_in]
         v_eff = R[rail] * v[pidx]                     # [P, d_in]
         alpha = (x_p * v_eff).sum(dim=-1, keepdim=True)   # [P, 1]
@@ -138,10 +148,20 @@ class WorkerExtension(NPWorkerExtension):
         self.es_dtype = self.np_modules[matched[0]].wrapped.weight.dtype
         self.es_signs = {}
         self.es_w_rms = {}
+        # Flat [n_rails, d_total] copy of every layer's signs in the SAME layout
+        # as the per-slot noise buffer, so the fused rail kernel can address a
+        # layer's s/r rows by (rail, offset) without a per-layer gather.
+        self.es_signs_flat = torch.empty(int(n_rails), int(d_total),
+                                         device=device, dtype=self.es_dtype)
         for layer_name, d_out, d_in in layer_dims:
             self.es_signs[layer_name] = build_layer_signs(
                 layer_name, int(n_rails), d_out, d_in, int(global_seed),
                 self.es_dtype, device)
+            off_u, _, off_v, _ = layout[layer_name]
+            S_l, R_l = self.es_signs[layer_name]
+            self.es_signs_flat[:, off_u:off_u + d_out] = S_l
+            self.es_signs_flat[:, off_v:off_v + d_in] = R_l
+        for layer_name, d_out, d_in in layer_dims:
             w = self.np_modules[layer_name].wrapped.weight
             self.es_w_rms[layer_name] = float(
                 w.detach().float().pow(2).mean().sqrt().item())
@@ -196,6 +216,7 @@ class WorkerExtension(NPWorkerExtension):
             "es_noise_buf": noise_buf,
             "es_layout": self.es_layout,
             "es_signs": self.es_signs,
+            "es_signs_flat": self.es_signs_flat,
             "es_sigma_buf": sigma_buf,
             "perturbed_row_idx": perturbed_row_idx,
             "clean_row_idx": clean_row_idx,
@@ -464,6 +485,7 @@ class WorkerExtension(NPWorkerExtension):
                 "es_noise_buf": gs["noise_buf"],
                 "es_layout": self.es_layout,
                 "es_signs": self.es_signs,
+            "es_signs_flat": self.es_signs_flat,
                 "es_sigma_buf": gs["sigma_buf"],
                 "perturbed_row_idx": gs["perturbed_row_idx"],
                 "clean_row_idx": gs["clean_row_idx"],
