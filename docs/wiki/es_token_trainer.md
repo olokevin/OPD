@@ -61,7 +61,7 @@ Full record: `scripts/zo_opd/results/es_token_gates.txt`.
 
 **Ratio es_token / BP = 2.33× (cold step-1; ≈5.3× vs the prior A800 steady-state 27.5 s) — down from NP V3's 46×/90×.** 65,536 token-records (64×1024, no early EOS), `weight_sync_ok = 1.0`. Full table: `scripts/zo_opd/results/es_token_vs_bp.txt`.
 
-**Reading.** es_token closes essentially all of NP's *engineering* overhead: decode sits at the memory-bound rail floor (≈7.8 ms/token-step for 36 rows × 28 layers), teacher scoring is now *faster* than BP's, and assembly is at parity with BP's backward+optimizer. The entire remaining 2.3× lives in decode and is structural, not glue: the hand-driven serial token loop at pack 4 yields ~511 tok/s vs vLLM continuous batching's 1134 tok/s, with each token running 1+N=9 rows. Next levers, in order: `pack_width` 8+ (teacher on its own GPU, or shrink the full-ctx scratch-KV reservation), overlap teacher prefill with the next wave's decode (minor now), larger N (rails ~free to ~16). Per-probe gradient quality is at the rank-1 weight-probe information bound (§3) — learning-quality runs (LR sweep first) are the open follow-up.
+**Reading.** es_token closes essentially all of NP's *engineering* overhead: decode sits at the memory-bound rail floor (≈7.8 ms/token-step for 36 rows × 28 layers), teacher scoring is now *faster* than BP's, and assembly is at parity with BP's backward+optimizer. The entire remaining 2.3× lives in decode and is structural, not glue — and the [2026-08-21 profile](../results/zo_opd.md#2-decode-throughput--clean-decode-only-vs-clean--n-parallel-perturbed-rails) pins down which part: the hand-driven graphed loop is **not** the cost (clean-only decode is 2.939 ms/token-step vs stock vLLM's own graphed decode at 2.831 ms **at the same concurrency**, a 4% overhead), so the earlier "~511 vs 1134 tok/s" reading was a *concurrency* gap, not a driver gap. What costs is (a) running 1+N=9 rows per token (2.6× the clean per-token-step) and (b) being limited to 4 concurrent sequences where BP runs 64. Next levers, in order, now quantified: **(1) `pack_width`** — 4→8 buys 1.80× clean throughput for +11% per-step cost, and 16 fails only on the full-context scratch-KV reservation (2560 blocks/slot regardless of the real 1024-token budget), so shrinking that reservation is the single highest-leverage fix; **(2) the rank-1 rail op itself** — 60% of the per-token-step cost lives in the 112 wrapped linears (the fused noise draw is only 4%); **(3) larger N** — rails cost just +0.10 ms each, so N=32 gives 4× the probes (2× cosine) for 1.24× the time, though it does not help wall-clock. Per-probe gradient quality is at the rank-1 weight-probe information bound (§3; re-confirmed at 0.86–0.99× the bound across two layer shapes, and rails ≡ repeats at equal K) — learning-quality runs (LR sweep first) are the open follow-up.
 
 ## 5. Known issues / gotchas
 
@@ -69,3 +69,17 @@ Full record: `scripts/zo_opd/results/es_token_gates.txt`.
 - The trainer-side `scales` RPC sends **raw** rail differences; 1/σ_l is applied per layer inside `es_assemble_and_apply` — don't double-divide.
 - `iw_clamp=10` caps the importance weight (σ small → ratios ≈1; the clamp is a safety rail).
 - LR scale: bench config `lr=1e-3`, `token_agg=mean` gives update-norm ≈ 0.3% of ‖W‖ per step; an LR sweep (NP lesson: all-layer needs ~30× below single-layer) is REQUIRED before any learning-quality claim. Learning-rate/quality runs are follow-up — this page's claim is the wall-clock + correctness result.
+
+## 6. Profiling record (2026-08-21)
+
+Standalone profile of the three axes, on H100 NVL, filed in
+[results/zo_opd.md §ZO-ES-token](../results/zo_opd.md). Harnesses live in
+`scripts/zo_opd/es_token_checks/`; raw records in `scripts/zo_opd/results/`.
+
+| Harness | What it measures | Headline |
+|---|---|---|
+| `sweep_grad_cosine.sh` | cos(es dW, autograd) vs probe count K, two layer shapes | 0.86–0.99× the `sqrt(K/(K+d_out·d_in))` bound; rails ≡ repeats at equal K |
+| `bench_decode_throughput.py` + `sweep_decode_throughput.sh` | ms/token-step (T=64→320 slope) for clean-only (N=0) and N=1..32, plus `pack_width` | clean-only within 4% of stock vLLM at equal concurrency; +0.10 ms/rail; pw 4→8 = 1.80× |
+| `sweep_stock_batch.sh` | stock vLLM tok/s vs concurrency, eager **and** cudagraph | 1,413 → 13,975 tok/s for B=4 → 64; eager stock is 3× pessimistic (a measurement trap) |
+| `sweep_decode_isolation.sh` | `ES_BENCH_SKIP_NOISE` deltas | 36% bare decode / 4% noise / 60% rail compute |
+| `bench_es_token_vs_bp.sh` | one full OPD step vs BP-OPD | 147.54 s vs 61.86 s = 2.39× (June's 2.33× reproduced) |
