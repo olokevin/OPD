@@ -149,3 +149,91 @@ Launched 2× 2-node interactive GRPO jobs on Qwen2.5-7B base (MATH lv3–5 train
 
 ## [2026-07-18] results | Full vs FURA GRPO on Qwen2.5-7B — COMPLETE
 Both 138-step runs done (auto-resume: full 3 segments, fura 2). MATH-500 acc@4: Full 0.526→0.668 (peak 0.682), FURA 0.498→0.633. Post-training val_only on 4 benchmarks (avg@16, mean@16 Full/FURA): AMC23 0.362/0.345, AIME24 0.060/0.081, Minerva 0.276/0.247, Olympiad-Bench 0.307/0.281. FURA (only BTT factors trainable) within ~2-3pts of full, ahead on AIME24; mem 60.8 vs 76.4GB. FURA eval needed a salloc retry (transient NERSC "Connection timed out"). All on wandb nersc_grpo_qwen2p5_7b. Full writeup: results/fura_grpo.md.
+
+## [2026-08-20] ingest | ES on math reasoning (Qwen2.5-Math-7B, MATH-500)
+
+Built the ES math-reasoning thread: Qwen-Math-template data prep, `qwen_math` task/reward
+(OatZero grader), one-shot activation calibration, and four subspace-restricted ES
+perturbation modes (dense / zoact / insparse / fura) in `StructuredESMixin`, all with fp32
+coefficient masters. Base-model check: MATH-500 51.2-51.6 vs paper 53.0. Runs 1 (dense) and
+2 (ZO-Act r=1) launched on GPUs 1/2; 3 (insparse) and 4 (fura) queued.
+-> `docs/results/ES/es_results.md`
+
+## [2026-08-21] ingest | ISO fixed-spectrum ES (runs 5-6) — derivation, implementation, launch
+
+Derived and implemented the ES analogue of *ISO: An RLVR-Native Optimization Stack*
+(arXiv:2607.19331) for the ES-q2p5-7b thread. Key step: ISO's fixed-spectrum family
+`F(W0) = {U S0 V^T}` is exactly the **bi-orthogonal orbit** `{C_L W0 C_R^T}`, so a Cayley
+perturbation of a block-diagonal skew keeps both frames orthonormal and the spectrum
+*exactly* fixed with no SVD and no retraction — necessary because ES needs N=30 feasible
+perturbations per iteration, where ISO's own fp64-SVD polar retraction (1st-order exact
+only) would need ~6e3 large SVDs. Two new modes in `StructuredESMixin`: `iso` (full-matrix,
+both frames) and `isobtt` (same constraint on the block-wise SVD; `R_j in O(b)` trained,
+`A_j` + per-block spectrum frozen -> trainable state 6.53B -> 97.8M, a clean one-variable
+ablation vs the existing `fura` run). sigma is redefined as the *relative footprint*
+||dW||/||W|| and set to 5e-2 to match dense ES (the paper's 1e-3 would sit below the
+1.6e-3 bf16 rollout floor); alpha=sigma/2 then reproduces dense's per-iteration motion
+alpha/sqrt(N)=4.6e-3 exactly. Verified in `scripts/es/test_iso_es.py`: kernels match a
+materialised `P^T blkdiag(C) P` to 9e-17 (fp64), and fp64 spectrum drift 2.8e-14 vs fp32
+2.3e-8 proves the residual is round-off not algebra; on real Qwen weights ||d(sigma)||/
+||sigma|| = 2.5e-8 at ||dW||/||W||=5.0e-2. Launched run 5 (`iso`) on GPU 5 with run 6
+(`isobtt`) chained; step 0 = 51.6 (matches every other run), iteration 1 reward_std 0.075
+(vs dense 0.084) and frob_drift 3.5e-6, 403.7 s/it (+14%). Also flagged a pre-existing
+quirk: `_es_noise` reseeds per layer with the bare seed, so same-shaped layers in runs 1-4
+draw identical noise (28x search-dimension loss); the ISO modes mix in the layer id.
+-> `docs/results/ES/es_results.md` §10
+
+
+## [2026-08-21] ingest | ES runs 1-2 complete; ZO-Act r=1 matches full-weight ES
+
+Runs 1 (dense, paper ES) and 2 (ZO-Act r=1) finished 150/150 iterations. MATH-500
+51.6 -> 73.4 (dense best @ 40) / 72.2 (ZO-Act best @ 130); plateau means over steps
+100-150 are 71.50 vs 71.00, a 0.50 pp gap against a >=0.8 pp SE floor -- statistically
+indistinguishable from 5,500x fewer trainable coefficients. Both flatten by step 40 while
+train reward spread decays to ~0.02, pointing at the fixed 64-problem batch (not the
+iteration count) as the binding constraint on the remaining 4.6 pp vs the paper's 78.0.
+Runs 3 (insparse) and 4 (fura) auto-started on GPUs 1/2.
+-> `docs/results/ES/es_results.md`
+
+## [2026-08-21] results | ISO fixed-spectrum ES matches unconstrained ES; fp32 gain-drift found + fixed
+
+**Headline.** Run 5 (`iso`, spectrum of every weight exactly frozen) is statistically
+indistinguishable from run 1 (unconstrained dense ES) on MATH-500: paired over the 12
+shared eval steps, iso - dense = **+0.28 pp +- 0.37 (s.e.), t = 0.77**; plateau means
+(step>=40) dense 71.8+-1.19 vs iso 72.3+-0.87 (zoact 70.5+-0.94). A single n=500 eval has
+s.e. 2.24 pp, so the best-of-15 column (dense 73.4 / iso 74.0) is a max-statistic, not a
+ranking. => on this task **all ~20 pp of ES gain is singular-frame rotation**; the singular
+values are inert. That is ISO's spectral-inheritance claim tested in its strongest form
+(exactly fixed, not approximately) and in a forward-only ES setting the paper doesn't cover.
+Runs 1/2 finished 150/150; runs 3 (insparse) / 4 (fura) at ~21 steps on GPUs 1/2; run 5 at
+128/150 on GPU 5 with run 6 (`isobtt`) chained.
+
+**Bug found and fixed: fp32 Cayley accumulation drifts as an isotropic gain.**
+`iso/frob_drift` grew linearly (log-log slope 1.03, +3.43e-6/iteration) to 4.3e-4 by step
+126 -- systematic, not a round-off random walk. Diagnosed: reproduced offline (+5.91e-6 x t
+in fp32, 1e-16 in fp64, TF32 confirmed off), and decomposed -- every singular value scales
+by the *same* factor (per-mode ratio sd 7.6e-6), so the *shape* of the spectrum is
+preserved to 1.7e-7 and only a scalar per matrix drifts. Fix `_iso_recondition` (called
+from `_iso_commit`, cost ~= the norm already computed for the metric): `iso` renormalises
+`state *= ||W0||/||W||`; `isobtt` takes one Newton-Schulz step `R <- R(1.5I - 0.5 R^T R)`.
+Verified over 300 real `es_update` calls: `iso` 2.7e-4 -> 5.6e-7, `isobtt` flat at 1.63e-6
+(uncorrected 7.6e-4, of which 3.0e-4 is genuine *shape* error -- so isobtt is the mode that
+actually needed it). Real-shape smoke: ||R^T R - I|| 1.0e-5 -> 8.3e-7 in 0.3 ms/layer.
+Run 5 ran uncorrected but is unaffected: its shape error stayed ~3e-7 and its 5e-4 gain is
+3x below the 1.6e-3 bf16 quantisation the vLLM forward already applies. Matters at horizon:
+uncorrected the linear growth reaches 3.4e-2 at 10k iterations.
+-> `docs/results/ES/es_results.md` §7 (headline) + §10.10 (drift)
+
+## [2026-08-21] runs | isobtt (run 6) launched on GPU 3, not chained behind run 5
+
+Moved run 6 off the GPU-5 chain (chain killed to avoid a duplicate) and launched it on the
+now-free GPU 3, so runs 3/4/5/6 train concurrently on GPUs 1/2/5/3. Init matches the
+analytic prediction exactly: coef_params 97,771,520 (the *same* tensors as run 4's fura),
+base_params 6,525,288,448 frozen bf16 A, manifold_dim 48,470,016. Step-0 eval **53.2%,
+byte-identical to run 4's 53.2%** -- both start from the same BTT reconstruction, so run 4
+vs run 6 is a clean one-variable ablation (free additive core vs core constrained to O(b))
+off a shared baseline. Iteration 1: reward_std 0.0583, train acc 57.6%, 372 s/it (ETA
+~15.5 h). The `_iso_recondition` fix is confirmed live at 7B: frob_drift 5.83e-5 (pre) ->
+orth_err 1.07e-6 (post Newton-Schulz), a 54x reduction, pinned rather than accumulating.
+-> `docs/results/ES/es_results.md` §7, §10.10
+

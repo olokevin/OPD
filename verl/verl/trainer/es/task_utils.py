@@ -921,6 +921,59 @@ def create_opd_math_reward_fn() -> Callable:
     return reward_fn
 
 
+# ======================= Qwen-Math (MATH / MATH-500, ES-at-Scale reproduction) =======================
+
+def create_qwen_math_reward_fn() -> Callable:
+    """Binary correctness reward for the ES-at-Scale math setup (Appendix A.6).
+
+    "Our ES training utilizes a basic rule-based reward function that checks answer
+    correctness, without any format rewards. ... a reward of 1 is given for exact
+    matches with the reference answer, and 0 for all other cases. ... we use the same
+    answer extractor, also called a grader, as OatZero."
+
+    `ttrl_math.compute_score(..., fast=True)` is exactly that grader
+    (`grade_answer_mathd` OR `grade_answer_sympy`, the Qwen/PRIME/OatZero lineage).
+    `fast=False` would add a math-verify recall pass, which is both a different grader
+    and ~10x slower -- and ES grades population_size x batch responses every iteration.
+
+    Responses are memoised on (ground_truth, response): with sigma=1e-3 and greedy
+    decoding many of the N perturbed models emit byte-identical completions, so the
+    cache removes most of the grading cost.
+    """
+    from verl.utils.reward_score.ttrl_math import compute_score
+
+    cache: Dict[Any, float] = {}
+
+    def reward_fn(response: str, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        if "reward_model" in task_data and "ground_truth" in task_data["reward_model"]:
+            ground_truth = str(task_data["reward_model"]["ground_truth"])
+        else:
+            ground_truth = str(task_data.get("answer", ""))
+
+        key = (ground_truth, response)
+        score = cache.get(key)
+        if score is None:
+            try:
+                res = compute_score(response, ground_truth, fast=True)
+                score = float(res["score"]) if isinstance(res, dict) else float(res)
+            except Exception as e:  # a bad LaTeX parse must not kill an ES iteration
+                print(f"[qwen_math reward_fn] grading failed: {e}")
+                score = 0.0
+            if len(cache) < 2_000_000:
+                cache[key] = score
+
+        return {
+            "reward": score,
+            "reward_info": {
+                "format_reward": 1.0 if "\\boxed" in response else 0.0,
+                "answer_reward": score,
+                "ground_truth": ground_truth,
+            },
+        }
+
+    return reward_fn
+
+
 # ======================= Task Factory =======================
 
 def get_task_components(task_type: str, config: Dict[str, Any] = None) -> tuple:
@@ -1010,6 +1063,13 @@ def get_task_components(task_type: str, config: Dict[str, Any] = None) -> tuple:
         prompt_processor = create_rocstories_prompt_processor()
         reward_fn = create_rocstories_reward_fn()
 
+    elif task_type == "qwen_math":
+        # ES-at-Scale math reproduction: verl-parquet prompts already carry the
+        # Qwen-Math system/user message pair, so the processor just renders the
+        # tokenizer chat template over them.
+        prompt_processor = create_math_prompt_processor()
+        reward_fn = create_qwen_math_reward_fn()
+
     elif task_type == "opd_math":
         # OPD math parquet (DAPO-Math-17k, DeepMath-deduped, OpenThoughts3-OPD).
         # Reuses the verl-parquet-aware MATH prompt processor and wires in OPD's
@@ -1021,6 +1081,6 @@ def get_task_components(task_type: str, config: Dict[str, Any] = None) -> tuple:
         reward_fn = create_opd_math_reward_fn()
 
     else:
-        raise ValueError(f"Unknown task type: {task_type}. Use 'countdown', 'gsm8k', 'math', 'math500', 'olympiadbench', 'uspto50k', 'common_gen', 'mbpp', 'rocstories', 'opd_math', or implement custom.")
+        raise ValueError(f"Unknown task type: {task_type}. Use 'countdown', 'gsm8k', 'math', 'math500', 'olympiadbench', 'uspto50k', 'common_gen', 'mbpp', 'rocstories', 'opd_math', 'qwen_math', or implement custom.")
     
     return prompt_processor, reward_fn

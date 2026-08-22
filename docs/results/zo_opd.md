@@ -1,3 +1,6 @@
+# ZO-ES-token
+
+
 # ZO-NP (zeroth-order node-perturbation) OPD — results
 
 Student `Qwen/Qwen3-1.7B`, teacher `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`.
@@ -11,6 +14,7 @@ Trainer: `verl/verl/trainer/np/` (custom n_sample-wide perturbed vLLM decode); d
 ## Session 2026-06-02 — gradient scaling, LR search, and a self-amplifying divergence
 
 ### 1. NP estimate vs the true BP gradient (offline, `grad_check.py`)
+
 For one perturb layer (`model.layers.0.mlp.down_proj`, d_out=2048) on a frozen (prompt, greedy-response),
 the harness computes the NP δW (reusing the **shipping** estimator math) and the true `dL/dW` via
 `loss.backward()` of the same OPD loss.
@@ -22,6 +26,7 @@ the harness computes the NP δW (reusing the **shipping** estimator math) and th
   more sample-hungry than a single node-gradient vector.
 
 ### 2. Scaling fixes (`grad_estimator.py`, `ray_trainer.py`)
+
 - ANP `1/‖u‖²` normalization made a config (`np.normalize_anp`, default **false**); it was hardcoded
   `True` and shrank the update by `1/d_out ≈ 1/2048`.
 - `grad_estimate_sample=grpo` scale, two iterations:
@@ -33,6 +38,7 @@ the harness computes the NP δW (reusing the **shipping** estimator math) and th
   reach the weight update — the bf16-effective LR is similar across all three forms.
 
 ### 3. Training infrastructure built this session
+
 - `fit()` restructured: **batch_size prompts/update** (1 rollout/prompt, n_sample=64), greedy clean decode.
 - **Student + teacher co-located on one GPU** (one LR per GPU): needs `distributed_executor_backend="uni"`
   + keep `CUDA_VISIBLE_DEVICES` + `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` + mem-util 0.30 each.
@@ -48,8 +54,10 @@ the harness computes the NP δW (reusing the **shipping** estimator math) and th
   concurrent runs' Ray sessions.
 
 ### 4. The bf16 reality
+
 vLLM student weights are bf16. An update lands only if `lr·δW_elem` clears the mantissa step. Two
 consequences that shaped the whole LR search:
+
 - **`weight_delta` (the ‖W‖-norm difference) badly UNDER-reports the update** — element changes partly
   cancel in the norm, so a 20 %-of-elements update can show ~0 norm-delta and *look* like a no-op. Use
   `weight_changed_frac`, not the norm difference.
@@ -57,13 +65,14 @@ consequences that shaped the whole LR search:
   lr 2e-5 → 0.1–0.3 %/step, 2e-4 → 3–12 %, 6e-4 → 7–31 %, 2e-3 → 22–57 %.
 
 ### 5. LR search for grpo = `((L_q−mean)/std)/σ` (wandb project `zo_opd_qwen4b_1p7b`)
+
 The proper LR is `≈ ÷100` vs the `/std`-only form (the `1/σ=100×` per-token factor): the analog of a good
 `/std @ 2e-3` is `/std/σ @ 2e-5`, etc. Swept the meaningful-update band (2e-4 / 6e-4) at batch=8.
 
-| phase | observation |
-|---|---|
-| steps 0–10 | both 2e-4 & 6e-4 **dip the KL** (e.g. 6e-4: 0.336→0.322→0.318) — looks like training |
-| steps 10–25 | KL **oscillates in a 0.31–0.35 band** = the probe's own ~±0.03 noise (greedy NP-decode is not bit-deterministic: two runs gave step-0 KL 0.306 vs 0.336 with identical weights) |
+| phase                   | observation                                                                                                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| steps 0–10             | both 2e-4 & 6e-4**dip the KL** (e.g. 6e-4: 0.336→0.322→0.318) — looks like training                                                                                                     |
+| steps 10–25            | KL**oscillates in a 0.31–0.35 band** = the probe's own ~±0.03 noise (greedy NP-decode is not bit-deterministic: two runs gave step-0 KL 0.306 vs 0.336 with identical weights)           |
 | **steps ~28–35** | **both runs DIVERGE**: 2e-4 KL → 0.47→0.48; 6e-4 KL → **0.93→1.14**. dW had grown 57→~2000 across the round-robin and chg% had climbed to 40–65 % before the layer-cycle reset |
 
 **Honest verdict:** `/std/σ` *lands valid updates* in the 2e-4–6e-4 band (update signal is clean: chg%
@@ -73,11 +82,13 @@ buried in probe noise and by ~step 30 (one full 28-layer round-robin) the run **
 over a longer horizon than the wildly-too-high LRs did. No LR in the tested band gives stable training.
 
 ### 6. Cross-check: grpo = `(L_q−mean)/σ` (drop `/std`)
+
 The `/σ`-only form trained **cleanly and monotonically** at **lr=3e-2** over the first ~16 steps
 (held-out KL 0.335 → 0.322 → 0.319, bounded dW). It is the cleanest demonstrated training curve.
 (A long run to check whether it too eventually diverges was not done this session.)
 
 ### 7. Important measurement caveats discovered (so future runs don't repeat them)
+
 - **`weight_delta` norm-diff ≠ no-op** — use `weight_changed_frac`.
 - **dW grows step-over-step from the `en_layerwise` round-robin**, not (only) from divergence — each step
   perturbs a *different* layer with its own δW norm. PROOF: the dW sequence `28,38,37,46,51…` is identical
@@ -87,6 +98,7 @@ The `/σ`-only form trained **cleanly and monotonically** at **lr=3e-2** over th
   teacher-forced NLL/KL on a larger fixed set**.
 
 ### 8. Recommendation / open items
+
 - **For a clean, demonstrably-training config:** grpo `(L_q−mean)/σ` at **lr=3e-2** (drop `/std`).
 - **If keeping `/std/σ`** (current code): no tested LR trains stably past ~30 steps; needs either a hard
   std floor (`std.clamp_min(~0.05)`) or **global** (batch-level, not per-token) standardization to stop the

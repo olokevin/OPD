@@ -161,7 +161,7 @@ def run_es(config) -> None:
     task_type = config.data.get("task_type", "countdown")
     
     # Built-in task types: countdown, gsm8k, math, math500, olympiadbench, uspto50k, common_gen, mbpp, rocstories, opd_math
-    if task_type in ["countdown", "gsm8k", "math", "math500", "olympiadbench", "uspto50k", "common_gen", "mbpp", "rocstories", "opd_math"]:
+    if task_type in ["countdown", "gsm8k", "math", "math500", "olympiadbench", "uspto50k", "common_gen", "mbpp", "rocstories", "opd_math", "qwen_math"]:
         from verl.trainer.es.task_utils import get_task_components
         task_config = OmegaConf.to_container(config.data, resolve=True)
         prompt_processor, reward_fn = get_task_components(task_type, task_config)
@@ -181,7 +181,7 @@ def run_es(config) -> None:
             from verl.utils.import_utils import load_extern_object
             prompt_processor = load_extern_object(prompt_processor_path, prompt_processor_name)
     else:
-        raise ValueError(f"Unknown task_type: {task_type}. Use 'countdown', 'gsm8k', 'math', 'math500', 'olympiadbench', 'uspto50k', 'common_gen', 'mbpp', 'rocstories', 'opd_math', or 'custom'")
+        raise ValueError(f"Unknown task_type: {task_type}. Use 'countdown', 'gsm8k', 'math', 'math500', 'olympiadbench', 'uspto50k', 'common_gen', 'mbpp', 'rocstories', 'opd_math', 'qwen_math', or 'custom'")
     
     # Pre-process prompts for evaluation data
     if prompt_processor and eval_data:

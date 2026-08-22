@@ -173,6 +173,8 @@ class RayESTrainer:
                 dtype=precision,
                 enable_prefix_caching=False,
                 enforce_eager=False,
+                max_model_len=self.es_config.get('max_model_len', None),
+                seed=int(self.es_config.get('global_seed', 0) or 0),
                 gpu_memory_utilization=self.es_config.get('gpu_memory_utilization', 0.9)
             )
             for strategy in strategies
@@ -257,10 +259,14 @@ class RayESTrainer:
         
         batch_size = self.es_config.get('eval_batch_size', 512)
         eval_seed = self.es_config.get('global_seed', 999)
+        # Held-out eval gets its own (larger) token budget: it is run once every
+        # eval_interval iterations, whereas the training rollout budget is paid
+        # population_size times per iteration.
         sampling_params = SamplingParams(
             temperature=0.0,
             seed=eval_seed,
-            max_tokens=self.es_config.get('max_tokens', 1024)
+            max_tokens=self.es_config.get('eval_max_tokens', None)
+                       or self.es_config.get('max_tokens', 1024)
         )
         
         all_rewards = []
@@ -331,7 +337,35 @@ class RayESTrainer:
         self._launch_engines(model_path)
         print("Initializing inter-engine NCCL group...")
         self._init_inter_engine_group()
+        self._init_es_state()
         print("Workers initialized successfully.")
+
+    def _init_es_state(self):
+        """Install the subspace-restricted perturbation state on every engine.
+
+        `perturb_mode=off` keeps the original in-place bf16 add/subtract path
+        (bit-compatible with previous runs).  Any other mode switches the worker to
+        the `W = W_base + P(coef)` formulation with an fp32 coefficient master --
+        see `es_worker_extension.StructuredESMixin`.
+        """
+        mode = self.es_config.get('perturb_mode', 'off')
+        if mode == 'off':
+            return
+        cfg = {
+            'calib_path': self.es_config.get('calib_path', None),
+            'rank': self.es_config.get('subspace_rank', 1),
+            'density': self.es_config.get('insparse_density', 0.01),
+            'swap_blocks': self.es_config.get('fura_swap_blocks', False),
+            'iso_block_size': self.es_config.get('iso_block_size', 128),
+            'iso_perm': self.es_config.get('iso_perm', True),
+        }
+        print(f"Installing ES perturbation mode '{mode}' with cfg={cfg} ...")
+        infos = ray.get([
+            e.collective_rpc.remote("init_es_state", args=(mode, cfg))
+            for e in self.engines
+        ])
+        self.es_state_info = infos[0][0] if isinstance(infos[0], list) else infos[0]
+        print(f"ES perturbation state: {self.es_state_info}")
     
     def fit(self):
         """
@@ -393,6 +427,16 @@ class RayESTrainer:
         eval_interval = trainer_test_freq if trainer_test_freq else self.es_config.get('eval_interval', 25)
         global_seed = self.es_config.get('global_seed', 42)
         
+        # Step 0 = the untouched base model, so the training curve starts from the
+        # published base-model score instead of from "after one ES update".
+        best_metric = float('-inf')
+        ckpt_path = os.path.join(logging_dir, "es_coef_best.pt")
+        save_best = bool(self.es_config.get('save_best_coef', False))
+        if self.es_config.get('eval_before_train', True) and self.eval_data:
+            base_metrics = self._evaluate_model(self.engines[0], self.eval_data, 0, logger)
+            logger.log(data=base_metrics, step=0)
+            best_metric = base_metrics.get('eval/accuracy', float('-inf'))
+
         # Training loop
         progress_bar = tqdm(range(num_iterations), desc="ES Training")
         
@@ -479,6 +523,17 @@ class RayESTrainer:
             torch.cuda.synchronize()
             
             iter_time = time.time() - total_iter_start
+            step = iteration + 1
+            
+            # Constraint health for the fixed-spectrum (ISO) modes: ||W||_F is an exact
+            # invariant of the bi-orthogonal orbit, so any drift is pure fp32 round-off.
+            extra_metrics = {}
+            if self.es_config.get('perturb_mode', 'off') in ('iso', 'isobtt'):
+                try:
+                    got = ray.get(self.engines[0].collective_rpc.remote("es_get_metrics"))
+                    extra_metrics = (got[0] if isinstance(got, list) else got) or {}
+                except Exception as e:
+                    print(f"[ES] es_get_metrics failed: {e}")
             
             # Log metrics
             train_metrics = {
@@ -490,10 +545,11 @@ class RayESTrainer:
                 "train/answer_reward": mean_answer,
                 "train/accuracy": mean_accuracy,
                 "train/iteration_time": iter_time,
-                "training/global_step": iteration,
+                "training/global_step": step,
             }
+            train_metrics.update(extra_metrics)
             
-            logger.log(data=train_metrics, step=iteration)
+            logger.log(data=train_metrics, step=step)
             
             progress_bar.set_postfix({
                 "reward": f"{mean_reward:.4f}",
@@ -506,9 +562,20 @@ class RayESTrainer:
                       f"format={mean_format:.4f}, answer={mean_answer:.4f}, acc={mean_accuracy:.1f}%")
             
             # Evaluation
-            if eval_interval > 0 and (iteration % eval_interval == 0 or iteration == num_iterations - 1):
-                eval_metrics = self._evaluate_model(self.engines[0], self.eval_data, iteration, logger)
-                logger.log(data=eval_metrics, step=iteration)
+            if eval_interval > 0 and (step % eval_interval == 0 or iteration == num_iterations - 1):
+                eval_metrics = self._evaluate_model(self.engines[0], self.eval_data, step, logger)
+                logger.log(data=eval_metrics, step=step)
+                acc = eval_metrics.get('eval/accuracy', float('-inf'))
+                logger.log(data={"eval/best_accuracy": max(best_metric, acc)}, step=step)
+                if acc > best_metric:
+                    best_metric = acc
+                    if save_best:
+                        # Only the ES coefficients are saved (fp32).  For the
+                        # structured modes that is 1-2% of the model; combined with the
+                        # frozen base/basis it reconstructs the trained weights exactly.
+                        ray.get(self.engines[0].collective_rpc.remote(
+                            "es_save_coef", args=(ckpt_path,)))
+                        print(f"[Ckpt] new best eval/accuracy={acc:.2f} -> {ckpt_path}")
             
             # Periodic memory cleanup at end of each iteration
             seeds_perf.clear()
@@ -516,7 +583,15 @@ class RayESTrainer:
             torch.cuda.empty_cache()
         
         progress_bar.close()
-        logger.finish()
+        if hasattr(logger, "finish"):
+            logger.finish()
+        else:  # verl's Tracking closes its backends in __del__
+            for _b in getattr(logger, "logger", {}).values():
+                if hasattr(_b, "finish"):
+                    try:
+                        _b.finish()
+                    except Exception:
+                        pass
         
         # Cleanup
         self._cleanup()

@@ -23,11 +23,45 @@ es:
   # Evaluation settings
   eval_interval: 25  # Evaluate every N iterations (0 to disable)
   eval_batch_size: 512
+  eval_max_tokens: null  # null -> reuse es.max_tokens
   
   # vLLM settings
   gpu_memory_utilization: 0.9
   worker_extension_cls: "verl.workers.rollout.vllm_rollout.es_worker_extension.WorkerExtension"
   
+  # Maximum vLLM context (null -> model default). Qwen2.5-Math-7B is 4096.
+  max_model_len: null
+
+  # ---- Subspace-restricted perturbation (structured ES) -------------------------
+  # off      : original in-place bf16 perturbation of every parameter
+  # dense    : same subspace as `off` (all parameters) but with an fp32 master weight
+  # zoact    : ZO-Act (arXiv:2607.01125) -- dW = C @ V_r, V_r = top-r right singular
+  #            vectors of the layer's input activations (one-shot calibration)
+  # insparse : perturb only the top-`insparse_density` input channels of each weight,
+  #            ranked by calibration activation RMS
+  # fura     : full-rank BTT (output_one_block, s_merged_to=keep_frozen), perturb the
+  #            small core only (train_position=small)
+  # iso      : ISO (arXiv:2607.19331) fixed-spectrum ES -- W <- C_L W C_R^T with
+  #            C_L, C_R exactly orthogonal (Cayley of a block-diagonal skew in a
+  #            per-seed permuted basis).  Singular values are preserved exactly; only
+  #            the singular frames U, V move.
+  # isobtt   : same constraint on the block-wise SVD used by `fura`: per input block
+  #            W_j = A_j R_j with A_j = U_j diag(S_j) frozen and R_j in O(b) trained,
+  #            so each block's spectrum is fixed and the trainable state is ~1.3% of
+  #            the model instead of a full fp32 master.
+  perturb_mode: "off"
+  calib_path: null          # .pt produced by scripts/es/calibrate_activations.py
+  subspace_rank: 1          # r for zoact
+  insparse_density: 0.01    # fraction of input channels kept for insparse
+  fura_swap_blocks: false   # swap (n_blocks, block_size) from the closest-factor default
+  iso_block_size: 128       # block size of the skew generator (cost is O(b * |W|))
+  iso_perm: true            # re-draw the block basis every seed (reaches all of O(m))
+
+  # Evaluate the untouched base model before iteration 1 and log it at step 0.
+  eval_before_train: true
+  # Save the ES coefficients whenever eval accuracy improves.
+  save_best_coef: false
+
   # Random seed (null for random)
   global_seed: 42
   
