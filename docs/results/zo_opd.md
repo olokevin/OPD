@@ -596,10 +596,32 @@ The 150-step run uses **1e-4** — the largest non-degrading LR, a principled de
 measured optimum. Separating it from 1e-5 needs a horizon long enough for the signal to clear ±8%,
 or a lower-variance probe (greedy probe rollouts, or many more probe prompts).
 
-### 9.4 Still open
+### 9.4 The 150-step run at 1e-4 — negative result
 
-- **Whether es_token learns at all** is unanswered. The 150-step 1e-4 run is the first test with a
-  horizon that could show it.
+| step | 0 | 25 | 50 | 75 | 100 | 125 | 149 |
+|---|---|---|---|---|---|---|---|
+| probe KL (fixed 16) | 0.2126 | 0.2002 | 0.1987 | 0.2169 | 0.2049 | 0.2157 | **0.2228** |
+| MATH-500 (fixed 200) | 6.0% | 7.0% | 6.5% | 5.5% | 7.0% | 2.0% | **4.0%** |
+
+150 steps, 37.18 s/step, 92.9 min, 9.71 M token-records, `weight_sync_ok=1.0` throughout.
+
+**es_token does not learn measurably at 1e-4 over 150 steps.** All seven probe readings lie in
+0.199–0.223 with no direction; the endpoint is +4.8% vs step 0, *inside* the ±8% noise floor, so the
+honest statement is "no change". MATH-500 wanders 2–7% with no trend (σ ≈ 1.7pp at n=200). The
+apparent monotone decline at steps 25/50 broke at step 75 — exactly the false signal the noise floor
+predicts, and the reason 3-point trends on this probe must not be reported as progress.
+
+**The bracket, with no working recipe inside it:** 1e-3 destroys the model (+415% by step 50,
+accuracy 0%); 1e-4 holds it steady. One order of magnitude between "destroys" and "does nothing".
+
+**This is not ES-specific.** The BP-OPD baseline was equally flat (MATH-500 2.8 / 2.2 / 2.8 / 1.8%
+over 138 steps at LR 1e-6). *Neither* method moved, which points at the setup rather than the
+algorithm — see the truncation item below.
+
+### 9.5 Still open
+
+- **Whether es_token can learn** is still unanswered — the bracket is too wide to conclude no
+  working step size exists between 1e-4 and 1e-3.
 - The **BP-OPD baseline** (LR 1e-6, 138 steps) was also flat — MATH-500 2.8 / 2.2 / 2.8 / 1.8%
   across its four evals. It is a wall-clock reference, not a learning baseline.
 - **Both runs cap responses at 1024 tokens and every rollout hits the cap without emitting EOS**

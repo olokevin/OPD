@@ -71,3 +71,46 @@ OPEN
   emitting EOS (response_length mean=min=max=1024), so MATH-500 reads near its
   floor for both. Fixing that (longer budget, or a template that terminates) is
   a prerequisite for accuracy being a usable metric here.
+
+
+150-STEP RUN AT LR=1e-4 -- NEGATIVE RESULT (2026-08-23)
+========================================================
+wandb zo-opd-q34b-1p7b / N8_pw64_lr1e-4. 150 steps, 37.18 s/step, 92.9 min,
+9,713,323 token-records, weight_sync_ok=1.0 throughout.
+
+  step        0      25      50      75     100     125     149
+  probe    0.2126  0.2002  0.1987  0.2169  0.2049  0.2157  0.2228
+  MATH500   6.0%    7.0%    6.5%    5.5%    7.0%    2.0%    4.0%
+
+es_token does NOT learn measurably at 1e-4 over 150 steps. All seven probe
+readings lie in 0.199-0.223 with no direction; the endpoint is +4.8% vs step 0,
+which is INSIDE the +-8% noise floor, so the honest statement is "no change",
+not "slightly worse". MATH-500 wanders 2-7% with no trend (sigma ~= 1.7pp at
+n=200). An apparent monotone decline at steps 25/50 broke at step 75 -- exactly
+the false signal the noise floor predicts, and the reason 3-point trends on this
+probe must not be reported as progress.
+
+BRACKET ESTABLISHED (still no working recipe):
+  LR 1e-3  destroys the model (probe +415% by step 50, accuracy 0%)
+  LR 1e-4  holds it steady    (no degradation, no improvement)
+One order of magnitude between "destroys" and "does nothing", with no observed
+window in which it learns.
+
+NOT ES-SPECIFIC: the BP-OPD baseline was equally flat (MATH-500 2.8/2.2/2.8/1.8%
+over 138 steps at LR 1e-6). NEITHER method moved in this setup, which points at
+the setup rather than the algorithm.
+
+LEADING SUSPECT -- TRUNCATION. In BOTH runs every rollout hits the 1024-token cap
+without emitting EOS (response_length mean=min=max=1024, clip_ratio=1.0), so the
+student never produces a terminated answer and the teacher reward is computed
+entirely on truncated continuations. MATH-500 therefore reads a floor for both.
+
+PREREQUISITES BEFORE JUDGING es_token AS A METHOD
+--------------------------------------------------
+1. Fix truncation (longer budget, or a template that terminates). Until then
+   neither the KL nor the accuracy metric measures what it should.
+2. A probe that can resolve the effect: 16 prompts sampled at T=1.0 gives +-8%.
+   Greedy probe rollouts over ~100 prompts would cut that several-fold and cost
+   far less than a 93-minute training run.
+3. Only then revisit the LR between 1e-4 and 1e-3, where a working step size may
+   sit -- the current bracket is too wide to conclude one does not exist.
