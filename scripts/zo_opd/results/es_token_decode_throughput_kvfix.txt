@@ -1,0 +1,72 @@
+es_token decode throughput, FUSED Triton rail kernel -- 2026-08-23 00:53:00
+GPU 6 (NVIDIA H100 NVL)
+Qwen3-1.7B bf16, 112 matched decoder linears, greedy, sigma=0.01,
+graphed packed decode, EOS disabled; ms/token-step from the T=64 -> T=320 slope.
+Baseline (PyTorch rail op): es_token_decode_throughput.txt
+==============================================================
+### n_sample=0 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=0 rows_per_token=4
+[packed N=0] T=64: 0.215s   T=320: 0.930s
+[packed N=0] ms/token-step = 2.795   clean tok/s = 1431.0   row-steps/s = 1431.0
+RESULT {"n_sample": 0, "pack_width": 4, "rows_per_token": 4, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.2148603145033121, "t_long_s": 0.9304358772933483, "ms_per_token_step": 2.795217042148579, "clean_tok_per_s": 1431.0158888146123, "row_steps_per_s": 1431.0158888146123, "full_call_tok_per_s": 1375.6993160276008}
+
+### n_sample=1 pack_width=4 
+[rank0]: Traceback (most recent call last):
+[rank0]:     raise ValueError(
+[rank0]: ValueError: To serve at least one request with the models's max seq len (40960), (4.38 GiB KV cache is needed, which is larger than the available KV cache memory (2.09 GiB). Based on the available memory, the estimated maximum model length is 19536. Try increasing `gpu_memory_utilization` or decreasing `max_model_len` when initializing the engine.
+
+### n_sample=2 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=2 rows_per_token=12
+[packed N=2] T=64: 0.247s   T=320: 1.089s
+[packed N=2] ms/token-step = 3.290   clean tok/s = 1215.6   row-steps/s = 3646.9
+RESULT {"n_sample": 2, "pack_width": 4, "rows_per_token": 12, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.24712977651506662, "t_long_s": 1.089488579891622, "ms_per_token_step": 3.2904640756896697, "clean_tok_per_s": 1215.6339981197375, "row_steps_per_s": 3646.901994359213, "full_call_tok_per_s": 1174.8631638959714}
+
+### n_sample=4 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=4 rows_per_token=20
+[packed N=4] T=64: 0.253s   T=320: 1.146s
+[packed N=4] ms/token-step = 3.489   clean tok/s = 1146.5   row-steps/s = 5732.6
+RESULT {"n_sample": 4, "pack_width": 4, "rows_per_token": 20, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.2528833318501711, "t_long_s": 1.1460278891026974, "ms_per_token_step": 3.488845926767681, "clean_tok_per_s": 1146.5109334036683, "row_steps_per_s": 5732.554667018342, "full_call_tok_per_s": 1116.901265816662}
+
+### n_sample=8 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=8 rows_per_token=36
+[packed N=8] T=64: 0.268s   T=320: 1.224s
+[packed N=8] ms/token-step = 3.734   clean tok/s = 1071.2   row-steps/s = 9640.5
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.2680556559935212, "t_long_s": 1.2240182654932141, "ms_per_token_step": 3.7342289433581755, "clean_tok_per_s": 1071.1716021361074, "row_steps_per_s": 9640.544419224965, "full_call_tok_per_s": 1045.736028689268}
+
+### n_sample=16 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=16 rows_per_token=68
+[packed N=16] T=64: 0.287s   T=320: 1.344s
+[packed N=16] ms/token-step = 4.130   clean tok/s = 968.5   row-steps/s = 16463.7
+RESULT {"n_sample": 16, "pack_width": 4, "rows_per_token": 68, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.28705450519919395, "t_long_s": 1.3444107696413994, "ms_per_token_step": 4.130297907977365, "clean_tok_per_s": 968.4531452983805, "row_steps_per_s": 16463.70347007247, "full_call_tok_per_s": 952.0899630560234}
+
+### n_sample=32 pack_width=4 
+[cfg] matched_layers=112 pack_width=4 n_sample=32 rows_per_token=132
+[packed N=32] T=64: 0.339s   T=320: 1.632s
+[packed N=32] ms/token-step = 5.053   clean tok/s = 791.7   row-steps/s = 26124.6
+RESULT {"n_sample": 32, "pack_width": 4, "rows_per_token": 132, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.33885386399924755, "t_long_s": 1.6323481388390064, "ms_per_token_step": 5.052712011092808, "clean_tok_per_s": 791.6540644347696, "row_steps_per_s": 26124.584126347396, "full_call_tok_per_s": 784.1464510814396}
+
+---- pack_width sweep at N=8 (budget-sized scratch-KV) ----
+### n_sample=8 pack_width=8 
+[cfg] matched_layers=112 pack_width=8 n_sample=8 rows_per_token=72
+[packed N=8] T=64: 0.333s   T=320: 1.424s
+[packed N=8] ms/token-step = 4.259   clean tok/s = 1878.2   row-steps/s = 16904.0
+RESULT {"n_sample": 8, "pack_width": 8, "rows_per_token": 72, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.33316436037421227, "t_long_s": 1.4235542714595795, "ms_per_token_step": 4.259335590177216, "clean_tok_per_s": 1878.2272095322614, "row_steps_per_s": 16904.044885790354, "full_call_tok_per_s": 1798.3157026919778}
+
+### n_sample=8 pack_width=16 
+[cfg] matched_layers=112 pack_width=16 n_sample=8 rows_per_token=144
+[packed N=8] T=64: 0.514s   T=320: 1.905s
+[packed N=8] ms/token-step = 5.435   clean tok/s = 2943.8   row-steps/s = 26494.2
+RESULT {"n_sample": 8, "pack_width": 16, "rows_per_token": 144, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.5135621381923556, "t_long_s": 1.9049595864489675, "ms_per_token_step": 5.43514628225239, "clean_tok_per_s": 2943.8030126706008, "row_steps_per_s": 26494.227114035406, "full_call_tok_per_s": 2687.721060552358}
+
+### n_sample=8 pack_width=32 
+[rank0]: Traceback (most recent call last):
+[rank0]:     assert self.init_snapshot.free_memory > free_gpu_memory, (
+[rank0]: AssertionError: Error in memory profiling. Initial free memory 86.53546142578125 GiB, current free memory 88.9696044921875 GiB. This happens when other processes sharing the same container release GPU memory while vLLM is profiling during initialization. To fix this, ensure consistent GPU memory allocation or isolate vLLM in its own container.
+
+### n_sample=8 pack_width=64 
+[cfg] matched_layers=112 pack_width=64 n_sample=8 rows_per_token=576
+[packed N=8] T=64: 1.427s   T=320: 5.277s
+[packed N=8] ms/token-step = 15.036   clean tok/s = 4256.5   row-steps/s = 38308.7
+RESULT {"n_sample": 8, "pack_width": 64, "rows_per_token": 576, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 1.427381819114089, "t_long_s": 5.276531712152064, "ms_per_token_step": 15.03574176967959, "clean_tok_per_s": 4256.524285955719, "row_steps_per_s": 38308.71857360147, "full_call_tok_per_s": 3881.337423374854}
+
+done 00:57:31

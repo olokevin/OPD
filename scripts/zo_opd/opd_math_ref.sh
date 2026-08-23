@@ -27,16 +27,16 @@ TRAIN_DATASET_NAME=MATH
 MAX_PROMPT_LENGTH=1024
 MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-3072}
 MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-3072}
-PROJECT_NAME=opd-qwen-math
-SAVE_FREQ=100
-TEST_FREQ=5
+PROJECT_NAME=${PROJECT_NAME:-opd-qwen-math}
+SAVE_FREQ=${SAVE_FREQ:-100}
+TEST_FREQ=${TEST_FREQ:-5}
 IS_PLOT=False
 
 # ... EXCEPT the requested greedy / 64-prompts-64-responses regime:
-TEMPERATURE=0.0           # GREEDY train rollout
+TEMPERATURE=${TEMPERATURE:-0.0}   # GREEDY train rollout by default
 N_RESPONSES=1             # 1 response/prompt -> 64 prompts give 64 responses
 MINI_BATCH_SIZE=64        # train_batch_size = MINI_BATCH_SIZE * PARALLEL_SIZE(=1) = 64
-VAL_TEMPERATURE=0.0       # greedy eval too
+VAL_TEMPERATURE=${VAL_TEMPERATURE:-0.0}   # greedy eval by default
 VAL_N=1
 # on_policy_distillation.sh hard-codes val_kwargs.do_sample=True, and verl's
 # validate_config asserts rollout temperature>0 when do_sample=True. Greedy eval

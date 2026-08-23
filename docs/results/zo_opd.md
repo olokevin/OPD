@@ -457,6 +457,83 @@ Decode is now **82% of the step** and the noise fill is down to 0.015 ms (0.5% o
 BP-OPD runs 64. §2 measured stock vLLM at 1,413 tok/s at B=4 against 13,975 at B=64 — that ~9.9×
 concurrency deficit is the entire remaining gap.
 
+## Session 2026-08-23 — budget-sized scratch-KV: pack_width unlocked, ES overtakes BP
+
+§7.6 left `pack_width` as the only lever of consequence. Raw record:
+`scripts/zo_opd/results/es_token_kv_reservation.txt`; gates
+`scripts/zo_opd/es_token_checks/{check_kv_reservation.py,check_kv_output_neutral.sh}`.
+
+### 8.1 The over-reservation
+
+`_np_prefill_packed` carves a private KV region off the **top** of vLLM's block pool, one disjoint
+slice per packed slot — the decode driver bypasses vLLM's scheduler and must own static KV for a
+captured CUDA graph. It sized each slice at the **full `max_model_len`**:
+
+```python
+blocks_per_prompt = ceil(max_model_len / block_size) = ceil(40960/16) = 2560
+assert b_pack * blocks_per_prompt <= num_gpu_blocks     # 24,717
+```
+
+A 1024-token generation from a ~90-token prompt needs ~70 blocks, so this over-reserved **~20×** and
+capped the driver at **9 slots**. Sizing it to (longest prompt + `max_tokens`) instead:
+
+| reservation basis | blocks/slot | max slots |
+|---|---|---|
+| `max_model_len` (old) | 2,560 | 9 |
+| 1024 prompt + 1024 response | 128 | **193** |
+| 1024 + 3072 response | 256 | 96 |
+
+`_np_prefill_packed` gained `max_new_tokens=None` (None = old behaviour, so the NP trainer is
+untouched); es_token passes `max_tokens`. **Safety:** the attention block table is zero-filled and
+only the first `len(block_ids)` entries are written, so a slot that outgrew its slice would read
+block 0 and silently corrupt *another* slot's KV rather than crash. A second assert now makes that
+unreachable.
+
+### 8.2 The gate had to be rewritten — and what it found
+
+The obvious gate (packed clean tokens == stock greedy) **fails at pack_width ≥ 10**, and that finding
+turned out to be about rounding, not KV. Evidence it is not corruption:
+
+- **Neighbour-independence**: hold slots 0–3 fixed and swap the *content* of every other slot —
+  output is byte-identical. Slices do not alias. PASS at widths 4/8/16/32/64.
+- It changes with the wave **width alone** (slots 0–3 identical at width 4 and 16, different at 32).
+- It appears at the shipping `pack_width=4` too, for prompts whose top-2 logits are close — and
+  there the reservation change is provably byte-neutral.
+- Divergent slots come in pairs (*i*, *i+8*) — the same prompt text — so it is prompt-dependent, and
+  it compounds with generation length.
+
+The hand-driven packed forward batches differently from vLLM's scheduler, so bf16 rounding differs
+and greedy argmax flips on near-ties. Comparing packed output to stock measures rounding, not KV
+safety. The gate therefore checks: **[A]** output-neutrality vs the old reservation (across separate
+processes — flipping it in-process reuses the already-captured graph and is vacuous), **[B]**
+neighbour-independence, **[C]** every slot reaches `max_tokens`. All pass; `check_es_parity`'s three
+gates still pass unchanged.
+
+### 8.3 Result
+
+| `pack_width` | ms/token-step (N=8) | clean tok/s | waves for a 64-prompt batch |
+|---|---|---|---|
+| 4 | 3.734 | 1,071 | 16 |
+| 8 | 4.259 | 1,878 | 8 |
+| 16 | 5.435 | 2,944 | 4 |
+| 32 | 8.431 | 3,795 | 2 |
+| **64** | 15.036 | **4,257** | **1** |
+
+**One full OPD step** (batch 64 × 1024, N=8, all 112 linears, co-located 4B teacher):
+
+| | `pack_width=4` | **`pack_width=64`** | speedup |
+|---|---|---|---|
+| **step_time** | 83.80 s | **42.67 s** | **1.96×** |
+| decode | 68.44 s | 25.40 s | 2.69× (16 waves → 1) |
+| teacher | 4.23 s | 3.99 s | — |
+| assemble | 11.03 s | 13.18 s | — |
+| **ratio vs BP-OPD** (61.86 s) | 1.35× | **0.69×** | |
+
+**es_token is now faster than BP-OPD.** Cumulative over §6–§8: one step **147.54 → 42.67 s (3.46×)**,
+decode **129.59 → 25.40 s (5.10×)**, ES/BP **2.39× → 0.69×**.
+
+The next lever is no longer decode: assembly is now 31% of the step.
+
 ---
 
 # ZO-NP (zeroth-order node-perturbation) OPD — results

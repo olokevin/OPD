@@ -29,6 +29,7 @@ y[rail n] += sigma_l * ((r_n ⊙ v_t)ᵀ x) * (s_n ⊙ u_t)     -- rank-1 ΔW, n
 | `verl/verl/trainer/es_token/ray_trainer.py` | `RayESTokenTrainer(RayNPTrainer)` + `SampledTokenTeacher`; fit = decode waves → teacher prefill → scales → assemble RPC → per-layer NCCL broadcast; logs `train/{decode,teacher,assemble}_s` |
 | `verl/verl/trainer/es_token/rail_kernel.py` | Fused Triton rank-1 rail op — ONE launch per layer (was ~14 PyTorch kernels); see §7 |
 | `verl/verl/trainer/es_token/noise_kernel.py` | Direct Rademacher ±1 fill in the destination dtype (Philox counter mode); shared by decode and assembly; see §8 |
+| `scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh` | Sequential BP-OPD then ZO-ES-token training launcher (wandb `zo-opd-q34b-1p7b`) |
 | `verl/verl/workers/rollout/vllm_rollout/es_token_worker_extension.py` | `ESTokenLinear` + `WorkerExtension(NPWorkerExtension)`: install/capture/replay/eager-oracle/orchestrator/`es_assemble_and_apply` |
 | `verl/verl/trainer/main_es_token.py`, `config/es_token_trainer.yaml`, `scripts/zo_opd/opd_es_token.sh` | entry / config / launcher |
 | `scripts/zo_opd/es_token_checks/{check_es_parity,check_es_grad_cosine}.py`, `bench_es_token_vs_bp.sh` | gates + headline bench |
@@ -162,3 +163,29 @@ nothing depended on the old stream and both consumers moved together. Visible on
 **Cumulative across §7 + §8**: one OPD step **147.54 → 83.80 s (1.76×)**, decode 129.59 → 68.44 s,
 ES/BP 2.39× → **1.35×**. Decode is now 82% of the step and `pack_width` is the only lever of
 consequence left.
+
+## 9. Budget-sized scratch-KV (2026-08-23) — pack_width unlocked
+
+`_np_prefill_packed` reserved each packed slot a KV slice of the full `max_model_len`
+(ceil(40960/16) = 2560 blocks) against a 24,717-block pool — ~20× what a 1024-token generation needs,
+and the reason `pack_width` was capped at 9 slots. It now reserves (longest prompt + `max_tokens`);
+`max_new_tokens=None` keeps the old behaviour for the NP trainer. Because the attention block table is
+zero-filled and only `len(block_ids)` entries are written, an undersized slice would read block 0 and
+silently corrupt a *neighbour's* KV, so a second assert makes that unreachable.
+
+Gating this needed care: comparing packed output to stock `llm.generate` fails at pack_width ≥ 10, but
+that is bf16 rounding, not corruption — a slot's output is byte-identical when the *content* of every
+other slot is swapped, it varies with wave width alone, and it shows up at pack_width=4 too where the
+change is provably byte-neutral. The gate checks output-neutrality vs the old reservation
+(across processes), neighbour-independence, and full-length generation instead.
+
+| `pack_width` (N=8) | ms/token-step | clean tok/s | waves per 64-prompt batch |
+|---|---|---|---|
+| 4 | 3.734 | 1,071 | 16 |
+| 16 | 5.435 | 2,944 | 4 |
+| **64** | 15.036 | **4,257** | **1** |
+
+One OPD step (64 × 1024, N=8): **83.80 → 42.67 s**, decode 68.44 → 25.40 s.
+**Cumulative over §7–§9: 147.54 → 42.67 s (3.46×), decode 129.59 → 25.40 s (5.10×), and the ratio vs
+BP-OPD goes 2.39× → 0.69× — es_token is now faster than BP.** Assembly (13.2 s, 31%) is the next
+lever, not decode.

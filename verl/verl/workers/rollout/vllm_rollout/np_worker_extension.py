@@ -1632,18 +1632,32 @@ class WorkerExtension:
             self.np_state["mode"] = prev_mode
         return state
 
-    def _np_prefill_packed(self, model, device, list_of_prompt_ids):
+    def _np_prefill_packed(self, model, device, list_of_prompt_ids,
+                           max_new_tokens=None):
         """Prefill B_pack prompts, each into its OWN disjoint high-indexed scratch-KV
         slice. Returns a list of per-prompt state dicts (same shape as _np_prefill's
         state, plus 'active': True). Fails fast if the B_pack slices don't fit the
         GPU block pool.
 
-        Each prompt p gets blocks_per_prompt = ceil(max_model_len/block_size) blocks,
-        carved from the TOP of the pool downward and disjoint across prompts:
+        Each prompt p gets blocks_per_prompt blocks carved from the TOP of the pool
+        downward and disjoint across prompts:
           prompt 0: [num_gpu_blocks - 1*bpp, num_gpu_blocks)
           prompt 1: [num_gpu_blocks - 2*bpp, num_gpu_blocks - 1*bpp)
           ...
-        so no two prompts' clean rows ever write the same KV slot."""
+        so no two prompts' clean rows ever write the same KV slot.
+
+        max_new_tokens: reserve for the ACTUAL budget -- longest prompt in this
+            wave plus this many generated tokens -- instead of the full
+            max_model_len. Reserving max_model_len wastes ~20x the KV a
+            1024-token generation needs and was what capped pack_width at 8
+            (results/zo_opd.md). None keeps the old full-context reservation.
+
+        SAFETY: the attention block table is zero-filled and only the first
+        len(block_ids) entries are written, so a sequence that outgrew its slice
+        would read block 0 -- silently corrupting another slot's KV instead of
+        erroring. The assert below is what makes that unreachable; it must stay
+        exact (>= the largest position the decode loop can ever write).
+        """
         mr = self.model_runner
         block_size = int(mr.cache_config.block_size)
         num_gpu_blocks = int(mr.cache_config.num_gpu_blocks)
@@ -1651,8 +1665,21 @@ class WorkerExtension:
             mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
 
         b_pack = len(list_of_prompt_ids)
-        blocks_per_prompt = min(
-            (int(mr.max_model_len) + block_size - 1) // block_size, max_blocks)
+        longest_prompt = max(len(p) for p in list_of_prompt_ids)
+        if max_new_tokens is None:
+            need = int(mr.max_model_len)
+        else:
+            need = min(longest_prompt + int(max_new_tokens),
+                       int(mr.max_model_len))
+        blocks_per_prompt = min((need + block_size - 1) // block_size, max_blocks)
+        cap = blocks_per_prompt * block_size
+        # The decode loop writes clean KV at positions [0, prompt_len + T), so the
+        # slice must cover the longest prompt plus the whole generation budget.
+        assert longest_prompt + int(max_new_tokens or 0) <= cap, (
+            f"packed scratch KV slice too small: longest_prompt={longest_prompt} "
+            f"+ max_new_tokens={max_new_tokens} > blocks_per_prompt="
+            f"{blocks_per_prompt} x block_size={block_size} = {cap}. "
+            f"Raise the reservation or lower max_tokens.")
         # Fail fast rather than corrupt KV (spec §4.2).
         assert b_pack * blocks_per_prompt <= num_gpu_blocks, (
             f"packed scratch KV does not fit: b_pack={b_pack} x "

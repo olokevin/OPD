@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.." || exit 1
 GPU=${TP_GPU:-6}
 PY=/home/yequan/miniconda3/envs/verl/bin/python
-OUT=${OUT:-scripts/zo_opd/results/es_token_decode_throughput_noise.txt}
+OUT=${OUT:-scripts/zo_opd/results/es_token_decode_throughput_kvfix.txt}
 JDIR=logs/es_profile/throughput_fused; mkdir -p "$JDIR"
 WT=$(pwd); TS=${T_SHORT:-64}; TL=${T_LONG:-320}
 run() {
@@ -28,7 +28,7 @@ echo "graphed packed decode, EOS disabled; ms/token-step from the T=$TS -> T=$TL
 echo "Baseline (PyTorch rail op): es_token_decode_throughput.txt"
 echo "=============================================================="
 for n in 0 1 2 4 8 16 32; do run $n 4; done
-echo "---- pack_width sweep at N=8 ----"
-run 8 8
+echo "---- pack_width sweep at N=8 (budget-sized scratch-KV) ----"
+for pw in 8 16 32 64; do run 8 $pw; done
 echo "done $(date +%H:%M:%S)"
 } 2>&1 | tee "$OUT"

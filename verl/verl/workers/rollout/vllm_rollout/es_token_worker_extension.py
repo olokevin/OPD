@@ -473,7 +473,15 @@ class WorkerExtension(NPWorkerExtension):
 
         padded_prompt_ids = list(list_of_prompt_ids) + [
             list(list_of_prompt_ids[0]) for _ in range(bucket - B)]
-        states = self._np_prefill_packed(model, device, padded_prompt_ids)
+        # Reserve KV for the real budget (longest prompt + max_tokens), not
+        # the full max_model_len -- that 20x over-reservation was what capped
+        # pack_width at 8.
+        # ES_KV_FULL_RESERVE=1 restores the old full-max_model_len reservation,
+        # for A/B-ing the budget-sized carving against it.
+        states = self._np_prefill_packed(
+            model, device, padded_prompt_ids,
+            max_new_tokens=(None if os.environ.get("ES_KV_FULL_RESERVE")
+                            else max_tokens))
         for p in range(B, bucket):
             states[p]["active"] = False
         slot_rollout_ids = [int(rollout_ids[p]) for p in range(B)] + [
