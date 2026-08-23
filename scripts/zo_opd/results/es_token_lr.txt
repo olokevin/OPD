@@ -1,0 +1,73 @@
+es_token learning rate: what works, and how to measure it -- 2026-08-23
+=======================================================================
+Qwen3-4B teacher -> Qwen3-1.7B student, MATH lv3-5, batch 64 x 1024, N=8 rails,
+pack_width=64, sigma=0.01 absolute, student_iw, token_agg=mean, TEMPERATURE=1.0.
+
+THE MEASUREMENT TRAP (cost me a wrongly-killed run)
+---------------------------------------------------
+train/L_clean_mean is computed on whatever 64 prompts THAT STEP drew. On this
+dataset it swings 0.23 - 3.4 from batch to batch, which is far larger than any
+learning-rate effect. Three LRs spanning 100x produce indistinguishable curves:
+
+  step   LR=1e-3   LR=1e-5   LR=3e-5
+    0    0.22714   0.22714   0.22714     <- identical (pre-update)
+    1    3.19522   2.84964   2.84373
+    3    2.86463   3.37455   3.34720
+    5    0.27865   0.22712   0.22526     <- low in ALL runs = same easy batch
+    7    2.65108   3.22027   3.09948
+The applied update differs 100x (lr*dW ~= 2.2 vs 0.02) yet the curve is the same
+shape. The swings are DATA, not the optimizer. dW_norm_mean is likewise no
+divergence signal: it is the gradient-estimate norm BEFORE the LR multiplies it,
+so it is similar across LRs by construction.
+
+USE eval/heldout_clean_loss -- a FIXED 16-prompt probe (ray_trainer.py:333).
+It is logged only inside the eval_interval branch, i.e. every EVAL_INTERVAL
+steps, not per step.
+
+PROBE NOISE FLOOR
+-----------------
+The probe scores SAMPLED rollouts at T=1.0, so it is stochastic even for a frozen
+model. Three sweep runs read the SAME untouched step-0 model as
+  0.1908 / 0.2126 / 0.2242   -> spread 0.033, about +-8%.
+Any within-run move smaller than that is not interpretable.
+
+LR = 1e-3 (the shipped all-layer default) DEGRADES THE MODEL
+-------------------------------------------------------------
+150-step run, evals every 25 steps -- monotonic on BOTH fixed-set metrics:
+  step                0        25        50
+  probe KL         0.2244    0.5565    1.1559     (2.5x then 2.1x per interval)
+  MATH-500 (200)     5.0%      1.5%      0.0%
+Far outside the +-8% noise floor. Killed at step 50.
+Why 1e-3 was wrong: it was calibrated on the GREEDY benchmark, where
+dW_norm_mean ~= 240. At TEMPERATURE=1.0 the rails ride a higher-entropy
+trajectory, the importance weights spread, and dW_norm_mean is ~866 at step 0 and
+~2000-2550 in steady state -- roughly 3.6x larger before any LR is applied.
+
+SWEEP (21 steps, EVAL_INTERVAL=10, fixed probe + MATH-500 on 50)
+-----------------------------------------------------------------
+  LR      probe s0    s10      s20     MATH-500 (50 samples)
+  1e-4     0.2126   0.1886   0.2035     0.08  0.08  0.10
+  1e-5     0.1908   0.2126   0.2010     0.08  0.06  0.08
+  1e-6     0.2242   0.1988   0.1909     0.08  0.04  0.10
+All three are flat within the +-8% noise floor, and MATH-500 on 50 samples has
+sigma ~= 4pp so those columns carry no signal either.
+
+CONCLUSION -- this is a BOUND, not a ranking:
+  1e-3 destroys the model; 1e-4 and below do not; 20 steps cannot separate
+  1e-4 / 1e-5 / 1e-6.
+Launched the 150-step run at 1e-4 = the largest non-degrading LR (most movement
+per step while an order of magnitude below what failed). That is a principled
+default, NOT a measured optimum. Separating 1e-4 from 1e-5 needs a horizon long
+enough for the signal to exceed +-8%, i.e. hundreds of steps, or a lower-variance
+probe (greedy probe rollouts, or many more probe prompts).
+
+OPEN
+----
+- Whether es_token learns at all at any LR is still unanswered; the 150-step
+  1e-4 run is the first test with a horizon that could show it.
+- BP-OPD baseline (LR 1e-6, 138 steps) was also flat: MATH-500 2.8/2.2/2.8/1.8%
+  across its four evals. It is a wall-clock reference, not a learning baseline.
+- Both runs cap responses at 1024 tokens and EVERY rollout hits the cap without
+  emitting EOS (response_length mean=min=max=1024), so MATH-500 reads near its
+  floor for both. Fixing that (longer budget, or a template that terminates) is
+  a prerequisite for accuracy being a usable metric here.

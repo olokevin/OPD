@@ -534,6 +534,78 @@ decode **129.59 → 25.40 s (5.10×)**, ES/BP **2.39× → 0.69×**.
 
 The next lever is no longer decode: assembly is now 31% of the step.
 
+## Session 2026-08-23b — learning rate: a bound, and a measurement trap
+
+First training runs into wandb `zo-opd-q34b-1p7b`. Raw record:
+`scripts/zo_opd/results/es_token_lr.txt`; sweep harness
+`scripts/zo_opd/es_token_checks/lr_probe.sh`.
+
+### 9.1 Do not read `train/L_clean_mean` as a learning curve
+
+`L_clean_mean` is computed on whatever 64 prompts that step drew, and on MATH lv3–5 it swings
+**0.23 – 3.4 batch to batch** — far larger than any LR effect. Three LRs spanning 100× give
+indistinguishable curves:
+
+| step | LR 1e-3 | LR 1e-5 | LR 3e-5 |
+|---|---|---|---|
+| 0 | 0.22714 | 0.22714 | 0.22714 |
+| 1 | 3.195 | 2.850 | 2.844 |
+| 3 | 2.865 | 3.375 | 3.347 |
+| 5 | 0.279 | 0.227 | 0.225 |
+| 7 | 2.651 | 3.220 | 3.099 |
+
+The applied update differs 100× (`lr·dW` ≈ 2.2 vs 0.02) yet the shape is the same, and the same
+steps are low in every run — it is **data, not the optimizer**. `dW_norm_mean` is no divergence
+signal either: it is the gradient-estimate norm *before* the LR multiplies it, so it is similar
+across LRs by construction. Use **`eval/heldout_clean_loss`** — a fixed 16-prompt probe
+(`ray_trainer.py:333`), logged only every `EVAL_INTERVAL` steps.
+
+**Probe noise floor.** The probe scores *sampled* rollouts at T=1.0, so it is stochastic even for a
+frozen model: three sweep runs read the same untouched step-0 model as 0.1908 / 0.2126 / 0.2242 —
+a spread of 0.033, about **±8%**. Nothing smaller than that is interpretable.
+
+### 9.2 LR 1e-3 — the shipped default — degrades the model
+
+| | step 0 | step 25 | step 50 |
+|---|---|---|---|
+| probe KL (fixed 16) | 0.2244 | 0.5565 | **1.1559** |
+| MATH-500 (fixed 200) | 5.0% | 1.5% | **0.0%** |
+
+Monotonic on both, ~2× per interval, far outside the noise floor. Killed at step 50.
+
+The cause is the temperature change: 1e-3 was calibrated on the **greedy** benchmark where
+`dW_norm_mean` ≈ 240. At T=1.0 the rails ride a higher-entropy trajectory, the importance weights
+spread, and `dW_norm_mean` is ~866 at step 0 and ~2,000–2,550 in steady state — **≈3.6× larger
+before any LR is applied**. (T=1.0 is nonetheless required: the `student_iw` rail loss is an
+unbiased estimate of `KL(π_n‖q)` only when the clean token is *sampled* from π₀.)
+
+### 9.3 The sweep gives a bound, not a ranking
+
+21 steps, `EVAL_INTERVAL=10`, fixed probe + MATH-500 on 50:
+
+| LR | probe s0 | s10 | s20 | MATH-500 |
+|---|---|---|---|---|
+| 1e-4 | 0.2126 | 0.1886 | 0.2035 | 8 / 8 / 10% |
+| 1e-5 | 0.1908 | 0.2126 | 0.2010 | 8 / 6 / 8% |
+| 1e-6 | 0.2242 | 0.1988 | 0.1909 | 8 / 4 / 10% |
+
+All flat within ±8%; MATH-500 at n=50 has σ ≈ 4pp and carries no signal either. So:
+**1e-3 destroys the model, 1e-4 and below do not, and 20 steps cannot separate 1e-4/1e-5/1e-6.**
+
+The 150-step run uses **1e-4** — the largest non-degrading LR, a principled default rather than a
+measured optimum. Separating it from 1e-5 needs a horizon long enough for the signal to clear ±8%,
+or a lower-variance probe (greedy probe rollouts, or many more probe prompts).
+
+### 9.4 Still open
+
+- **Whether es_token learns at all** is unanswered. The 150-step 1e-4 run is the first test with a
+  horizon that could show it.
+- The **BP-OPD baseline** (LR 1e-6, 138 steps) was also flat — MATH-500 2.8 / 2.2 / 2.8 / 1.8%
+  across its four evals. It is a wall-clock reference, not a learning baseline.
+- **Both runs cap responses at 1024 tokens and every rollout hits the cap without emitting EOS**
+  (`response_length` mean=min=max=1024), so MATH-500 reads near its floor for both. Fixing that is a
+  prerequisite for accuracy being a usable metric on this pair.
+
 ---
 
 # ZO-NP (zeroth-order node-perturbation) OPD — results

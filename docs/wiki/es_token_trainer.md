@@ -68,6 +68,20 @@ Full record: `scripts/zo_opd/results/es_token_gates.txt`.
 
 ## 5. Known issues / gotchas
 
+- **`train/L_clean_mean` is NOT a learning curve.** It is scored on whatever 64 prompts that step
+  drew and swings 0.23–3.4 batch to batch on MATH lv3–5 — LRs spanning 100× produce
+  indistinguishable curves on it. `dW_norm_mean` is not a divergence signal either (it is the
+  gradient-estimate norm *before* the LR multiplies it). Use `eval/heldout_clean_loss`, the fixed
+  16-prompt probe, which is logged only every `EVAL_INTERVAL` steps. Its noise floor is ±8% —
+  three reads of the same frozen model gave 0.1908 / 0.2126 / 0.2242. See
+  [results/zo_opd.md §9](../results/zo_opd.md).
+- **The shipped `lr: 1e-3` degrades the model at TEMPERATURE=1.0** (probe KL 0.22 → 0.56 → 1.16,
+  MATH-500 5% → 1.5% → 0% over 50 steps). It was calibrated on the greedy benchmark where
+  `dW_norm_mean` ≈ 240; at T=1.0 the importance weights spread and it is ≈866 at step 0, ~3.6×
+  larger before any LR applies. Use **1e-4** — the largest LR measured not to degrade. T=1.0 itself
+  is required: the `student_iw` loss is unbiased for `KL(π_n‖q)` only when the clean token is
+  *sampled* from π₀.
+
 - **Teardown hang (post-measurement only):** after the final step + eval, the driver can hang in cleanup with the engine actor spinning (observed on the bench run; the 2-step smoke exited cleanly). Step metrics are logged before teardown, so measurements are unaffected; kill the process tree if it lingers. Suspect: vLLM V1 in-process engine (`uni` executor) + `ray.kill` interaction. Untriaged.
 - The trainer-side `scales` RPC sends **raw** rail differences; 1/σ_l is applied per layer inside `es_assemble_and_apply` — don't double-divide.
 - `iw_clamp=10` caps the importance weight (σ small → ratios ≈1; the clamp is a safety rail).
