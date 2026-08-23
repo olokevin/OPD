@@ -28,6 +28,7 @@ y[rail n] += sigma_l * ((r_n ⊙ v_t)ᵀ x) * (s_n ⊙ u_t)     -- rank-1 ΔW, n
 | `verl/verl/trainer/es_token/{signs,seeding,grad_estimator}.py` | Hadamard rails, fused token-noise seeding/layout, losses/scales/assembly math (pure, CPU-tested) |
 | `verl/verl/trainer/es_token/ray_trainer.py` | `RayESTokenTrainer(RayNPTrainer)` + `SampledTokenTeacher`; fit = decode waves → teacher prefill → scales → assemble RPC → per-layer NCCL broadcast; logs `train/{decode,teacher,assemble}_s` |
 | `verl/verl/trainer/es_token/rail_kernel.py` | Fused Triton rank-1 rail op — ONE launch per layer (was ~14 PyTorch kernels); see §7 |
+| `verl/verl/trainer/es_token/noise_kernel.py` | Direct Rademacher ±1 fill in the destination dtype (Philox counter mode); shared by decode and assembly; see §8 |
 | `verl/verl/workers/rollout/vllm_rollout/es_token_worker_extension.py` | `ESTokenLinear` + `WorkerExtension(NPWorkerExtension)`: install/capture/replay/eager-oracle/orchestrator/`es_assemble_and_apply` |
 | `verl/verl/trainer/main_es_token.py`, `config/es_token_trainer.yaml`, `scripts/zo_opd/opd_es_token.sh` | entry / config / launcher |
 | `scripts/zo_opd/es_token_checks/{check_es_parity,check_es_grad_cosine}.py`, `bench_es_token_vs_bp.sh` | gates + headline bench |
@@ -122,3 +123,42 @@ untouched); `dW_norm_mean` shifts 239.726 → 239.514 because the rail now accum
 
 Remaining: the noise draw (0.199 ms, an int64 `randint` plus a five-kernel cast chain, also paid per
 token during assembly) and `pack_width`, which is now unambiguously the dominant wall-clock lever.
+
+## 8. Direct Rademacher noise (2026-08-22b)
+
+§7 left the per-token noise draw as the last fixed decode cost. `draw_noise("bernoulli")` built an
+**int64** `randint` buffer (7.34 MB per slot at `d_total` = 917,504) and ran a five-kernel
+cast/scale/copy chain — ~42 MB of traffic and ~6 kernels per slot per token for 1.83 MB of ±1 — plus
+a fresh `torch.Generator` per slot and a host blake2b inside the decode loop. It was also called once
+per token record during assembly (65,536 per step).
+
+`noise_kernel.py` draws ±1 **directly, in the destination dtype**, one Triton launch per batch of
+rows, from counter-based Philox (`tl.randint` → low bit → ±1): no generator state, no host RNG, no
+intermediate buffer. `build_seed_table` hoists every (token, slot) seed out of the decode loop, and
+assembly now fills a whole chunk in one launch. A torch fallback (`Tensor.random_(0, 2)` straight
+into the destination) covers non-Triton environments and `sample_method != "bernoulli"`; the
+implementation is chosen once at import so **decode and assembly can never disagree within a run**.
+
+| | before | after |
+|---|---|---|
+| decode fill, one token × 4 slots | 0.203 ms | **0.015 ms** (13.5×) |
+| assembly fill, one 1024-row chunk | 38.9 ms | **2.9 ms** (13.4×) |
+| decode ms/token-step, N=1 | 3.424 | **3.244** |
+| decode ms/token-step, N=8 | 3.885 | **3.722** |
+| assemble phase | 13.56 s | **11.03 s** |
+| **one OPD step** | 89.59 s | **83.80 s** |
+| **ratio vs BP-OPD** | 1.45× | **1.35×** |
+
+`check_noise_parity.py` gates the invariant the design rests on and **all pass**: the decode path
+(per-wave seed table) and the assembly path (host-derived, freshly uploaded seeds) produce
+byte-identical noise; chunk row *j* equals its own (t, rollout) record; values are exactly {−1, +1}
+and zero-mean; noise is distinct across *t* and rollout; regeneration is bit-identical. The 19 CPU
+tests and all three GPU gates still pass, and `L_clean_mean` is unchanged.
+
+This **changes the noise stream** relative to earlier runs (Philox counter mode ≠ `torch.randint`);
+nothing depended on the old stream and both consumers moved together. Visible only as
+`dW_norm_mean` 239.51 → 243.78.
+
+**Cumulative across §7 + §8**: one OPD step **147.54 → 83.80 s (1.76×)**, decode 129.59 → 68.44 s,
+ES/BP 2.39× → **1.35×**. Decode is now 82% of the step and `pack_width` is the only lever of
+consequence left.

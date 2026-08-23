@@ -31,7 +31,9 @@ import torch
 
 from verl.trainer.es_token.grad_estimator import assemble_chunk
 from verl.trainer.es_token.rail_kernel import apply_rail, rail_supported
-from verl.trainer.es_token.seeding import build_noise_layout, draw_token_noise
+from verl.trainer.es_token.noise_kernel import fill_rademacher_rows
+from verl.trainer.es_token.seeding import (
+    build_noise_layout, build_seed_table, draw_token_noise, es_token_seed)
 from verl.trainer.es_token.signs import build_layer_signs
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
     WorkerExtension as NPWorkerExtension,
@@ -179,10 +181,26 @@ class WorkerExtension(NPWorkerExtension):
     def _es_fill_noise(self, noise_buf, es_cfg, step_t, slot_rollout_ids):
         """ONE fused draw per (slot, token) covering all layers. The only RNG
         in the decode hot loop. Bit-regenerable at assembly from
-        (global_seed, t, rollout_id) on the same device/dtype."""
+        (global_seed, t, rollout_id) on the same device/dtype.
+
+        For the shipping "bernoulli" method this is a single Triton launch that
+        writes +-1 straight into the destination dtype (noise_kernel.py); the
+        seeds come from a table built once per wave. Other methods keep the
+        original per-slot draw."""
         gseed = int(es_cfg["global_seed"])
         method = es_cfg["sample_method"]
         d_total = noise_buf.shape[1]
+        if method == "bernoulli":
+            tbl = getattr(self, "_es_seed_tbl", None)
+            t = int(step_t)
+            if tbl is not None and t < tbl[0].shape[0]:
+                seeds_dev, seeds_host = tbl[0][t], tbl[1][t]
+            else:  # eager/oracle callers that never built a table
+                seeds_host = [es_token_seed(gseed, t, int(rid))
+                              for rid in slot_rollout_ids]
+                seeds_dev = None
+            fill_rademacher_rows(noise_buf, seeds_host, seeds_dev)
+            return
         for p, rid in enumerate(slot_rollout_ids):
             noise_buf[p].copy_(draw_token_noise(
                 gseed, int(step_t), int(rid), d_total, noise_buf.device,
@@ -465,6 +483,14 @@ class WorkerExtension(NPWorkerExtension):
         # practice) -- valid for every wave the cached graph will ever serve.
         max_seq_len_cap = int(mr.max_model_len)
 
+        # Seeds for every (token, slot) of this wave, derived once instead of
+        # per token inside the decode loop.
+        if es_cfg["sample_method"] == "bernoulli":
+            self._es_seed_tbl = build_seed_table(
+                int(es_cfg["global_seed"]), max_tokens, slot_rollout_ids, device)
+        else:
+            self._es_seed_tbl = None
+
         sigma_eff = self._es_sigma_eff(es_cfg)
         if use_graph:
             if not hasattr(self, "_es_graph_by_bucket"):
@@ -597,10 +623,17 @@ class WorkerExtension(NPWorkerExtension):
             c1 = min(c0 + int(chunk), M)
             m = c1 - c0
             nc = noise_chunk[:m]
-            for j in range(m):
-                nc[j].copy_(draw_token_noise(
-                    gseed, int(t_idx[c0 + j]), int(rollout_ids[c0 + j]),
-                    self.es_d_total, device, dtype, method))
+            if method == "bernoulli":
+                # One launch for the whole chunk (was m x ~6 kernels).
+                seeds = [es_token_seed(gseed, int(t_idx[c0 + j]),
+                                       int(rollout_ids[c0 + j]))
+                         for j in range(m)]
+                fill_rademacher_rows(nc, seeds)
+            else:
+                for j in range(m):
+                    nc[j].copy_(draw_token_noise(
+                        gseed, int(t_idx[c0 + j]), int(rollout_ids[c0 + j]),
+                        self.es_d_total, device, dtype, method))
             sc = scales_t[c0:c1]
             for ln, (off_u, d_out, off_v, d_in) in self.es_layout.items():
                 u = nc[:, off_u:off_u + d_out]

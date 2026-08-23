@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../../.." || exit 1
 GPU=${TP_GPU:-6}
 PY=/home/yequan/miniconda3/envs/verl/bin/python
-OUT=${OUT:-scripts/zo_opd/results/es_token_decode_throughput_fused.txt}
+OUT=${OUT:-scripts/zo_opd/results/es_token_decode_throughput_noise.txt}
 JDIR=logs/es_profile/throughput_fused; mkdir -p "$JDIR"
 WT=$(pwd); TS=${T_SHORT:-64}; TL=${T_LONG:-320}
 run() {

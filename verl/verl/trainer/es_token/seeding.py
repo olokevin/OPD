@@ -36,6 +36,21 @@ def draw_token_noise(global_seed: int, step_t: int, rollout_id: int,
     return draw_noise(seed, (int(d_total),), device, dtype, method)
 
 
+def build_seed_table(global_seed: int, max_tokens: int,
+                     slot_rollout_ids: List[int], device: torch.device):
+    """[max_tokens, bucket] int64 seed table for one decode wave.
+
+    Hoists the blake2b key derivation out of the per-token hot loop (and with it
+    the per-token host->device copy the fused noise fill would otherwise need).
+    Returns (device tensor, host list-of-lists) -- the host copy is what the
+    torch fallback consumes.
+    """
+    host = [[es_token_seed(int(global_seed), t, int(rid))
+             for rid in slot_rollout_ids]
+            for t in range(int(max_tokens))]
+    return torch.tensor(host, dtype=torch.int64, device=device), host
+
+
 def build_noise_layout(layer_dims: List[Tuple[str, int, int]]
                        ) -> Tuple[Dict[str, Tuple[int, int, int, int]], int]:
     """Assign each layer contiguous (u, v) slices of the flat noise vector.
