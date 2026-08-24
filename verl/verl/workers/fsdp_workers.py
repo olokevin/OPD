@@ -384,7 +384,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # of meta tensor". Force real weights on CPU for those modes.
         _peft_cfg = self.config.get("peft", None)
         _peft_mode = _peft_cfg.get("mode", "none") if _peft_cfg is not None else "none"
-        _peft_needs_real_weights = str(_peft_mode) in ("blocktt", "svd")
+        _peft_needs_real_weights = str(_peft_mode) in ("blocktt", "svd", "iso", "isobtt", "isobtt_mix")
         init_context = get_init_weight_context_manager(
             use_meta_tensor=(not actor_model_config.tie_word_embeddings) and not _peft_needs_real_weights,
             mesh=self.device_mesh,

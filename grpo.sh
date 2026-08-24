@@ -207,6 +207,11 @@ export BTT_FACTORIZE_BY_HEAD=${BTT_FACTORIZE_BY_HEAD:-True}
 export BTT_NORMALIZE_AFTER_UPDATE=${BTT_NORMALIZE_AFTER_UPDATE:-False}
 export BTT_QFURA=${BTT_QFURA:-False}
 
+# ---- ISO (fixed-spectrum BP): peft.mode = iso | isobtt | isobtt_mix ----
+# See verl/workers/peft/iso.py and docs/results/ES/es_results.md §11.
+export ISO_BLOCK_SIZE=${ISO_BLOCK_SIZE:-128}   # Cayley generator block (mode `iso` only)
+export ISO_SEED=${ISO_SEED:-0}                 # fixed random block basis (mode `iso` only)
+
 export SVD_TRAIN_POSITION=${SVD_TRAIN_POSITION:-output}
 export SVD_S_MERGED_TO=${SVD_S_MERGED_TO:-frozen}
 export SVD_COMPRESSION_RATIO=${SVD_COMPRESSION_RATIO:-1.0}
@@ -259,6 +264,11 @@ case "$PEFT_MODE" in
       ++actor_rollout_ref.peft.blocktt.factorize_by_head=$BTT_FACTORIZE_BY_HEAD \
       ++actor_rollout_ref.peft.blocktt.normalize_after_update=$BTT_NORMALIZE_AFTER_UPDATE \
       ++actor_rollout_ref.peft.blocktt.qfura.enabled=$BTT_QFURA" ;;
+  iso|isobtt|isobtt_mix)
+    PEFT_ARGS="$PEFT_ARGS \
+      actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+      ++actor_rollout_ref.peft.iso.block_size=$ISO_BLOCK_SIZE \
+      ++actor_rollout_ref.peft.iso.seed=$ISO_SEED" ;;
   svd)
     PEFT_ARGS="$PEFT_ARGS \
       ++actor_rollout_ref.peft.svd.train_position=$SVD_TRAIN_POSITION \

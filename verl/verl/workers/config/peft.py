@@ -10,7 +10,7 @@ from typing import Any, Optional, Union
 from omegaconf import DictConfig, OmegaConf
 
 
-VALID_MODES = ("none", "lora", "qlora", "blocktt", "svd")
+VALID_MODES = ("none", "lora", "qlora", "blocktt", "svd", "iso", "isobtt", "isobtt_mix")
 VALID_CALIB_MODES = (
     "none", "v2", "v2_bp", "v2_combined", "twosteps", "svd_v2", "svd_v2_combined",
 )
@@ -60,6 +60,16 @@ class SVDConfig:
 
 
 @dataclass
+class IsoConfig:
+    """Fixed-spectrum (ISO) BP modes. See verl/workers/peft/iso.py."""
+    # Block size of the Cayley rotation generators (mode `iso` only; the
+    # `isobtt*` modes take their block size from the layer's own factorisation).
+    block_size: int = 128
+    # Seed for the fixed random block basis (mode `iso` only).
+    seed: int = 0
+
+
+@dataclass
 class CalibConfig:
     mode: str = "none"
     source: str = "c4"
@@ -88,6 +98,7 @@ class PEFTConfig:
     qlora: QLoRAConfig = field(default_factory=QLoRAConfig)
     blocktt: BlockTTConfig = field(default_factory=BlockTTConfig)
     svd: SVDConfig = field(default_factory=SVDConfig)
+    iso: IsoConfig = field(default_factory=IsoConfig)
     calib: CalibConfig = field(default_factory=CalibConfig)
 
     def __post_init__(self):
@@ -104,6 +115,8 @@ class PEFTConfig:
             )
         if self.mode == "qlora" and self.lora.rank <= 0:
             raise ValueError("qlora requires peft.lora.rank > 0")
+        if self.mode in {"iso", "isobtt", "isobtt_mix"} and self.iso.block_size < 2:
+            raise ValueError("peft.iso.block_size must be >= 2")
         if self.calib.mode != "none" and self.mode not in {"blocktt", "svd"}:
             raise ValueError(
                 f"peft.calib.mode={self.calib.mode!r} requires peft.mode in {{blocktt, svd}}; "
@@ -145,7 +158,8 @@ class PEFTConfig:
             raw = dict(cfg)
         sub_specs = {
             "lora": LoRAConfig, "qlora": QLoRAConfig,
-            "blocktt": BlockTTConfig, "svd": SVDConfig, "calib": CalibConfig,
+            "blocktt": BlockTTConfig, "svd": SVDConfig, "iso": IsoConfig,
+            "calib": CalibConfig,
         }
         kwargs: dict[str, Any] = {}
         for key, val in raw.items():

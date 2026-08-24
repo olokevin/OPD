@@ -53,6 +53,7 @@ esac
 POPULATION_SIZE=${POPULATION_SIZE:-30}
 NUM_ITERATIONS=${NUM_ITERATIONS:-150}
 MAX_TOKENS=${MAX_TOKENS:-1536}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-0}   # 0 = fixed batch (old); >0 = resample per iteration
 EVAL_MAX_TOKENS=${EVAL_MAX_TOKENS:-3000}
 TEMPERATURE=${TEMPERATURE:-0.0}
 EVAL_INTERVAL=${EVAL_INTERVAL:-10}
@@ -95,7 +96,8 @@ case "$PERTURB_MODE" in
   isobtt)   TAG="isobtt-fixedspec-smallcore" ;;
   *)        TAG="$PERTURB_MODE" ;;
 esac
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-${TAG}_math-lv3to5-b${TRAIN_MAX_SAMPLES}_sig${SIGMA}_a${ALPHA}_N${POPULATION_SIZE}}
+if [ "${TRAIN_BATCH_SIZE}" != "0" ]; then _BTAG="rs${TRAIN_BATCH_SIZE}"; else _BTAG="b${TRAIN_MAX_SAMPLES}"; fi
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-${TAG}_math-lv3to5-${_BTAG}_sig${SIGMA}_a${ALPHA}_N${POPULATION_SIZE}}
 SAVE_DIR=${SAVE_DIR:-/data/yequan/es/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 LOG_DIR=${LOG_DIR:-${REPO}/logs/es}
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
@@ -123,6 +125,7 @@ python3 -m verl.trainer.main_es \
     es.num_iterations=${NUM_ITERATIONS} \
     es.precision=bfloat16 \
     es.max_tokens=${MAX_TOKENS} \
+    es.train_batch_size=${TRAIN_BATCH_SIZE} \
     es.eval_max_tokens=${EVAL_MAX_TOKENS} \
     es.max_model_len=${MAX_MODEL_LEN} \
     es.temperature=${TEMPERATURE} \

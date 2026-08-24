@@ -407,11 +407,46 @@ class RayESTrainer:
             else:
                 json.dump(vars(self.config), f, indent=4)
         
-        # Prepare prompts
-        if self.prompt_processor:
-            prompts = [self.prompt_processor(d, self.tokenizer) for d in self.train_data]
+        global_seed = self.es_config.get('global_seed', 42)
+
+        # Training batch policy.
+        #
+        # The reference implementation (VsonicV/es-at-scale, train.py) wraps the training
+        # set in a `DataLoader(..., batch_size=args.batch_size, shuffle=True)` and draws a
+        # FRESH batch every ES iteration -- for math, batch_size=1024 out of an 8.5k pool.
+        # Every member of the population still sees the *same* batch within an iteration
+        # (that is what makes the z-scores comparable); the batch changes between
+        # iterations. Holding one fixed batch instead makes ES overfit it, which is exactly
+        # what we measured (train acc 77.7 vs held-out 71.5 at step 150).
+        #
+        # es.train_batch_size = 0 keeps the old fixed-batch behaviour.
+        train_batch_size = int(self.es_config.get('train_batch_size', 0) or 0)
+        resample = train_batch_size > 0 and train_batch_size < len(self.train_data)
+        batch_rng = np.random.default_rng(seed=global_seed)
+        epoch_order = []
+
+        def _draw_batch():
+            """Sampling-without-replacement over shuffled epochs, like DataLoader(shuffle=True)."""
+            nonlocal epoch_order
+            if not resample:
+                return list(self.train_data)
+            if len(epoch_order) < train_batch_size:
+                epoch_order = list(batch_rng.permutation(len(self.train_data)))
+            idx = [epoch_order.pop() for _ in range(train_batch_size)]
+            return [self.train_data[i] for i in idx]
+
+        def _to_prompts(batch):
+            if self.prompt_processor:
+                return [self.prompt_processor(d, self.tokenizer) for d in batch]
+            return [d.get("prompt", d.get("context")) for d in batch]
+
+        train_batch = _draw_batch()
+        prompts = _to_prompts(train_batch)
+        if resample:
+            print(f"Training batch: {train_batch_size} problems resampled per iteration "
+                  f"from a pool of {len(self.train_data)}")
         else:
-            prompts = [d.get("prompt", d.get("context")) for d in self.train_data]
+            print(f"Training batch: fixed set of {len(self.train_data)} problems")
         
         # ES hyperparameters
         sigma = self.es_config.sigma
@@ -422,10 +457,9 @@ class RayESTrainer:
         # Allow trainer config to override ES config for iterations/eval
         trainer_total_epochs = self.config.trainer.get('total_epochs', None)
         trainer_test_freq = self.config.trainer.get('test_freq', None)
-        
         num_iterations = trainer_total_epochs if trainer_total_epochs else self.es_config.num_iterations
         eval_interval = trainer_test_freq if trainer_test_freq else self.es_config.get('eval_interval', 25)
-        global_seed = self.es_config.get('global_seed', 42)
+        
         
         # Step 0 = the untouched base model, so the training curve starts from the
         # published base-model score instead of from "after one ES update".
@@ -442,7 +476,11 @@ class RayESTrainer:
         
         for iteration in progress_bar:
             total_iter_start = time.time()
-            
+
+            if resample and iteration > 0:
+                train_batch = _draw_batch()
+                prompts = _to_prompts(train_batch)
+
             # Generate deterministic seeds for this iteration
             loop_rng = np.random.default_rng(seed=global_seed + iteration)
             seeds = loop_rng.integers(0, 2**30, size=population_size, dtype=np.int64).tolist()
@@ -481,7 +519,7 @@ class RayESTrainer:
                 
                 # 4) Compute rewards
                 for eng_idx, seed in enumerate(batch_seeds):
-                    metrics = self._compute_metrics(outputs_per_engine[eng_idx], self.train_data)
+                    metrics = self._compute_metrics(outputs_per_engine[eng_idx], train_batch)
                     seeds_perf[int(seed)] = metrics
                 
                 # Clean up GPU memory after each batch

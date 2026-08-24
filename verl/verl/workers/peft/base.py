@@ -33,6 +33,7 @@ class PEFTAdapter(ABC):
         from verl.workers.peft.qlora import QLoRAAdapter
         from verl.workers.peft.blocktt import BlockTTAdapter
         from verl.workers.peft.svd import SVDAdapter
+        from verl.workers.peft.iso import IsoAdapter
 
         registry = {
             "none": NullAdapter,
@@ -40,6 +41,9 @@ class PEFTAdapter(ABC):
             "qlora": QLoRAAdapter,
             "blocktt": BlockTTAdapter,
             "svd": SVDAdapter,
+            "iso": IsoAdapter,
+            "isobtt": IsoAdapter,
+            "isobtt_mix": IsoAdapter,
         }
         cls_ = registry[peft_cfg.mode]
         # Only BTT / SVD adapters know about teacher_model_path; the others

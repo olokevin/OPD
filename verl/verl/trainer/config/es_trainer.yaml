@@ -24,6 +24,11 @@ es:
   eval_interval: 25  # Evaluate every N iterations (0 to disable)
   eval_batch_size: 512
   eval_max_tokens: null  # null -> reuse es.max_tokens
+
+  # Problems rolled out per ES iteration, resampled from the training pool each
+  # iteration (reference impl: DataLoader(shuffle=True), batch_size=1024 for math).
+  # 0 = use the whole pool as one fixed batch (old behaviour).
+  train_batch_size: 0
   
   # vLLM settings
   gpu_memory_utilization: 0.9
