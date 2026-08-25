@@ -51,10 +51,12 @@ sparse, +21.2 pp). **The paper's own task pair does not reproduce it either**
 ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)): on Countdown →
 HellaSwag with *their* model (Qwen2.5-1.5B-Instruct), hyperparameters and horizon,
 `dense` ES learns Countdown **8.0 → 42.0%** while HellaSwag goes **59.70 → 60.20** and
-the prior mean moves **−0.11 pp** — 0.3% relative against their ≈10%. `iso` matches that
-safety *and* outlearns `dense` (47.0 vs 37.5 @ step 200). Leading unexplained
-difference: whether their HellaSwag probe is generative (format-sensitive) rather than
-log-likelihood ranking.
+the prior mean moves **−0.11 pp** — 0.3% relative against their ≈10%. `iso` reaches a level `dense` never
+does (**47.5%**) and, compared at *matched* Countdown accuracy, has lost exactly the same
+prior ability (−0.11 pp at 38%); its larger end-of-run drop (−1.21 pp) is bought by going
+further, not leaked by the subspace. Leading unexplained difference vs the paper: whether
+their HellaSwag probe is generative (format-sensitive) rather than log-likelihood
+ranking.
 
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
@@ -1442,8 +1444,8 @@ BoolQ 77.10, prior mean **62.74**.
 
 #### Result — the paper's effect does not reproduce on its own task pair
 
-`dense` finished all 300 iterations (2026-08-25, 8 h 45 m, 104 s/iteration). `iso` is at
-210/300. Countdown accuracy is the 200-problem held-out split; HellaSwag and the prior
+`dense` and `iso` both finished all 300 iterations (2026-08-25; 8 h 45 m and 12 h 12 m,
+104 and 145 s/iteration). Countdown accuracy is the 200-problem held-out split; HellaSwag and the prior
 mean are the in-loop probe at 1000 docs/task.
 
 | step | **dense** Countdown | HellaSwag | prior mean | | **iso** Countdown | HellaSwag | prior mean |
@@ -1458,11 +1460,15 @@ mean are the in-loop probe at 1000 docs/task.
 | 140 | 35.5 | 59.60 | 62.39 | | 45.5 | 59.20 | 62.56 |
 | 160 | 37.0 | 59.60 | 62.31 | | 43.0 | 59.30 | 62.76 |
 | 180 | 40.0 | 59.60 | 62.41 | | 43.5 | 59.30 | 62.67 |
-| 200 | 37.5 | 59.40 | 62.24 | | **47.0** | 59.90 | 62.60 |
-| 220 | 40.0 | 60.10 | 62.80 | | — | — | — |
-| 250 | **42.0** | 58.90 | 62.63 | | — | — | — |
-| 280 | 39.5 | 59.30 | 62.34 | | — | — | — |
-| 300 | 38.5 | **60.20** | 62.63 | | — | — | — |
+| 200 | 37.5 | 59.40 | 62.24 | | 47.0 | 59.90 | 62.60 |
+| 220 | 40.0 | 60.10 | 62.80 | | 45.0 | 59.50 | 61.99 |
+| 250 | **42.0** | 58.90 | 62.63 | | 47.0 | 59.70 | 61.56 |
+| 280 | 39.5 | 59.30 | 62.34 | | 47.0 | 58.80 | 61.39 |
+| 300 | 38.5 | **60.20** | 62.63 | | **47.5** | 59.30 | 61.53 |
+
+Each probe is a 1000-doc subsample, so a single task carries SE ≈ 1.5 pp and the 7-task
+mean SE ≈ 0.6 pp (unpaired) — about 1.4× looser than the full-suite numbers in
+[§14.4](#144-result--nothing-forgets-dense-included).
 
 **`dense` ES learns Countdown and does not forget.** Countdown **8.0 → 42.0%** (peak, and
 +30.5 pp over base — the paper reports ES reaching 53.0 with a longer run, so the
@@ -1479,10 +1485,31 @@ convergence point — the paper's Figure 2 has prior accuracy still falling from
 [§14.4](#144-result--nothing-forgets-dense-included), **we cannot reproduce ES-induced
 catastrophic forgetting in either of two settings, and one of them is the paper's own.**
 
-**`iso` is not just as safe — it is better at the new task.** At matched iteration count
-`iso` leads `dense` throughout (47.0 vs 37.5 at step 200; 42.0 vs 36.5 at step 100) while
-its prior mean stays in 62.0–63.0. This echoes [§7](#7-results): the fixed-spectrum
-constraint costs nothing and, on this task, converges faster.
+**`iso` learns substantially more, and pays for it only in proportion.** It leads `dense`
+at every step and ends at **47.5%** where `dense` peaks at 42.0 and ends at 38.5 — a task
+level `dense` never reaches. Its prior mean does decline late (62.74 → 61.53; averaged
+over the last three evals, −1.34 pp vs `dense`'s −0.29), which is ~2 SE and the only
+non-null retention signal anywhere in this section.
+
+**But that decline is bought, not leaked.** Compared at *matched new-task accuracy*
+rather than matched step count:
+
+| | Countdown | prior mean | Δ prior |
+|---|---|---|---|
+| base | 8.0 | 62.74 | — |
+| `dense` @ step 300 | 38.5 | 62.63 | −0.11 |
+| `iso` @ step 80 | 38.0 | 62.63 | −0.11 |
+| `iso` @ step 300 | **47.5** | 61.53 | −1.21 |
+
+At the same Countdown score the two arms have lost **exactly the same** prior ability.
+`iso` ends lower only because it kept going and reached a level `dense` never did. So
+prior-ability loss here tracks **how far along the new task you are**, not which subspace
+the perturbation lives in — the same conclusion [§14.4](#144-result--nothing-forgets-dense-included)
+reached from the geometry. And on the paper's *own* probe, HellaSwag, both arms are flat
+(`dense` +0.5, `iso` −0.4 pp).
+
+Per-task at step 300 (base → arm): `dense` WinoGrande −1.8, ARC-e −1.7, BoolQ +1.9,
+PIQA +0.9; `iso` ARC-e −4.4, ARC-c −2.8, BoolQ −2.8, WinoGrande +1.2, PIQA +1.1.
 
 #### What is left to explain
 
@@ -1512,7 +1539,8 @@ did *not* copy. Two candidates, in order of how much we think they matter:
 Not candidates: model, task, prior benchmark, population size, step size, or horizon —
 all matched.
 
-`fura` (GPU 1) and `isobtt` (GPU 2) are queued behind the arms above; they are controls
-now rather than the test, since there is no forgetting for them to avoid.
+`fura` (GPU 1, started 03:21) and `isobtt` (GPU 2, started 06:54) are running behind the
+arms above; they are controls now rather than the test, since there is no forgetting for
+them to avoid.
 
 <!-- FORGET:COUNTDOWN END -->

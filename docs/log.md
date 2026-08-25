@@ -450,3 +450,17 @@ and the metric would fall with the knowledge intact — which is what the compan
 checkpoint `/data/yequan/es/ES-forget-cd-q1p5b/cd-dense_q1p5b_b200_N30/es_train_*/es_coef_best.pt`.
 
 -> `docs/results/ES/es_results.md` §14.5
+
+## [2026-08-25] ingest | ES forgetting: `iso` Countdown arm complete — loss tracks task progress, not subspace
+
+`iso` finished 300 iterations (12 h 12 m, 145 s/iter). Countdown **8.0 → 47.5%**, a level
+`dense` never reaches (peak 42.0, ends 38.5). Prior mean 62.74 → 61.53 (−1.34 pp averaged
+over the last three evals, ~2 SE) vs `dense`'s −0.29 — the only non-null retention signal
+in §14. **But compared at matched new-task accuracy the two are identical**: `iso` @ step
+80 is at Countdown 38.0 / prior 62.63, and `dense` @ step 300 is at Countdown 38.5 /
+prior 62.63 (both −0.11 vs base). So prior-ability loss tracks how far along the new task
+you are, not which subspace the perturbation lives in. HellaSwag — the paper's own probe
+— is flat for both (`dense` +0.5, `iso` −0.4 pp). Probe SE: 1.5 pp/task, 0.6 pp on the
+7-task mean at 1000 docs/task.
+
+-> `docs/results/ES/es_results.md` §14.5
