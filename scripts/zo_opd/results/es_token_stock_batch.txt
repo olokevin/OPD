@@ -1,0 +1,50 @@
+stock vLLM decode throughput vs concurrency -- 2026-08-21 17:14:45
+GPU 5 (NVIDIA H100 NVL)
+Qwen3-1.7B bf16, greedy, ignore_eos, enforce_eager (same engine settings
+ms/token-step from the T=64 -> T=320 slope. Two engine modes:
+  eager     = enforce_eager=True, the setting the es_token driver forces
+              (it captures its own graphs) -- the in-harness comparison;
+  cudagraph = enforce_eager=False, stock vLLM's real generation path,
+              which is what BP-OPD actually runs.
+==============================================================
+### stock batch=4 mode=eager
+[stock B=4 eager] ms/token-step = 8.633   tok/s = 463.3
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": true, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.5686125354841352, "t_long_s": 2.778714396059513, "ms_per_token_step": 8.63321039287257, "tok_per_s": 463.3270611940989, "full_call_tok_per_s": 460.64467863813724}}
+
+### stock batch=4 mode=cudagraph
+[stock B=4 cudagraph] ms/token-step = 2.831   tok/s = 1412.7
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": false, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.18339870031923056, "t_long_s": 0.9082439001649618, "ms_per_token_step": 2.8314265618973877, "tok_per_s": 1412.7154325060549, "full_call_tok_per_s": 1409.3130708254878}}
+
+### stock batch=8 mode=eager
+[stock B=8 eager] ms/token-step = 8.918   tok/s = 897.1
+RESULT {"n_sample": 8, "pack_width": 8, "rows_per_token": 72, "enforce_eager": true, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.5899352682754397, "t_long_s": 2.8729595374315977, "ms_per_token_step": 8.918063551391242, "tok_per_s": 897.0557289594532, "full_call_tok_per_s": 891.067196264316}}
+
+### stock batch=8 mode=cudagraph
+[stock B=8 cudagraph] ms/token-step = 2.918   tok/s = 2741.9
+RESULT {"n_sample": 8, "pack_width": 8, "rows_per_token": 72, "enforce_eager": false, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.18897701147943735, "t_long_s": 0.9358944548293948, "ms_per_token_step": 2.9176462630857714, "tok_per_s": 2741.9362316866377, "full_call_tok_per_s": 2735.3511785329097}}
+
+### stock batch=16 mode=eager
+[stock B=16 eager] ms/token-step = 10.479   tok/s = 1526.8
+RESULT {"n_sample": 8, "pack_width": 16, "rows_per_token": 144, "enforce_eager": true, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.6136219287291169, "t_long_s": 3.2963203825056553, "ms_per_token_step": 10.479290835064603, "tok_per_s": 1526.820874792656, "full_call_tok_per_s": 1553.2470773086984}}
+
+### stock batch=16 mode=cudagraph
+[stock B=16 cudagraph] ms/token-step = 3.322   tok/s = 4816.2
+RESULT {"n_sample": 8, "pack_width": 16, "rows_per_token": 144, "enforce_eager": false, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.19802877213805914, "t_long_s": 1.0484981844201684, "ms_per_token_step": 3.3221461417269893, "tok_per_s": 4816.1638041854885, "full_call_tok_per_s": 4883.1748839235415}}
+
+### stock batch=32 mode=eager
+[stock B=32 eager] ms/token-step = 9.573   tok/s = 3342.8
+RESULT {"n_sample": 8, "pack_width": 32, "rows_per_token": 288, "enforce_eager": true, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.6197837581858039, "t_long_s": 3.070411835797131, "ms_per_token_step": 9.572765928169247, "tok_per_s": 3342.8165109349825, "full_call_tok_per_s": 3335.0574931396854}}
+
+### stock batch=32 mode=cudagraph
+[stock B=32 cudagraph] ms/token-step = 3.586   tok/s = 8923.5
+RESULT {"n_sample": 8, "pack_width": 32, "rows_per_token": 288, "enforce_eager": false, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.2564157033339143, "t_long_s": 1.1744387354701757, "ms_per_token_step": 3.5860274692822713, "tok_per_s": 8923.52339018883, "full_call_tok_per_s": 8719.058466596396}}
+
+### stock batch=64 mode=eager
+[stock B=64 eager] ms/token-step = 9.689   tok/s = 6605.2
+RESULT {"n_sample": 8, "pack_width": 64, "rows_per_token": 576, "enforce_eager": true, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.6334787243977189, "t_long_s": 3.113966904580593, "ms_per_token_step": 9.689406953839352, "tok_per_s": 6605.151409668111, "full_call_tok_per_s": 6576.820058644254}}
+
+### stock batch=64 mode=cudagraph
+[stock B=64 cudagraph] ms/token-step = 4.580   tok/s = 13974.7
+RESULT {"n_sample": 8, "pack_width": 64, "rows_per_token": 576, "enforce_eager": false, "matched_layers": 0, "t_short": 64, "t_long": 320, "stock": {"t_short_s": 0.2788608353585005, "t_long_s": 1.451262074522674, "ms_per_token_step": 4.579692340485053, "tok_per_s": 13974.737873597314, "full_call_tok_per_s": 14111.855025727145}}
+
+done 17:21:41

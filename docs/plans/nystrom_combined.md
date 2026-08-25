@@ -436,3 +436,40 @@ K_{\text{joint}} = C_f^{1/2} C_b C_f^{1/2}.
 $$
 
 This gives the precise MoDeGPT analogue of the two-sided-whitening idea developed earlier for linear-layer SVD compression.
+
+
+## Implementation
+
+### `nystrom_combined` — trainability-aware joint kernel
+
+Forward-only selection keeps directions that matter for the **forward** pass,
+but says nothing about whether enough gradient reaches the upstream `W_u`/`W_g`
+after compression. `nystrom_combined` swaps the forward kernel for a
+**joint forward+backward kernel** that weights hidden directions by both
+forward activity and backward transport (derivation in
+`docs/plans/nystrom_combined.md`):
+
+$$
+\bar C_f = \frac{C_f}{\operatorname{tr} C_f},\quad
+\bar C_b = \frac{C_b}{\operatorname{tr} C_b},\quad
+K_{\text{joint}} = \bar C_f^{1/2}\,\bar C_b\,\bar C_f^{1/2} + \lambda I,
+$$
+
+where `C_f = Zᵀ Z` is the forward hidden covariance and `C_b` is the
+**backward hidden-gradient covariance** — the covariance of `δz`, the gradient
+flowing *into* `down_proj`. `δz` is the shared signal that drives both gated
+branches (`δu = δz ⊙ φ(g)`, `δg = δz ⊙ u ⊙ φ'(g)` are per-neuron rescalings of
+it), so `C_b = δzᵀ δz` is the dominant term of the plan's
+`C_b = B_uᵀ B_u + B_gᵀ B_g`. Selection and reconstruction then use the same
+rules as `nystrom` with `C_f → K_joint`:
+
+$$
+\text{score}_i = \operatorname{diag}\big((K_{\text{joint}}+\lambda I)^{-1} K_{\text{joint}}\big),
+\qquad
+\hat W_D = (S^\top K_{\text{joint}} S)^{+} S^\top K_{\text{joint}}\, W_D .
+$$
+
+(`structured/nystrom.py:nystrom_combined_compress_mlp`). When the backward
+signal is isotropic (`C_b ∝ I`), `K_joint ∝ C_f` and the selected neuron set
+reduces exactly to forward-only `nystrom`
+(`tests/test_nystrom_combined.py`).

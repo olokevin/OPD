@@ -1,0 +1,47 @@
+es_token gradient cosine sweep -- 2026-08-21 17:08:38
+GPU 5 (NVIDIA H100 NVL)
+Qwen3-1.7B fp32, sigma=1e-3, bernoulli (u,v), mean_baseline, seed 42
+==============================================================
+### layer=model.layers.0.mlp.down_proj n_sample=8 repeats=50 K=400
+layer model.layers.0.mlp.down_proj  W [2048, 6144]
+cosine(es_dW, true_grad) = +0.0056  (n_sample=8, repeats=50, K=400 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0056  ->  cos/theory = 0.99
+training-scale prediction (K=B*T*N=524288): cos ~= 0.200
+PASS (>=0.4x theory)
+
+### layer=model.layers.0.mlp.down_proj n_sample=8 repeats=300 K=2400
+layer model.layers.0.mlp.down_proj  W [2048, 6144]
+cosine(es_dW, true_grad) = +0.0130  (n_sample=8, repeats=300, K=2400 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0138  ->  cos/theory = 0.94
+training-scale prediction (K=B*T*N=524288): cos ~= 0.200
+PASS (>=0.4x theory)
+
+### layer=model.layers.0.mlp.down_proj n_sample=16 repeats=150 K=2400
+layer model.layers.0.mlp.down_proj  W [2048, 6144]
+cosine(es_dW, true_grad) = +0.0136  (n_sample=16, repeats=150, K=2400 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0138  ->  cos/theory = 0.98
+training-scale prediction (K=B*T*N=1048576): cos ~= 0.277
+PASS (>=0.4x theory)
+
+### layer=model.layers.0.mlp.down_proj n_sample=32 repeats=150 K=4800
+layer model.layers.0.mlp.down_proj  W [2048, 6144]
+cosine(es_dW, true_grad) = +0.0193  (n_sample=32, repeats=150, K=4800 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0195  ->  cos/theory = 0.99
+training-scale prediction (K=B*T*N=2097152): cos ~= 0.378
+PASS (>=0.4x theory)
+
+### layer=model.layers.0.self_attn.o_proj n_sample=8 repeats=50 K=400
+layer model.layers.0.self_attn.o_proj  W [2048, 2048]
+cosine(es_dW, true_grad) = +0.0084  (n_sample=8, repeats=50, K=400 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0098  ->  cos/theory = 0.86
+training-scale prediction (K=B*T*N=524288): cos ~= 0.333
+PASS (>=0.4x theory)
+
+### layer=model.layers.0.self_attn.o_proj n_sample=16 repeats=150 K=2400
+layer model.layers.0.self_attn.o_proj  W [2048, 2048]
+cosine(es_dW, true_grad) = +0.0222  (n_sample=16, repeats=150, K=2400 probes)
+theory sqrt(K/(K+d_out*d_in)) = 0.0239  ->  cos/theory = 0.93
+training-scale prediction (K=B*T*N=1048576): cos ~= 0.447
+PASS (>=0.4x theory)
+
+done 17:14:28

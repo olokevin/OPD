@@ -1,0 +1,42 @@
+es_token verification gates (branch feat/es-token-trainer, 2026-06-09)
+Model: Qwen3-1.7B (bf16, FLASH_ATTN), 112 matched decoder linears
+(qkv_proj/o_proj/gate_up_proj/down_proj x 28 layers), N=8 rails, GPU 2/3.
+
+V1  CPU unit suite (verl/tests/es_token/): 19/19 PASS
+    - Hadamard sign rails: exact pairwise orthogonality + <dW_m,dW_n>_F == 0
+      with Rademacher (u,v); deterministic per (global_seed, layer).
+    - Seeding: bit-identical regeneration; layout tiles flat noise w/o overlap.
+    - Estimator: student_iw unbiasedness (enumerated E == KL); weight_mode=none
+      teacher-cancellation degeneracy demonstrated; chunked GEMM == naive
+      outer-product loop; quadratic descent cos > 0.5.
+    - ESTokenLinear: rank-1 rail op == dense (W+dW_n)x per rail; clean rows
+      bit-identical; sigma=0 no-op; (tensor, bias) repack.
+
+V2/V3  GPU parity gates (check_es_parity.py, GPU 2): ALL PASS
+    (a) sigma=0 routing: graphed packed decode clean tokens == STOCK GREEDY
+        llm.generate, 4/4 prompts, 32 tokens, all 112 layers wrapped.
+    (b) graphed vs eager oracle (sigma=0.01): clean tokens BIT-FOR-BIT;
+        payload (per-rail logprob of sampled token) max |diff| = 0.000e+00.
+    (c) staggered-EOS (force_stop_at=[3,6,12,12]): graphed == eager
+        bit-for-bit; padded slots do not corrupt active bucket-mates.
+
+V4  gradient cosine vs autograd (check_es_grad_cosine.py, GPU 3,
+    model.layers.0.mlp.down_proj [2048 x 6144], sigma=1e-3, mean_baseline):
+      N=8,  repeats=50  (K=400):   cos = +0.0056   theory 0.0056  ratio 1.00
+      N=16, repeats=150 (K=2400):  cos = +0.0136   theory 0.0138  ratio 0.98
+    PASS at 0.98x the unbiased-isotropic-probe bound sqrt(K/(K+d_out*d_in)) --
+    the estimator extracts essentially ALL the information a rank-1 weight
+    probe carries; sqrt(K) scaling verified across K=80..2400. The ~40x gap to
+    NP's per-probe cosine (0.205 @ K=400) is exactly the d_in dimensional
+    factor of probing weight space instead of output space (plan §0 trade-off,
+    now quantified). Training-scale prediction at K = B*T*N = 524288 (64x1024,
+    N=8): per-layer cos ~= 0.20.
+
+V5  trainer e2e smoke (opd_es_token.sh, batch=4, 64 tokens, 2 steps, GPU 2,
+    co-located Keven16 4B teacher): PASS
+    - all 112 layers dW_norm > 0; weight_sync_ok = 1.0 both steps;
+      heldout probe + eval paths exercised.
+    - phase times @ smoke scale (step 1, post-warmup): decode 0.53 s,
+      teacher 0.054 s, assemble 0.34 s.
+
+V6  one-step bench vs BP-OPD: see es_token_vs_bp.txt (this run's deliverable).

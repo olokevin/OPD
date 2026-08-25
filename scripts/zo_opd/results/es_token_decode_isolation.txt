@@ -1,0 +1,26 @@
+es_token decode cost attribution -- 2026-08-21 17:15:51
+GPU 6 (NVIDIA H100 NVL)
+Qwen3-1.7B bf16, 112 matched linears, pack_width=4, greedy, sigma=0.01.
+ES_BENCH_SKIP_NOISE=1 removes the per-token fused noise draw only.
+==============================================================
+### n_sample=0 skip_noise=1
+[packed N=0] T=64: 0.211s   T=320: 0.914s
+[packed N=0] ms/token-step = 2.746   clean tok/s = 1456.6   row-steps/s = 1456.6
+RESULT {"n_sample": 0, "pack_width": 4, "rows_per_token": 4, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.21063956897705793, "t_long_s": 0.9136674096807837, "ms_per_token_step": 2.746202502748929, "clean_tok_per_s": 1456.5568256514327, "row_steps_per_s": 1456.5568256514327, "full_call_tok_per_s": 1400.9474196384056}
+
+### n_sample=0 skip_noise=
+[packed N=0] T=64: 0.223s   T=320: 0.977s
+[packed N=0] ms/token-step = 2.945   clean tok/s = 1358.1   row-steps/s = 1358.1
+RESULT {"n_sample": 0, "pack_width": 4, "rows_per_token": 4, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.22348838113248348, "t_long_s": 0.9774717297405005, "ms_per_token_step": 2.9452474555000663, "clean_tok_per_s": 1358.1201785032524, "row_steps_per_s": 1358.1201785032524, "full_call_tok_per_s": 1309.5007876491884}
+
+### n_sample=8 skip_noise=1
+[packed N=8] T=64: 0.507s   T=320: 2.399s
+[packed N=8] ms/token-step = 7.391   clean tok/s = 541.2   row-steps/s = 4870.5
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.5067164180800319, "t_long_s": 2.3989272294566035, "ms_per_token_step": 7.391448481939733, "clean_tok_per_s": 541.1659175834886, "row_steps_per_s": 4870.493258251398, "full_call_tok_per_s": 533.5718333940213}
+
+### n_sample=8 skip_noise=
+[packed N=8] T=64: 0.532s   T=320: 2.500s
+[packed N=8] ms/token-step = 7.689   clean tok/s = 520.2   row-steps/s = 4682.2
+RESULT {"n_sample": 8, "pack_width": 4, "rows_per_token": 36, "enforce_eager": true, "matched_layers": 112, "t_short": 64, "t_long": 320, "t_short_s": 0.5317309889942408, "t_long_s": 2.5000468101352453, "ms_per_token_step": 7.688733676332049, "clean_tok_per_s": 520.2417157864442, "row_steps_per_s": 4682.175442077998, "full_call_tok_per_s": 511.99041346380056}
+
+done 17:17:52

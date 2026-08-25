@@ -1,0 +1,86 @@
+es_token direct-Rademacher noise fill -- 2026-08-22
+====================================================
+H100 NVL, Qwen3-1.7B bf16, 112 matched decoder linears, d_total = 917,504.
+Follow-up to es_token_rail_op.txt, which left the per-token noise draw as the
+largest remaining fixed decode cost (0.199 ms/token-step).
+
+PROBLEM
+-------
+draw_noise(method="bernoulli") produced +-1 the long way round:
+    bits = torch.randint(0, 2, shape, generator=gen, dtype=torch.int64)  # 8 B/elt
+    n    = bits.to(torch.float32) * 2.0 - 1.0
+    out.copy_(n.to(torch.bfloat16))
+At d_total=917,504 that is an INT64 buffer of 7.34 MB per slot plus a 5-kernel
+cast/scale/copy chain: ~42 MB of traffic and ~6 kernels per slot per token to
+produce 1.83 MB of +-1. It also built a fresh torch.Generator per slot per token
+and derived the blake2b seed on the host inside the decode loop. The same routine
+was called once per token record during assembly (65,536 of them per step).
+
+FIX  (verl/verl/trainer/es_token/noise_kernel.py)
+------------------------------------------------
+Draw +-1 DIRECTLY, in the destination dtype, one Triton launch for a batch of
+rows, from Triton's counter-based Philox (tl.randint -> low bit -> +-1). No
+generator state, no host RNG, no intermediate buffer. Supporting changes:
+  - build_seed_table() derives every (token, slot) seed for a wave ONCE and
+    uploads them, so the decode loop does no blake2b and no H2D copy;
+  - assembly fills a whole chunk in ONE launch (was m x ~6 kernels per chunk).
+A torch fallback is kept (non-Triton envs, sample_method != bernoulli); it still
+avoids the int64 buffer via Tensor.random_(0, 2) straight into the destination.
+The implementation is chosen once at import, so decode and assembly can never
+disagree within a run.
+
+ISOLATED COST
+-------------
+  decode fill, one token x 4 slots     0.203 ms -> 0.015 ms   13.5x
+  assembly fill, one 1024-row chunk     38.9 ms ->  2.9 ms    13.4x
+
+CORRECTNESS
+-----------
+check_noise_parity.py -- ALL PASS:
+  [1] decode path (per-wave seed table, device-resident) == assembly path
+      (host-derived seeds, freshly uploaded), BYTE-FOR-BYTE, every token
+  [2] chunk row j == its own (t, rollout) record, 64 records
+  [3] values exactly {-1,+1}; |mean| < 0.02 per row
+  [4] distinct across t and across rollout
+  [5] regeneration bit-identical
+verl/tests/es_token/: 19/19 PASS.
+check_es_parity.py on GPU: sigma=0 == stock greedy (4/4), graphed == eager
+BIT-FOR-BIT (payload max|diff| 0.000e+00), staggered-EOS bit-for-bit. ALL PASS.
+
+NOTE: this CHANGES the noise values relative to earlier runs -- Philox counter
+mode is a different stream from torch.randint. Nothing depends on the old stream
+(no trained checkpoint exists) and both consumers moved together, which is the
+only property that matters. Visible as dW_norm_mean 239.51 -> 243.78; the clean
+trajectory is untouched (L_clean_mean bit-identical).
+
+END-TO-END (decode ms/token-step, pack_width=4)
+------------------------------------------------
+  N     original   +fused rail   +direct noise   total speedup
+  0        2.939       2.943         2.783          1.06x
+  1        6.347       3.424         3.244          1.96x
+  2        6.698       3.462         3.329          2.01x
+  4        7.264       3.651         3.481          2.09x
+  8        7.600       3.885         3.722          2.04x
+ 16        8.170       4.259         4.107          1.99x
+ 32        9.429       5.208         4.956          1.90x
+Rail overhead over clean-only decode at N=1: 3.408 -> 0.481 -> 0.461 ms.
+
+ONE FULL OPD STEP (batch 64 x 1024, N=8, all 112 linears, co-located 4B teacher)
+--------------------------------------------------------------------------------
+                     original   +fused rail   +direct noise   total
+  step_time           147.54 s     89.59 s        83.80 s     1.76x
+    decode            129.59 s     72.00 s        68.44 s     1.89x
+    teacher             4.22 s      3.95 s         4.23 s
+    assemble           13.65 s     13.56 s        11.03 s     1.24x
+  n_token_records       65,536      65,536         65,536
+  weight_sync_ok           1.0         1.0            1.0
+  L_clean_mean    0.2556177764199674 throughout (clean trajectory untouched)
+
+Ratio vs BP-OPD (61.86 s, unchanged): 2.39x -> 1.45x -> 1.35x.
+
+WHAT IS LEFT
+------------
+Decode is still 82% of the step and the noise fill is now 0.015 ms (0.5%), so
+pack_width is the only lever of consequence: the full-context scratch-KV
+reservation (2560 blocks/slot regardless of the real 1024-token budget) caps
+concurrency at 4-8 slots while BP-OPD runs 64.
