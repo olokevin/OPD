@@ -59,6 +59,13 @@ TEMPERATURE=${TEMPERATURE:-0.0}
 EVAL_INTERVAL=${EVAL_INTERVAL:-10}
 EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-500}
 GLOBAL_SEED=${GLOBAL_SEED:-42}
+# Prior-task (forgetting) probe, scored at every eval on the current ES weights.
+# Empty = off.  See docs/results/ES/es_results.md section 14.
+FORGET_TASKS=${FORGET_TASKS:-}
+FORGET_LIMIT=${FORGET_LIMIT:-2000}
+# Hydra reads a bare `a,b,c` value as an ambiguous sweep, so pass the task list in its
+# list syntax; empty stays `null`, which turns the probe off.
+if [ -n "${FORGET_TASKS}" ]; then _FORGET_ARG="[${FORGET_TASKS}]"; else _FORGET_ARG="null"; fi
 
 # ---------------- structured-mode knobs ----------------
 SUBSPACE_RANK=${SUBSPACE_RANK:-1}
@@ -79,6 +86,7 @@ else
 fi
 
 MODEL=${MODEL:-Qwen/Qwen2.5-Math-7B}
+TASK_TYPE=${TASK_TYPE:-qwen_math}   # `countdown` reuses this launcher for the forgetting study
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 TRAIN_FILE=${TRAIN_FILE:-${REPO}/datasets/es_math/math_lv3to5_qwenmath_train.parquet}
 EVAL_FILE=${EVAL_FILE:-${REPO}/datasets/es_math/math500_qwenmath_test.parquet}
@@ -131,6 +139,8 @@ python3 -m verl.trainer.main_es \
     es.temperature=${TEMPERATURE} \
     es.eval_interval=${EVAL_INTERVAL} \
     es.eval_batch_size=${EVAL_BATCH_SIZE} \
+    es.forget_tasks="${_FORGET_ARG}" \
+    es.forget_limit=${FORGET_LIMIT} \
     es.eval_before_train=true \
     es.save_best_coef=true \
     es.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} \
@@ -138,7 +148,7 @@ python3 -m verl.trainer.main_es \
     es.verbose=false \
     es.worker_extension_cls='verl.workers.rollout.vllm_rollout.es_worker_extension.WorkerExtension' \
     model.path=${MODEL} \
-    data.task_type=qwen_math \
+    data.task_type=${TASK_TYPE} \
     data.train_files=${TRAIN_FILE} \
     data.val_files=${EVAL_FILE} \
     data.train_max_samples=${TRAIN_MAX_SAMPLES} \

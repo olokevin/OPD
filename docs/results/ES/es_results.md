@@ -38,6 +38,18 @@ not the paper's 1e-3:
 |---|---|---|---|---|
 | MATH-500 @10 / @20 | 71.2 / 70.8 | **73.6 / 72.8** | 72.0 / **73.2** | 72.0 / 69.0 |
 
+**Catastrophic forgetting — a null on MATH ([§14](#14-catastrophic-forgetting--does-the-perturbation-subspace-decide-it)).**
+[arXiv:2601.20861](https://arxiv.org/abs/2601.20861) reports ES loses ~10% of its prior
+ability (HellaSwag) while learning a new task, blaming dense, large-norm updates. On
+this task **no arm forgets — `dense` included**: all six gain **+20 to +22 pp** on
+MATH-500 and move an 8-benchmark prior mean by **−0.49 to +0.20 pp** (SE ≈ 0.42), where
+the paper's effect would be ≈6.5 pp on HellaSwag. The update statistics reproduce
+(`dense` is 7.2% sparse, LayerNorm sparsest — their Figure 4) but do not *predict*:
+drift spans 100× and sparsity 7% → 99% across arms with no ordering of the deltas. The
+structured arms do land on GRPO's side of both axes at full accuracy (`insparse` 99.2%
+sparse, +21.2 pp). Re-running on the paper's own Countdown → HellaSwag pair with
+Qwen2.5-1.5B-Instruct ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair-in-flight)).
+
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
 early**. On what did run, BP reaches ES-level accuracy in ~1 h vs ~15 h, `iso` again
@@ -139,6 +151,10 @@ fixed 64-problem batch, not the method, is the ceiling.
    an intermediate-σ sweep to locate where rank-1 stops absorbing the step.
 6. **Broader benchmarks** (AIME24, AMC23, Minerva, OlympiadBench) — five ES arms now
    sit within ±1 pp on MATH-500, so a second axis is needed to separate them.
+7. **Finish the Countdown forgetting leg** ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair-in-flight)) —
+   `dense`/`fura` on GPU 1, `iso`/`isobtt` on GPU 2, ~11 h per arm. If the paper's
+   Pareto front reproduces there, the arms' geometry can finally be scored against it;
+   if it does not, the effect is specific to their implementation, not to ES.
 
 ## 1. What we are reproducing
 
@@ -1211,3 +1227,210 @@ Train reward agrees: `isobtt` 0.23 → 0.70 (s61) → **0.14 (s91)** → 0.65 (s
 (`isobtt` 5 h 45 m, `isobtt_mix` 6 h 48 m for 138 steps).
 
 <!-- BP:RESULTS END -->
+
+## 14. Catastrophic forgetting — does the perturbation subspace decide it?
+
+> **Motivation: training on edge devices.** ES is attractive there because it needs no
+> gradients, no optimizer state and no activation memory — but an on-device learner is
+> only useful if it can keep learning without destroying what the model already knows.
+> *Evolutionary Strategies lead to Catastrophic Forgetting in LLMs*
+> ([arXiv:2601.20861](https://arxiv.org/abs/2601.20861),
+> `docs/papers/26_Evolutionary Strategies lead to Catastrophic Forgetting in LLMs.pdf`)
+> says ES fails exactly that test. This section asks whether that verdict survives when
+> ES is restricted to a structured subspace — the six arms of [§7](#7-results) and
+> [§10](#10-iso-fixed-spectrum-es) already sit at a matched MATH-500 plateau while
+> differing by two orders of magnitude in exactly the update statistics the paper
+> blames.
+
+### 14.1 What the paper claims, and the handle it gives us
+
+Setup: Qwen2.5-1.5B-Instruct / Llama-3.2-1B-Instruct, 200 training examples from
+Countdown / GSM8K / MATH / OlympiadBench, ES (the Qiu et al. implementation this repo
+reproduces) vs verl GRPO, population 30. Findings:
+
+1. **Parity on the new task.** ES lands within 3–4 pp of GRPO on every task — but GRPO
+   wins almost all of them, contradicting the ES-at-Scale claim of an ES advantage.
+2. **Forgetting.** With Countdown as the new task and **HellaSwag** as the prior-ability
+   probe, ES's prior accuracy falls monotonically with iteration — **≈10% below its own
+   best** — and keeps falling *after* Countdown has converged (~200 iterations). GRPO's
+   prior accuracy is flat. Their Figure 1 is a convex Pareto front for ES and a cluster
+   in the top-right corner for GRPO.
+3. **Proposed mechanism.** ΔW = W_finetuned − W_base is measured two ways:
+   **Frobenius norm** (ES drifts ~10³× further than GRPO after 500 iterations, growing
+   monotonically) and **sparsity** — the fraction of entries with |Δ| < τ = 10⁻⁶, which
+   is ≈95% for GRPO across every layer and parameter group but near zero for ES.
+   Dense, large-norm updates ⇒ global interference ⇒ forgetting.
+
+A companion paper, *Overcoming Forgetting in LLM Fine-Tuning with Evolution Strategies*
+([arXiv:2605.30148](https://arxiv.org/abs/2605.30148)), argues the loss is *drift*
+rather than irreversible forgetting, attributes it to "random-walk behaviour in weakly
+constrained directions of the weight space", and fixes it with **Anchored Weight Decay**
+(a pull toward θ₀).
+
+**Why this repo can test the mechanism directly.** The paper's two axes are properties
+of ΔW, and [§7](#7-results)'s six arms were built to differ in exactly that while
+reaching the *same* MATH-500 plateau (71.8–72.7, one statistical tie). So the confound
+that usually blocks this question — "the arm that forgets less also learned less" — is
+already controlled. If forgetting tracked ‖ΔW‖ and density, `insparse` and `zoact`
+should be safe and `dense`/`fura`/`iso`/`isobtt` should not.
+
+### 14.2 Harness
+
+The ES trainer only stores coefficients (`es_coef_best.pt`), so measuring anything
+outside its own MATH-500 loop needs the weights back.
+
+| What | Path |
+| --- | --- |
+| Coefficients → HF checkpoint + ΔW statistics | `scripts/es/materialize_es_ckpt.py` |
+| …for all six arms | `scripts/es/materialize_all.sh` |
+| Prior-knowledge + MATH-500 eval of one model | `scripts/es/eval_forgetting.sh` |
+| …for a list of arms | `scripts/es/run_forgetting_sweep.sh` |
+| Tables in this section | `scripts/es/collect_forgetting.py` |
+| **In-loop** forgetting probe (curves) | `verl/verl/trainer/es/forget_eval.py`, `es.forget_tasks` |
+| Gate for the in-loop probe | `scripts/es/test_forget_eval.py` |
+| Curve runs | `scripts/es/run_forget_curves.sh` |
+| Materialized checkpoints / eval JSON | `/data/yequan/es/materialized/<arm>`, `/data/yequan/es/forgetting/<arm>` |
+
+Reconstruction runs the **trainer's own** `StructuredESMixin.init_es_state` +
+`es_restore` against a stub that presents the base model in vLLM's *fused* layout
+(`qkv_proj`, `gate_up_proj`), so the block sizes, the frozen `A`/`R0` factors and the
+SVD convention cannot drift from what the run used; the fused weights are then un-fused
+back to HF names. `dense`/`iso` store a full master and need no reconstruction, which
+makes them a free end-to-end check on the path.
+
+**Prior-ability suite.** HellaSwag (the paper's probe) plus the standard commonsense
+battery — PIQA, WinoGrande, ARC-Easy, ARC-Challenge, OpenBookQA, BoolQ — and MMLU for
+world knowledge. All 0-shot log-likelihood ranking through lm-eval 0.4.12
+(`acc_norm` where the task defines it, else `acc`), so nothing depends on the model
+still being able to *generate*. New-task accuracy is re-measured with the trainer's own
+prompt processor and grader (greedy, 3,000 tokens, `ttrl_math` `fast=True`), so it is
+comparable to the `eval/accuracy` curves in [§7](#7-results).
+
+**A caveat on the τ = 10⁻⁶ sparsity metric.** bf16 has ~1.6e-4 ULP at |w| ≈ 0.02, so
+for a bf16 checkpoint "sparsity at 10⁻⁶" largely counts coordinates that moved *less
+than one ULP* rather than coordinates the algorithm left alone. We therefore report the
+paper's number *and* the exact-zero fraction (`Δ = 0`, i.e. bit-identical to base); on
+these checkpoints the two agree to <0.3 pp, so the metric is measuring what it claims.
+
+### 14.3 Update geometry of the six arms
+
+ΔW = W_arm − W_base at each arm's best-MATH-500 checkpoint, in the paper's own terms.
+The six arms span **100× in drift** and **7% → 99% in sparsity** while landing within
+1.8 pp of each other on the new task:
+
+<!-- FORGET:GEOM BEGIN -->
+
+| Arm | ‖ΔW‖_F/‖W‖_F | sparsity(τ=1e-6) | untouched (Δ=0) | MATH-500 Δ | prior Δ |
+|---|---|---|---|---|---|
+| dense (paper ES) | 2.03e-02 | 7.2% | 7.2% | +22.0 | +0.00 |
+| zoact r=1 | 4.70e-04 | 95.9% | 95.7% | +20.2 | +0.20 |
+| insparse d=1% | 2.65e-03 | 99.2% | 99.2% | +21.2 | -0.07 |
+| fura small-core | 4.78e-02 | 17.1% | 17.1% | +21.6 | -0.49 |
+| iso fixed-spectrum | 2.87e-02 | 18.5% | 18.5% | +21.8 | -0.23 |
+| isobtt fixed-spec | 4.04e-02 | 17.4% | 17.4% | +21.6 | -0.19 |
+
+Layerwise sparsity by parameter group — the analogue of the paper's Figure 4:
+
+| Arm | Q | K | V | WO | MLP | LayerNorm | Embed |
+|---|---|---|---|---|---|---|---|
+| dense (paper ES) | 37% | 34% | 15% | 8% | 8% | 92% | 5% |
+| zoact r=1 | 97% | 97% | 98% | 90% | 96% | 100% | 100% |
+| insparse d=1% | 100% | 100% | 100% | 99% | 99% | 100% | 100% |
+| fura small-core | 52% | 52% | 52% | 4% | 3% | 100% | 100% |
+| iso fixed-spectrum | 52% | 52% | 52% | 5% | 5% | 100% | 100% |
+| isobtt fixed-spec | 52% | 52% | 52% | 4% | 4% | 100% | 100% |
+
+<!-- FORGET:GEOM END -->
+
+**This reproduces the paper's characterisation of `dense` ES exactly.** Our `dense`
+arm's update is 7.2% sparse — the paper's "ES updates have very low sparsity" — against
+the ~95% they measure for GRPO, and the per-group profile matches too: LayerNorm is the
+sparsest group (92%) and everything else is dense, which is their Figure-4 finding.
+
+**And two of our arms sit on GRPO's side of both axes while learning just as much.**
+`insparse d=1%` is **99.2% sparse** with 7.7× less drift than `dense`, `zoact r=1` is
+**95.9% sparse** with 43× less drift — both squarely in the range the paper reports for
+GRPO — yet they gain +21.2 and +20.2 pp on MATH-500 against `dense`'s +22.0. So a
+structured subspace does deliver the update geometry the paper says is protective,
+without giving up the new task.
+
+### 14.4 Result — nothing forgets, `dense` included
+
+<!-- FORGET:MATH BEGIN -->
+
+| Arm | σ | best @ | MATH-500 | HellaSw | PIQA | WinoG | ARC-e | ARC-c | OBQA | BoolQ | MMLU | **Prior mean** | Δ prior |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base Qwen2.5-Math-7B | - | - | 52.0 | 65.4 | 74.2 | 65.0 | 74.0 | 50.3 | 39.0 | 74.8 | 57.9 | **62.57** | +0.00 |
+| dense (paper ES) | 1e-3 | 40 | 74.0 | 65.3 | 74.5 | 65.2 | 74.3 | 50.6 | 38.8 | 74.2 | 57.7 | **62.57** | +0.00 |
+| zoact r=1 | 1e-3 | 130 | 72.2 | 65.4 | 74.4 | 64.4 | 74.5 | 50.5 | 40.2 | 74.9 | 57.8 | **62.76** | +0.20 |
+| insparse d=1% | 1e-3 | 80 | 73.2 | 65.4 | 74.1 | 64.5 | 74.0 | 50.4 | 39.2 | 74.6 | 57.7 | **62.50** | -0.07 |
+| fura small-core | 1.25e-2 | 30 | 73.6 | 65.1 | 74.0 | 64.5 | 73.2 | 49.2 | 40.4 | 73.3 | 56.9 | **62.08** | -0.49 |
+| iso fixed-spectrum | 5e-2 | 60 | 73.8 | 64.9 | 73.8 | 64.5 | 74.3 | 50.0 | 38.4 | 74.8 | 57.9 | **62.33** | -0.23 |
+| isobtt fixed-spec | 5e-2 | 120 | 73.6 | 65.0 | 74.0 | 64.9 | 73.9 | 49.7 | 38.8 | 75.2 | 57.5 | **62.38** | -0.19 |
+
+<!-- FORGET:MATH END -->
+
+Per-eval standard errors on the base model are HellaSwag 0.47, PIQA 1.02, WinoGrande
+1.34, ARC-e 0.90, ARC-c 1.46, OBQA 2.18, BoolQ 0.76, MMLU 0.40 pp; the 8-task mean has
+SE ≈ **0.42 pp** treating the tasks as independent (a paired analysis would be tighter,
+so this is the conservative bar).
+
+**The headline is a null, and it is a null on the paper's own arm.** Every arm gains
+**+20 to +22 pp** on MATH-500 and moves the prior-knowledge mean by **−0.49 to +0.20
+pp** — every one inside ±1.2 SE. `dense` — the exact algorithm the paper indicts —
+lands at **+0.00** (HellaSwag 65.40 → 65.31, −0.09 pp). For scale, the paper reports a
+**≈10% relative** HellaSwag drop, which here would be **≈6.5 pp**; the largest movement
+we see on HellaSwag in any direction is 0.54 pp.
+
+Three consequences:
+
+1. **We cannot confirm "ES ⇒ catastrophic forgetting" as a property of the algorithm.**
+   In this setting it is not one. Whatever drives the paper's curves, it is not present
+   when a 7B math-specialised base is trained with ES on in-domain MATH.
+2. **The proposed mechanism does not predict retention here.** Across the six arms,
+   drift spans 100× and sparsity spans 7% → 99%, and neither orders the prior-knowledge
+   deltas: the *densest, second-largest* update (`dense`, 7.2% sparse) is the single
+   best retainer at +0.00, while the sparsest (`insparse`, 99.2%) is −0.07 and the
+   largest-drift arm (`fura`, 4.8e-2) is −0.49. ‖ΔW‖ and sparsity are therefore not
+   sufficient statistics for forgetting — they are properties of the *optimiser*, and
+   the paper's ES-vs-GRPO contrast confounds them with everything else that differs
+   between the two algorithms.
+3. **The question "can iso-ES or fura-ES avoid forgetting?" is not answerable on this
+   task**, because there is no forgetting to avoid. What the table *does* establish is
+   the other half of the requirement: the structured arms reach full-weight ES accuracy
+   from ≤1.3% of the parameters **and** cost nothing in prior ability — which is the
+   property an edge learner actually needs, whether or not dense ES would have been
+   safe too.
+
+**Why the disagreement with the paper is plausible.** Its setting differs on four axes
+at once, each of which plausibly matters more than the optimiser: model **scale**
+(1.5B/1B vs 7B — less redundancy to spare), model **type** (instruct-tuned, whose
+prior abilities live in a thin post-training layer, vs a base model), **task distance**
+(Countdown is a format-heavy puzzle far outside the pretraining distribution; MATH lvl
+3–5 is *in-domain* for Qwen2.5-**Math**-7B), and **horizon** (500 iterations vs our
+best checkpoints at 30–130). Task distance is the one we can test directly, which is
+what §14.5 does.
+
+### 14.5 Countdown → HellaSwag: the paper's own task pair (in flight)
+
+Since the MATH leg produced no forgetting to compare against, the arms are being re-run
+on the exact pair the paper uses, on the exact model it uses:
+
+| Knob | Value |
+| --- | --- |
+| Model | **Qwen2.5-1.5B-Instruct** (the paper's model) |
+| New task | **Countdown-3to4**, 200 training problems (the paper's count), 500-problem held-out split |
+| Prior probe | HellaSwag + PIQA/WinoGrande/ARC-e/ARC-c/OBQA/BoolQ, 1000 docs each, **every 10 iterations** |
+| ES | σ = 1e-3, α = σ/2, N = 30, greedy, 512-token responses |
+| Iterations | 300 — past the ~200 where the paper says Countdown has converged but prior ability keeps falling |
+| Arms | `dense` → `fura` (GPU 1), `iso` → `isobtt` (GPU 2) |
+| Cost | ~2 min/iteration ⇒ ~11 h/arm; the probe adds 66 s per eval |
+
+Step-0 baseline (Qwen2.5-1.5B-Instruct): Countdown **8.0%**; HellaSwag 59.70, PIQA
+76.30, WinoGrande 63.20, ARC-e 76.50, ARC-c 46.00, OBQA 40.40, BoolQ 77.10, prior mean
+**62.74**. This is the run that decides whether the paper's Pareto front reproduces
+and, if it does, whether the fixed-spectrum and BTT subspaces bend it.
+
+<!-- FORGET:COUNTDOWN BEGIN -->
+_(curves land here)_
+<!-- FORGET:COUNTDOWN END -->

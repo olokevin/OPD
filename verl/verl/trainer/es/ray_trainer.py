@@ -330,7 +330,37 @@ class RayESTrainer:
         torch.cuda.empty_cache()
         
         return metrics
-    
+
+    def _evaluate_prior_tasks(self, engine, step: int) -> Dict[str, float]:
+        """Prior-ability (forgetting) probe -- arXiv:2601.20861's measurement.
+
+        Multiple-choice log-likelihood benchmarks scored on the *current* ES weights
+        through the live engine, so the run produces a forgetting curve alongside the
+        new-task curve instead of only an endpoint.  Off unless `es.forget_tasks` is set.
+        """
+        tasks = self.es_config.get('forget_tasks', None)
+        if not tasks:
+            return {}
+        if isinstance(tasks, str):
+            tasks = [t for t in tasks.replace(',', ' ').split() if t]
+        from verl.trainer.es.forget_eval import evaluate_prior_tasks
+        start = time.time()
+        limit = self.es_config.get('forget_limit', 2000)
+        metrics = evaluate_prior_tasks(
+            engine, self.tokenizer, tasks,
+            limit=(None if not limit or limit < 0 else int(limit)),
+            batch_size=int(self.es_config.get('forget_batch_size', 512)),
+            max_len=int(self.es_config.get('forget_max_len', 4096)),
+        )
+        metrics['forget/time'] = time.time() - start
+        print(f"[Forget @ step {step}] " +
+              " ".join(f"{k.split('/')[-1]}={v:.2f}" for k, v in metrics.items()
+                       if k != 'forget/time') +
+              f" time={metrics['forget/time']:.1f}s")
+        gc.collect()
+        torch.cuda.empty_cache()
+        return metrics
+
     def init_workers(self, model_path: str):
         """Initialize vLLM workers and NCCL communication."""
         print(f"Launching {self.es_config.num_engines} vLLM engines...")
@@ -470,6 +500,9 @@ class RayESTrainer:
             base_metrics = self._evaluate_model(self.engines[0], self.eval_data, 0, logger)
             logger.log(data=base_metrics, step=0)
             best_metric = base_metrics.get('eval/accuracy', float('-inf'))
+        prior0 = self._evaluate_prior_tasks(self.engines[0], 0)
+        if prior0:
+            logger.log(data=prior0, step=0)
 
         # Training loop
         progress_bar = tqdm(range(num_iterations), desc="ES Training")
@@ -605,6 +638,9 @@ class RayESTrainer:
                 logger.log(data=eval_metrics, step=step)
                 acc = eval_metrics.get('eval/accuracy', float('-inf'))
                 logger.log(data={"eval/best_accuracy": max(best_metric, acc)}, step=step)
+                prior_metrics = self._evaluate_prior_tasks(self.engines[0], step)
+                if prior_metrics:
+                    logger.log(data=prior_metrics, step=step)
                 if acc > best_metric:
                     best_metric = acc
                     if save_best:

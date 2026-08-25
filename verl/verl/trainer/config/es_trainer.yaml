@@ -25,6 +25,16 @@ es:
   eval_batch_size: 512
   eval_max_tokens: null  # null -> reuse es.max_tokens
 
+  # ---- Prior-task (forgetting) probe -------------------------------------------
+  # Multiple-choice log-likelihood benchmarks scored on the current ES weights at every
+  # eval, so a run produces the forgetting curve of arXiv:2601.20861 next to the
+  # new-task curve.  Empty/null disables it.  lm-eval task names, e.g.
+  # "hellaswag,arc_easy,arc_challenge,winogrande,piqa,openbookqa,boolq".
+  forget_tasks: null
+  forget_limit: 2000       # docs per task (-1 = full); HellaSwag val is 10042
+  forget_batch_size: 512
+  forget_max_len: 4096
+
   # Problems rolled out per ES iteration, resampled from the training pool each
   # iteration (reference impl: DataLoader(shuffle=True), batch_size=1024 for math).
   # 0 = use the whole pool as one fixed batch (old behaviour).

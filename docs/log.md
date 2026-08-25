@@ -398,3 +398,32 @@ gradient-cosine results, and the negative learning result. Corrected in results/
 + summary/wall-clock tables + §1/§4/§6.4/§7.5/§8.3 relabels, wiki/es_token_trainer.md, index.md.
 -> `docs/results/zo_opd.md` §10, raw `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`,
 harness `scripts/zo_opd/es_token_checks/bench_rm_stages.py`
+
+## [2026-08-24] ingest | ES catastrophic forgetting: MATH leg is a null, Countdown leg launched
+
+Source: *Evolutionary Strategies lead to Catastrophic Forgetting in LLMs*
+([arXiv:2601.20861](https://arxiv.org/abs/2601.20861), PDF added to `docs/papers/`) plus
+its companion *Overcoming Forgetting in LLM Fine-Tuning with Evolution Strategies*
+([arXiv:2605.30148](https://arxiv.org/abs/2605.30148), Anchored Weight Decay).
+Motivation: edge-device training, where continual learning without forgetting is the
+requirement.
+
+New harness — `scripts/es/materialize_es_ckpt.py` + `materialize_all.sh` (ES coefficient
+blobs → HF checkpoints + ΔW statistics, reusing the trainer's own `init_es_state` /
+`es_restore` so the factorisation cannot drift), `scripts/es/eval_forgetting.sh` +
+`run_forgetting_sweep.sh` (HellaSwag/PIQA/WinoGrande/ARC/OBQA/BoolQ/MMLU via lm-eval
+0.4.12 + MATH-500 with the trainer's grader), `scripts/es/collect_forgetting.py`,
+`verl/verl/trainer/es/forget_eval.py` (in-loop probe wrapping the live ES vLLM engine as
+an lm-eval model; `es.forget_tasks` knob, gate `scripts/es/test_forget_eval.py` matches
+lm-eval's own vLLM backend to 0.0000), `scripts/es/prepare_countdown_data.py`,
+`run_countdown_es.sh`, `chain_countdown.sh`, `run_forget_curves.sh`.
+Materialization validated end-to-end: every arm's re-measured MATH-500 reproduces its
+logged best (dense 74.0, iso 73.8, fura 73.6, isobtt 73.6, insparse 73.2, zoact 72.2).
+
+Result (`results/ES/es_results.md` §14): **null on MATH** — all six arms gain +20–22 pp
+MATH-500 for −0.49…+0.20 pp on an 8-benchmark prior mean (SE 0.42), `dense` ES at +0.00.
+The paper's ΔW statistics reproduce for `dense` (7.2% sparse; LayerNorm sparsest, their
+Fig. 4) but do not predict retention: drift spans 100× and sparsity 7% → 99% across arms
+with no ordering of the prior-knowledge deltas. `insparse d=1%` reaches GRPO-like
+geometry (99.2% sparse, 7.7× less drift) at +21.2 pp. Countdown → HellaSwag on
+Qwen2.5-1.5B-Instruct now running (dense/fura GPU 1, iso/isobtt GPU 2, ~11 h/arm).
