@@ -47,6 +47,80 @@ tracks `dense`, and the orthogonal input mixer is the best and most stable arm w
 ⚠️ **ES and BP numbers are not comparable as they stand**: ES evaluates greedy (n=1),
 BP evaluates mean@4 at T=1.0. The same base model reads **51.6 greedy vs 19.4 sampled**.
 
+### Leaderboard
+
+Best configuration of each method, ES side, on the 150-iteration fixed-batch protocol
+(greedy MATH-500). Ranked by **plateau mean over steps ≥ 40** — the honest statistic,
+since "best" is a max over 16 noisy evals:
+
+| # | Method | Best config | Trainable | Base | **Plateau (≥40)** | Best @ step |
+|---|---|---|---|---|---|---|
+| 1 | **fura** — BTT small core | σ=1.25e-2 (σ+α matched) | 97.8 M · 1.28% | 53.2 | **72.68 ± 0.90** | 74.0 @ 30 |
+| 2 | **iso** — fixed spectrum | σ=5e-2 | 141.1 M† · 1.85% | 51.6 | **72.42 ± 0.78** | 74.0 @ 60 |
+| 3 | insparse d=1% | σ=1e-3 | 65.4 M · 0.86% | 51.6 | 72.07 ± 0.70 | 73.4 @ 80 |
+| 4 | **isobtt** — fixed per-block spectrum | σ=5e-2 | 48.5 M† · 0.64% | 53.2 | 71.95 ± 0.94 | 73.4 @ 120 |
+| 5 | dense (paper ES) | σ=1e-3 | 7.62 B · 100% | 51.6 | 71.82 ± 1.19 | 73.4 @ 40 |
+| 6 | zoact r=1 | σ=1e-3 | 1.39 M · 0.018% | 51.6 | 70.50 ± 0.94 | 72.2 @ 130 |
+
+† manifold dimension searched per step, not a coefficient count ([§2](#2-the-six-runs)).
+`fura`/`isobtt` start from 53.2 rather than 51.6 (bf16 BTT reconstruction, [§6](#6-numerical-health)),
+so read their deltas against their own base.
+
+**Ranks 1–5 span 0.86 pp against a per-eval SE of 2.24 pp — they are one tie.** The only
+separable result is that rank-1 `zoact` is genuinely behind. Everything else says the
+same thing as [§7](#7-results): at matched weight-space footprint the subspace barely
+matters, and *every* structured method reaches full-weight ES from ≤1.3% of the
+parameters.
+
+Off-protocol but the strongest operating point found so far — dense ES with the
+official **resampled** batch ([§12](#12-alignment-with-the-official-implementation)),
+20 iterations only, so no plateau statistic:
+
+| dense, aligned/resampled | σ=1e-3 | **σ=2e-3** | **σ=4e-3** | σ=8e-3 |
+|---|---|---|---|---|
+| best @ step | 71.2 @ 10 | **73.6 @ 10** | **74.4 @ 15** | 72.0 @ 10 |
+
+BP side (GRPO), **mean@4 at T=1.0 — a different metric**; the same base model reads
+19.4 here and 51.6 greedy, so these numbers do not belong in the table above:
+
+| Method | Steps | Base | Best @ step | Status |
+|---|---|---|---|---|
+| **isobtt_mix** — + orthogonal input mixer | 138/138 | 19.4 | **72.7 @ 100** | complete, stable |
+| isobtt | 138/138 | 19.4 | 69.0 @ 138 | complete, collapsed mid-run |
+| dense | 22 ✗ | 19.5 | 66.0 @ 20 | SIGTERM — re-run needed |
+| iso | 20 ✗ | 19.4 | 66.0 @ 20 | CUDA illegal memory access — re-run needed |
+
+### Curves — best variant of each method
+
+Greedy MATH-500, eval every 10 iterations. One column per method, each showing the
+config that tops the leaderboard above.
+
+| step | dense | zoact | insparse | fura | iso | isobtt |
+|---|---|---|---|---|---|---|
+| 0 | 51.6 | 51.6 | 51.6 | 53.2 | 51.6 | 53.2 |
+| 10 | 70.8 | 58.8 | 66.4 | 70.4 | 70.2 | 68.2 |
+| 20 | 71.4 | 66.0 | 68.4 | **73.4** | 72.4 | 68.0 |
+| 30 | 72.4 | 66.4 | 71.0 | **74.0** | 71.4 | 71.2 |
+| 40 | **73.4** | 70.2 | 71.4 | 72.0 | 71.8 | 70.8 |
+| 50 | 69.6 | 69.8 | 71.8 | 73.8 | 72.2 | 71.0 |
+| 60 | 71.6 | 70.4 | 72.2 | 73.8 | **74.0** | 72.8 |
+| 70 | 73.0 | 70.6 | 72.4 | 73.4 | 72.2 | 71.0 |
+| 80 | 72.0 | 70.0 | **73.4** | 73.0 | 72.6 | 72.6 |
+| 90 | 73.2 | 69.0 | 73.0 | 71.0 | 73.2 | 70.6 |
+| 100 | 71.4 | 69.4 | 72.2 | 71.8 | 71.8 | 72.2 |
+| 110 | 70.6 | 70.4 | 72.2 | 71.8 | 71.0 | 71.4 |
+| 120 | 72.2 | 71.8 | 72.2 | 73.6 | 72.2 | **73.4** |
+| 130 | 70.4 | **72.2** | 71.6 | 72.8 | 72.4 | 72.6 |
+| 140 | 72.8 | 70.8 | 71.6 | 72.8 | 73.2 | 72.2 |
+| 150 | 71.6 | 71.4 | 70.8 | 72.4 | 72.4 | 72.8 |
+
+Shape, not level, is what separates them: `fura` and `iso` are **fastest** (73.4 / 72.4
+by step 20, where dense is at 71.4 and needs 40 to reach 73.4); `zoact` is the clear
+laggard early (58.8 @ 10) and never fully closes; `insparse` and `isobtt` rise slowly
+but land in the same band. After ~step 40 every column is flat inside ±1.5 pp — which
+is [§11.1](#111-the-64-problem-batch-is-the-ceiling-not-the-method)'s point that the
+fixed 64-problem batch, not the method, is the ceiling.
+
 ### Next steps
 
 1. **Re-run BP `dense` and `iso`** to 138 steps — two of four arms are missing, so the

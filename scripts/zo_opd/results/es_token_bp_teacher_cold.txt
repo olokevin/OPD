@@ -1,0 +1,72 @@
+BP-OPD's teacher phase is not slow -- the 35.61 s was a COLD step-1
+====================================================================
+2026-08-24. Triggered by "why is BP-opd teacher so slow?".
+Every ES/BP ratio in docs/results/zo_opd.md before today divided by a single
+cold BP step (61.86 s). ~25 s of that is one-time warm-up inside the teacher.
+
+(1) MICROBENCHMARK of the reward path -- what compute_rm_score CAN cost
+-----------------------------------------------------------------------
+scripts/zo_opd/es_token_checks/bench_rm_stages.py, H100 NVL (GPU 7), warm
+iteration. One micro-batch = 8 seqs x 1112 tok (= the shipped
+reward.micro_batch_size_per_gpu=8); 8 micro-batches per step (64 seqs).
+Teacher Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500, bf16.
+Logits per micro-batch: 8896 x 151936 bf16 = 2.52 GiB.
+
+  stage                                     ms/micro-batch   s/step (x8)   share
+  transformer fwd + lm_head                          324.7          2.60   85.8%
+  logits.div_(teacher_temperature)                     1.6          0.01    0.4%
+  _compute_entropy_safe (logging only)                21.1          0.17    5.6%
+  logprobs_from_logits                                 1.7          0.01    0.4%
+  teacher top-K + overlap masks                       29.4          0.24    7.8%
+  TOTAL                                              378.5          3.03  100.0%
+
+Note: use_fused_kernels=False and compute_entropy is hard-coded True in
+RewardModelWorker._forward_micro_batch, so full-vocab logits are ALWAYS
+materialised -- but all the full-vocab reductions together are only 0.42 s
+of a step. Wrapping the teacher in the FSDP1 CPUOffload(offload_params=True)
+that fsdp_workers.py:1883 hard-wires changed nothing: 333.1 ms warm vs
+324.7 ms unwrapped (world_size=1 -> FSDP falls back to NO_SHARD).
+
+(2) THE 138-STEP RUN -- what it actually costs
+-----------------------------------------------
+logs/train/bp_opd_20260823_010128.log, timing_s/compute_rm_score per step:
+
+  step        1      2      3      4   ...    138
+  rm_score  29.15   3.82   3.86   4.82        3.57
+  median over steps 4..138 = 3.80   (min 3.46, max 7.31)
+
+3.80 s steady vs 3.03 s predicted -- the microbenchmark is the floor and the
+run pays modest co-tenancy overhead on top. Step 1 pays the teacher's first
+CPU->GPU param fetch, kernel autotune, and first-touch allocation of the
+2.52 GiB logits + 2.49 GiB fp32 entropy buffers into an allocator that
+already holds vLLM's 55% reservation.
+
+(3) THE CORRECTED ES-vs-BP VERDICT
+-----------------------------------
+Steady-state medians, both runs launched by
+scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh, batch 64 x 1024, TEMPERATURE=1.0,
+same GPU, first 3 steps dropped.
+  ES: logs/train/opd_es_token_N8_pw64_lr1e-4_20260823_040914.log (146 steps)
+  BP: logs/train/bp_opd_20260823_010128.log                      (135 steps)
+
+  phase                 ES-token    BP-OPD    ES/BP
+  decode / gen             23.06      9.85    2.34x
+  teacher                   3.10      3.80    0.82x
+  grad + update            10.89      9.63    1.13x
+  ONE STEP                 37.17     25.11    1.48x
+
+  BP breakdown: gen 9.85 | compute_log_prob 2.03 | compute_rm_score 3.80 |
+                compute_distillation_reward 0.43 | reward 7.47 | adv 0.13 |
+                update_actor 7.47 | step 25.11
+
+WITHDRAWN:  "ES/BP 0.69x -- es_token is faster than BP-OPD"  (zo_opd.md 8.3)
+WITHDRAWN:  "teacher phase 8.4x / 10x faster than BP's"      (zo_opd.md 1, 4)
+UNAFFECTED: the 147.54 -> 42.67 s step (3.46x) and 129.59 -> 25.40 s decode
+            (5.10x) gains -- measured cold-vs-cold on one harness; the
+            gradient-cosine results; the negative learning result.
+
+Cold penalty asymmetry is the whole story: ES 42.67 -> 37.17 s = 13% (its
+teacher is the vLLM engine that just ran decode, already warm); BP 61.86 ->
+25.11 s = 146% (its teacher is a separate FSDP module whose first forward of
+the run happens inside the timed phase). Any future ES-vs-BP number must be a
+steady-state median, not a step-1 reading.

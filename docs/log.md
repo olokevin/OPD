@@ -371,3 +371,30 @@ two rows plus the expanded zo_opd summary, while main-only rows (`fura_grpo`, `E
 were preserved; the eight es_token log entries were interleaved by date rather than appended.
 Pre-existing stale link noticed, not touched: `index.md` still lists `results/fura_opd.md`, deleted
 in 365857a.
+
+## [2026-08-24] correction | BP-OPD's teacher was never slow — every ES/BP ratio used a COLD BP step
+
+User asked why BP-OPD's teacher phase costs 35.61 s when es_token's costs 4.2 s. It does not.
+**(1) The reward path cannot cost that.** `RewardModelWorker._forward_micro_batch` always
+materialises full-vocab logits (`use_fused_kernels=False`, and `compute_entropy` is hard-coded True
+for a logging metric, so `need_logits` is always set) — 2.52 GiB per micro-batch. Replaying one
+micro-batch (8 seqs x 1112 tok = the shipped `reward.micro_batch_size_per_gpu=8`) on the real
+Qwen3-4B teacher prices the whole thing at **3.03 s/step**: transformer fwd + lm_head 2.60, top-K +
+overlap 0.24, `_compute_entropy_safe` 0.17, `logprobs_from_logits` 0.01, `div_` 0.01. The FSDP1
+`CPUOffload(offload_params=True)` the reward worker hard-wires (fsdp_workers.py:1883) is not it
+either — 333 ms warm vs 325 unwrapped. **(2) It is cold start.** In the 138-step BP run
+`timing_s/compute_rm_score` is **29.15 s at step 1 and 3.80 s median over the next 137** (min 3.46,
+max 7.31), matching the microbenchmark: step 1 pays the teacher's first CPU→GPU param fetch, kernel
+autotune, and first-touch allocation of the 2.52 GiB logits + 2.49 GiB fp32 entropy buffers into an
+allocator already holding vLLM's 55% reservation. **(3) The headline was wrong.** Every ES/BP ratio
+on the page divided by that 61.86 s cold step. Steady-state medians, both runs from
+`launch_zo_opd_q34b_1p7b.sh` (batch 64x1024, T=1.0, same GPU, first 3 steps dropped): **ES 37.17 s
+vs BP 25.11 s = 1.48x**, not 0.69x — decode 23.06 vs 9.85 (2.34x), teacher 3.10 vs 3.80 (**0.82x**,
+not 8-10x), grad+update 10.89 vs 9.63 (1.13x). Cold penalties differ 13% (ES: teacher is the
+already-warm vLLM engine) vs 146% (BP: separate FSDP module firing first inside the timed phase).
+WITHDRAWN: "es_token is faster than BP-OPD" and "teacher phase 8.4x/10x faster than BP's".
+UNAFFECTED: the 3.46x step / 5.10x decode optimisation gains (cold-vs-cold on one harness), the
+gradient-cosine results, and the negative learning result. Corrected in results/zo_opd.md §10 (new)
++ summary/wall-clock tables + §1/§4/§6.4/§7.5/§8.3 relabels, wiki/es_token_trainer.md, index.md.
+-> `docs/results/zo_opd.md` §10, raw `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`,
+harness `scripts/zo_opd/es_token_checks/bench_rm_stages.py`

@@ -57,12 +57,12 @@ Full record: `scripts/zo_opd/results/es_token_gates.txt`.
 | Phase | NP V3 (measured, wiki §11.4) | **es_token (measured)** | BP-OPD (same-box, step-1) | why es_token wins vs NP |
 |---|---|---|---|---|
 | decode / generation | 1368 s | **128.3 s (10.7×)** | 11.0 s (gen) | no per-rail RNG (one fused draw/slot/token vs 896 `draw_noise`/token = 74% of NP decode), no per-token D2H captures, no per-token full sync; steady 7.9 s/wave |
-| teacher score | ~250 s | **4.2 s (60×)** | 41.7 s (reward) | sampled-token = one `prompt_logprobs` prefill per rollout; **10× faster than BP's own teacher phase** |
+| teacher score | ~250 s | **4.2 s (60×)** | 41.7 s (reward) | sampled-token = one `prompt_logprobs` prefill per rollout; ~~10× faster than BP's own teacher phase~~ — **the 41.7 s is BP's cold step-1; its steady-state teacher phase is 3.80 s, i.e. ~20% *cheaper* than es_token's** |
 | gradient + update | 835 s (assemble) | **13.2 s (63×)** | 15.0 s (log_prob + update_actor) | chunked GEMMs from seed-regenerated noise; no per-token Python loop; **at parity with BP's backward** |
 | **one-step total** | **2472 s** | **145.8 s (17×)** | **62.7 s** | |
 | peak GPU mem | 82,372 MiB | 85,129 MiB | 71,710 MiB | |
 
-**Ratio es_token / BP = 2.33× (cold step-1; ≈5.3× vs the prior A800 steady-state 27.5 s) — down from NP V3's 46×/90×.** 65,536 token-records (64×1024, no early EOS), `weight_sync_ok = 1.0`. Full table: `scripts/zo_opd/results/es_token_vs_bp.txt`.
+**Ratio es_token / BP = 2.33× against BP's cold step-1; against BP's measured steady state (25.11 s) it is 5.88×** — down from NP V3's 46×/90×. See [results/zo_opd.md §10](../results/zo_opd.md) — every BP-denominated ratio on this page uses the cold step unless it says otherwise. 65,536 token-records (64×1024, no early EOS), `weight_sync_ok = 1.0`. Full table: `scripts/zo_opd/results/es_token_vs_bp.txt`.
 
 **Reading.** es_token closes essentially all of NP's *engineering* overhead: decode sits at the memory-bound rail floor (≈7.8 ms/token-step for 36 rows × 28 layers), teacher scoring is now *faster* than BP's, and assembly is at parity with BP's backward+optimizer. The entire remaining 2.3× lives in decode and is structural, not glue — and the [2026-08-21 profile](../results/zo_opd.md#2-decode-throughput--clean-decode-only-vs-clean--n-parallel-perturbed-rails) pins down which part: the hand-driven graphed loop is **not** the cost (clean-only decode is 2.939 ms/token-step vs stock vLLM's own graphed decode at 2.831 ms **at the same concurrency**, a 4% overhead), so the earlier "~511 vs 1134 tok/s" reading was a *concurrency* gap, not a driver gap. What costs is (a) running 1+N=9 rows per token (2.6× the clean per-token-step) and (b) being limited to 4 concurrent sequences where BP runs 64. Next levers, in order, now quantified: **(1) `pack_width`** — 4→8 buys 1.80× clean throughput for +11% per-step cost, and 16 fails only on the full-context scratch-KV reservation (2560 blocks/slot regardless of the real 1024-token budget), so shrinking that reservation is the single highest-leverage fix; **(2) the rank-1 rail op itself** — 60% of the per-token-step cost lives in the 112 wrapped linears (the fused noise draw is only 4%); **(3) larger N** — rails cost just +0.10 ms each, so N=32 gives 4× the probes (2× cosine) for 1.24× the time, though it does not help wall-clock. Per-probe gradient quality is at the rank-1 weight-probe information bound (§3; re-confirmed at 0.86–0.99× the bound across two layer shapes, and rails ≡ repeats at equal K) — learning-quality runs (LR sweep first) are the open follow-up.
 
@@ -99,7 +99,7 @@ Standalone profile of the three axes, on H100 NVL, filed in
 | `bench_decode_throughput.py` + `sweep_decode_throughput.sh` | ms/token-step (T=64→320 slope) for clean-only (N=0) and N=1..32, plus `pack_width` | clean-only within 4% of stock vLLM at equal concurrency; +0.10 ms/rail; pw 4→8 = 1.80× |
 | `sweep_stock_batch.sh` | stock vLLM tok/s vs concurrency, eager **and** cudagraph | 1,413 → 13,975 tok/s for B=4 → 64; eager stock is 3× pessimistic (a measurement trap) |
 | `sweep_decode_isolation.sh` | `ES_BENCH_SKIP_NOISE` deltas | 36% bare decode / 4% noise / 60% rail compute |
-| `bench_es_token_vs_bp.sh` | one full OPD step vs BP-OPD | 147.54 s vs 61.86 s = 2.39× (June's 2.33× reproduced) |
+| `bench_es_token_vs_bp.sh` | one full OPD step vs BP-OPD | 147.54 s vs 61.86 s **cold** = 2.39× (June's 2.33× reproduced); vs BP steady 25.11 s = 5.88× |
 
 ## 7. Fused rail kernel (2026-08-22) — the fixed rail overhead, removed
 
@@ -129,7 +129,7 @@ is only `bucket × n_sample` programs, so the kernel is latency-bound and large 
 | decode ms/token-step, N=8 | 7.600 | **3.885** |
 | **one OPD step** (64×1024, N=8) | **147.54 s** | **89.59 s** (1.65×) |
 | — decode | 129.59 s | 72.00 s |
-| **ratio vs BP-OPD** (61.86 s) | 2.39× | **1.45×** |
+| **ratio vs BP-OPD** (61.86 s — cold) | 2.39× | **1.45×** |
 
 All gates re-run and still green: 19/19 CPU tests, `check_rail_op_parity.py` ≤3.0e-06 vs the shipping
 op, and on GPU σ=0 ≡ stock greedy / graphed ≡ eager bit-for-bit / staggered-EOS bit-for-bit. The
@@ -162,7 +162,7 @@ implementation is chosen once at import so **decode and assembly can never disag
 | decode ms/token-step, N=8 | 3.885 | **3.722** |
 | assemble phase | 13.56 s | **11.03 s** |
 | **one OPD step** | 89.59 s | **83.80 s** |
-| **ratio vs BP-OPD** | 1.45× | **1.35×** |
+| **ratio vs BP-OPD** (cold) | 1.45× | **1.35×** |
 
 `check_noise_parity.py` gates the invariant the design rests on and **all pass**: the decode path
 (per-wave seed table) and the assembly path (host-derived, freshly uploaded seeds) produce
@@ -175,7 +175,7 @@ nothing depended on the old stream and both consumers moved together. Visible on
 `dW_norm_mean` 239.51 → 243.78.
 
 **Cumulative across §7 + §8**: one OPD step **147.54 → 83.80 s (1.76×)**, decode 129.59 → 68.44 s,
-ES/BP 2.39× → **1.35×**. Decode is now 82% of the step and `pack_width` is the only lever of
+ES/BP 2.39× → **1.35×** (against BP's cold step; see zo_opd.md §10). Decode is now 82% of the step and `pack_width` is the only lever of
 consequence left.
 
 ## 9. Budget-sized scratch-KV (2026-08-23) — pack_width unlocked
@@ -201,5 +201,5 @@ change is provably byte-neutral. The gate checks output-neutrality vs the old re
 
 One OPD step (64 × 1024, N=8): **83.80 → 42.67 s**, decode 68.44 → 25.40 s.
 **Cumulative over §7–§9: 147.54 → 42.67 s (3.46×), decode 129.59 → 25.40 s (5.10×), and the ratio vs
-BP-OPD goes 2.39× → 0.69× — es_token is now faster than BP.** Assembly (13.2 s, 31%) is the next
+BP-OPD goes 2.39× → 0.69× **against BP's cold step-1**. That is NOT a trainer-vs-trainer result: BP's steady-state step is 25.11 s (its 61.86 s step-1 carries ~25 s of one-time teacher warm-up), so the honest ratio is **ES 37.17 / BP 25.11 = 1.48×** — es_token is still slower. See [results/zo_opd.md §10](../results/zo_opd.md).** Assembly (13.2 s, 31%) is the next
 lever, not decode.

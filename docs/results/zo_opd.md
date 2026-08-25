@@ -19,12 +19,14 @@ Wall-clock is settled and positive; learning is not. Each row is one session bel
 | **2026-08-21**  | Profiling. Gradient cosine sits at**0.86–0.99× the rank-1 weight-probe bound** `sqrt(K/(K+d_out·d_in))`; rails ≡ repeats at equal K. Clean decode through the custom graphed driver is only **4% over stock vLLM** at equal concurrency — the residual gap is *concurrency*, not driver overhead.                                                            | **147.5 s** — 2.39× (reproduces June within 1.2%)      |
 | **2026-08-22**  | The fixed `N=0→1` rail cost (+3.41 ms) was **CUDA-graph node count** (1568 nodes/token at ~2.3 µs), not the RNG. Fused Triton rail kernel → rail op 10.8× cheaper.                                                                                                                                                                                                    | **89.6 s** — 1.45×                                     |
 | **2026-08-22b** | Rademacher noise drawn**directly in the destination dtype** via a Triton Philox kernel, shared by decode and assembly (gated byte-for-byte); fill 13.5× cheaper.                                                                                                                                                                                                           | **83.8 s** — 1.35×                                     |
-| **2026-08-23**  | Scratch-KV reserved to (prompt +`max_tokens`) instead of `max_model_len` → `pack_width` 4→64, a 64-prompt batch in **one wave**. Cumulative 3.46× on the step, 5.10× on decode.                                                                                                                                                                                   | **42.7 s** — **0.69×, ES is faster than BP-OPD** |
+| **2026-08-23**  | Scratch-KV reserved to (prompt +`max_tokens`) instead of `max_model_len` → `pack_width` 4→64, a 64-prompt batch in **one wave**. Cumulative 3.46× on the step, 5.10× on decode.                                                                                                                                                                                   | **42.7 s** — 0.69× vs BP's *cold* step (§10 corrects this) |
 | **2026-08-23b** | First training runs. Shipped `lr=1e-3` **degrades** the model (probe KL 0.22→1.16, MATH-500 5%→0%). Measurement trap: `train/L_clean_mean` is data-driven noise and cannot rank LRs; only the fixed 16-prompt heldout probe can, and its floor is ±8%.                                                                                                               | —                                                             |
 | **2026-08-23c** | **NEGATIVE.** 150 steps at `lr=1e-4`: probe 0.2126→0.2228, entirely inside the noise floor; MATH-500 shows no trend. Bracket is 1e-3 destroys / 1e-4 does nothing, with no recipe found between. **Not ES-specific** — the BP-OPD baseline was equally flat, implicating the setup (every rollout hits the 1024-token cap without EOS) rather than the algorithm. | 37.2 s/step, 92.9 min total                                    |
+| **2026-08-24** | **CORRECTION.** The BP reference every ratio above was divided by (61.86 s) is BP's **cold step 1**. `compute_rm_score` is 29.15 s at step 1 and **3.80 s median over the next 137 steps**; a from-scratch microbenchmark of the reward path predicts 3.03 s. So BP's teacher phase was never slow, and the honest verdict is **ES/BP = 1.48×**, not 0.69×. | ES 37.17 vs BP **25.11 s** steady |
 
-**Bottom line:** the estimator is at its information bound and the trainer is now faster per step than
-BP-OPD, but neither es_token nor its BP baseline learns on this setup. Prerequisites before judging
+**Bottom line:** the estimator is at its information bound and the step is 3.46× cheaper than where it
+started, but at steady state es_token is still **1.48× slower** than BP-OPD (§10), and neither it nor
+its BP baseline learns on this setup. Prerequisites before judging
 es_token as a method: fix truncation, then get a probe that can resolve the effect, then sweep LR
 between 1e-4 and 1e-3 (§9.5).
 
@@ -33,33 +35,47 @@ between 1e-4 and 1e-3 (§9.5).
 One full OPD step, identical config throughout — batch 64 × 1024 tokens, N=8 rails, all 112 decoder
 linears, Qwen3-4B teacher co-located with the Qwen3-1.7B student on one H100 NVL. Seconds.
 
-| variant | decode | teacher | grad + update | **step** | **vs BP** |
-|---|---:|---:|---:|---:|---:|
-| ES v0 — PyTorch rails, `randint` noise, `pack_width=4` | 129.59 | 4.22 | 13.65 | **147.54** | 2.39× |
-| ES + fused Triton rail kernel (§6) | 72.00 | 3.95 | 13.56 | **89.59** | 1.45× |
-| ES + direct Rademacher noise (§7) | 68.44 | 4.23 | 11.03 | **83.80** | 1.35× |
-| ES + budget-sized scratch-KV, `pack_width` 4→64 (§8) | **25.40** | 3.99 | 13.18 | **42.67** | **0.69×** |
-| **BP-OPD `token_reward_direct`** (reference) | 14.58 | 35.61 | 13.94 | **61.86** | 1.00× |
-| NP-V3, the prior ZO trainer (same task, for scale) | — | — | — | **2472** | 40× |
+### The optimisation progression (cold step-1 bench)
 
-Cumulative over §6–§8: step **147.54 → 42.67 s (3.46×)**, decode **129.59 → 25.40 s (5.10×)**.
+| variant | decode | teacher | grad + update | **step** |
+|---|---:|---:|---:|---:|
+| ES v0 — PyTorch rails, `randint` noise, `pack_width=4` | 129.59 | 4.22 | 13.65 | **147.54** |
+| ES + fused Triton rail kernel (§6) | 72.00 | 3.95 | 13.56 | **89.59** |
+| ES + direct Rademacher noise (§7) | 68.44 | 4.23 | 11.03 | **83.80** |
+| ES + budget-sized scratch-KV, `pack_width` 4→64 (§8) | **25.40** | 3.99 | 13.18 | **42.67** |
 
-**Reading it by phase**, shipped ES (row 4) against BP:
+Cumulative: step **147.54 → 42.67 s (3.46×)**, decode **129.59 → 25.40 s (5.10×)**. These rows are
+cold-vs-cold on one harness, so they measure the optimisations against each other correctly.
 
-- **decode 25.40 vs 14.58 s (1.74×)** — the only phase where ES is behind, and it is now a
+### The ES-vs-BP verdict (steady state)
+
+Earlier revisions of this page divided every row above by a **single cold BP step (61.86 s)** and
+concluded es_token had overtaken BP. It has not — §10 shows 25 s of that 61.86 was one-time teacher
+warm-up. Both columns below are **medians over a full run**, same launcher
+(`scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`), same batch 64 × 1024, T=1.0, same GPU:
+
+| phase | ES-token (146 steps) | BP-OPD (135 steps) | ES / BP |
+|---|---:|---:|---:|
+| decode / `gen` | 23.06 | 9.85 | 2.34× |
+| teacher scoring | 3.10 | 3.80 (`rm_score`) | 0.82× |
+| grad + update | 10.89 (assemble) | 9.63 (`log_prob` + `adv` + `update_actor`) | 1.13× |
+| **one step** | **37.17** | **25.11** | **1.48×** |
+
+**Reading it by phase:**
+
+- **decode 23.06 vs 9.85 s (2.34×)** — the only phase where ES is materially behind, and it is a
   *concurrency* cost, not driver overhead: clean decode through the graphed packed driver is within
   4% of stock vLLM at equal concurrency (§2), and each rail after the first adds only
   ~0.10 ms/token-step (§2, §6.4).
-- **teacher 3.99 vs 35.61 s (8.9× cheaper)** — ES scores only the sampled token per position,
-  while BP's reward phase runs a full top-K teacher forward over every response.
-- **grad + update 13.18 vs 13.94 s (parity)** — chunked-GEMM assembly from seed-regenerated noise
-  costs about what BP's `log_prob` + backward + optimizer step costs. It is now 31% of the ES step
-  and the next lever.
+- **teacher 3.10 vs 3.80 s** — ES is ~20% cheaper because it scores one sampled token per position
+  against BP's full top-K machinery, but the two are the same order. The "8–10× cheaper" claim in
+  §1/§4 came from the cold BP number and is wrong; see §10.
+- **grad + update 10.89 vs 9.63 s** — chunked-GEMM assembly from seed-regenerated noise costs about
+  what BP's `log_prob` + backward + optimizer step costs. It is 29% of the ES step.
 
-Peak memory: ES 85,129 MiB vs BP 71,710 MiB. Two footnotes — the 2026-06-09 bench measured the same
-v0 pair at ES 145.80 / BP 62.72 s (2.33×), reproducing within 1.2%; and the 150-step training run
-came in at **37.18 s/step** rather than 42.67 s, because sampling at T=1.0 ends waves earlier than
-the greedy benchmark's fixed 1024 steps.
+Peak memory: ES 85,129 MiB vs BP 71,710 MiB. Cold-start asymmetry is the reason the two framings
+disagree: ES pays a 13% cold penalty (42.67 → 37.17 s) because its teacher is the already-warm vLLM
+engine, while BP pays 146% (61.86 → 25.11 s), almost all of it inside the teacher's first forward.
 
 ---
 
@@ -79,6 +95,7 @@ Headline one-step (2026-06-09, batch 64 × 1024 greedy, N=8, all 112 linears, co
 **145.80 s** = decode 128.31 + teacher 4.24 + assemble 13.17, peak 85,129 MiB, 65,536 token-records —
 vs NP-V3 **2472 s** (17×) and BP-OPD **62.72 s** cold (ES/BP = 2.33×).
 Per-wave decode was flat at 7.85–8.72 s over the 16 waves.
+The BP side is a **cold step-1** and the 2.33× is not the trainer-vs-trainer ratio — see §10.
 
 ## Session 2026-08-21 — profiling: gradient quality, decode throughput, one-step reproduction
 
@@ -240,7 +257,8 @@ Logs: `logs/es_vs_bp/{es,bp}_20260821_171213.log`.
 
 - **teacher scoring is 8.4× faster than BP's** (4.22 s vs 35.61 s) — the sampled-token loss needs one
   `prompt_logprobs` prefill per rollout, where BP pushes the full top-K machinery through an FSDP
-  reward worker.
+  reward worker. **CORRECTED in §10:** BP's 35.61 s is its *cold* step-1; its steady-state teacher
+  phase is 3.80 s, so the real advantage is ~1.2×, not 8.4×.
 - **assembly is at parity with BP's backward+optimizer** (13.65 vs 13.94 s). The chunked-GEMM assembly
   is no longer a cost centre (NP's was 835 s).
 - **100% of the residual gap is decode**: 129.59 s vs 14.58 s (`gen`), or 8.05 s against BP's pure
@@ -390,7 +408,7 @@ config as §4):
 | teacher                             | 4.22 s           | 3.95 s            | —                                     |
 | assemble                            | 13.65 s          | 13.56 s           | —                                     |
 | peak GPU mem                        | 85,129 MiB       | 85,107 MiB        | —                                     |
-| **ratio vs BP-OPD** (61.86 s) | **2.39×** | **1.45×**  |                                        |
+| **ratio vs BP-OPD** (61.86 s — cold, see §10) | **2.39×** | **1.45×**  |                                        |
 
 Correctness is unchanged and checked three ways: the 19 CPU tests still pass; `check_rail_op_parity.py`
 matches the shipping op to ≤3.0e-06 for every variant; and on GPU all three parity gates still pass
@@ -498,7 +516,7 @@ Rail overhead over clean-only decode at N=1: 3.408 → 0.481 → **0.461 ms**.
 | assemble                            | 13.65 s  | 13.56 s      | **11.03 s**        | 1.24×           |
 | `n_token_records`                 | 65,536   | 65,536       | 65,536                   | —               |
 | `weight_sync_ok`                  | 1.0      | 1.0          | 1.0                      | —               |
-| **ratio vs BP-OPD** (61.86 s) | 2.39×   | 1.45×       | **1.35×**         |                  |
+| **ratio vs BP-OPD** (61.86 s — cold, see §10) | 2.39×   | 1.45×       | **1.35×**         |                  |
 
 `L_clean_mean` is 0.2556177764199674 in all three runs — the clean trajectory never moved.
 `dW_norm_mean` shifts 239.51 → 243.78 with the new noise stream, as expected.
@@ -511,7 +529,7 @@ Decode is now **82% of the step** and the noise fill is down to 0.015 ms (0.5% o
 BP-OPD runs 64. §2 measured stock vLLM at 1,413 tok/s at B=4 against 13,975 at B=64 — that ~9.9×
 concurrency deficit is the entire remaining gap.
 
-## Session 2026-08-23 — budget-sized scratch-KV: pack_width unlocked, ES overtakes BP
+## Session 2026-08-23 — budget-sized scratch-KV: pack_width unlocked, decode 5.1× faster
 
 §7.6 left `pack_width` as the only lever of consequence. Raw record:
 `scripts/zo_opd/results/es_token_kv_reservation.txt`; gates
@@ -581,10 +599,12 @@ gates still pass unchanged.
 | decode                              | 68.44 s          | 25.40 s                     | 2.69× (16 waves → 1) |
 | teacher                             | 4.23 s           | 3.99 s                      | —                     |
 | assemble                            | 11.03 s          | 13.18 s                     | —                     |
-| **ratio vs BP-OPD** (61.86 s) | 1.35×           | **0.69×**            |                        |
+| **ratio vs BP-OPD** (61.86 s — cold, see §10) | 1.35×           | **0.69×**            |                        |
 
-**es_token is now faster than BP-OPD.** Cumulative over §6–§8: one step **147.54 → 42.67 s (3.46×)**,
-decode **129.59 → 25.40 s (5.10×)**, ES/BP **2.39× → 0.69×**.
+Cumulative over §6–§8: one step **147.54 → 42.67 s (3.46×)**, decode **129.59 → 25.40 s (5.10×)**.
+This session concluded "es_token is now faster than BP-OPD (ES/BP 0.69×)" — **that conclusion is
+withdrawn in §10**: the 61.86 s BP denominator is a cold step-1, and against BP's steady-state
+25.11 s the ratio is 1.48×.
 
 The next lever is no longer decode: assembly is now 31% of the step.
 
@@ -681,6 +701,81 @@ algorithm — see the truncation item below.
 - **Both runs cap responses at 1024 tokens and every rollout hits the cap without emitting EOS**
   (`response_length` mean=min=max=1024), so MATH-500 reads near its floor for both. Fixing that is a
   prerequisite for accuracy being a usable metric on this pair.
+
+---
+
+## Session 2026-08-24 — the BP reference was a cold step; the honest ratio is 1.48×
+
+Triggered by the question "why is BP-OPD's teacher phase so slow?". It is not. Every ES/BP ratio on
+this page before today divided by **one cold BP step**, and roughly 25 s of that 61.86 s was one-time
+warm-up inside the teacher.
+
+### 10.1 The reward path cannot cost 35 s
+
+`RewardModelWorker._forward_micro_batch` (`verl/workers/fsdp_workers.py:2022`) always materialises
+full-vocab logits — `use_fused_kernels=False` in this config, and `compute_entropy` is hard-coded
+`True` for a logging metric, so `need_logits` is always set. That looked like the culprit. Replaying
+one micro-batch (8 seqs × 1112 tok, the shipped `reward.micro_batch_size_per_gpu=8`) on the real
+Qwen3-4B teacher says otherwise:
+
+| stage | ms / micro-batch | s / step (×8) | share |
+|---|---:|---:|---:|
+| transformer fwd + lm_head | 324.7 | 2.60 | 85.8% |
+| `logits.div_(teacher_temperature)` | 1.6 | 0.01 | 0.4% |
+| `_compute_entropy_safe` (logging only) | 21.1 | 0.17 | 5.6% |
+| `logprobs_from_logits` | 1.7 | 0.01 | 0.4% |
+| teacher top-K + overlap masks | 29.4 | 0.24 | 7.8% |
+| **total** | **378.5** | **3.03** | 100% |
+
+The logits tensor is 8,896 × 151,936 bf16 = 2.52 GiB per micro-batch, but all the full-vocab
+reductions together are **0.42 s of a step**. Wrapping the teacher in the FSDP1
+`CPUOffload(offload_params=True)` the reward worker hard-wires (`fsdp_workers.py:1883`) changed
+nothing either — 333 ms warm, versus 325 ms unwrapped.
+
+### 10.2 It is cold-start, and the 138-step run shows it
+
+`logs/train/bp_opd_20260823_010128.log`, per-step `timing_s/compute_rm_score`:
+
+| step | 1 | 2 | 3 | 4 | … | 138 | median (steps 4+) |
+|---|---:|---:|---:|---:|---|---:|---:|
+| `rm_score` (s) | **29.15** | 3.82 | 3.86 | 4.82 | | 3.57 | **3.80** |
+
+29.15 s once, then 3.80 s median (min 3.46, max 7.31) — matching the 3.03 s microbenchmark to within
+the co-tenancy overhead. Step 1 pays the teacher's first CPU→GPU param fetch, kernel autotune, and
+first-touch allocation of the 2.52 GiB logits and 2.49 GiB fp32 entropy buffers into an allocator
+that already holds vLLM's 55% reservation. The `es_token_vs_bp.txt` record does label its BP column
+"step-1, cold"; the derived headline did not carry the qualifier.
+
+### 10.3 The corrected verdict
+
+Steady-state medians, both runs from `scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`, batch 64 × 1024,
+T=1.0, same GPU, first 3 steps dropped:
+
+| phase | ES-token (146 steps) | BP-OPD (135 steps) | ES / BP |
+|---|---:|---:|---:|
+| decode / `gen` | 23.06 | 9.85 | 2.34× |
+| teacher | 3.10 | 3.80 | 0.82× |
+| grad + update | 10.89 | 9.63 | 1.13× |
+| **step** | **37.17** | **25.11** | **1.48×** |
+
+- **ES/BP is 1.48×, not 0.69×.** The claim "es_token is faster than BP-OPD" (§8.3) is withdrawn.
+- **BP's teacher phase was never a cost centre** — 3.80 s, ~20% *more* than ES's 3.10 s, not 8–10×.
+  The "teacher 10× faster" line in §1 and the "8.4×" in §4 are both artefacts of the cold number.
+- **The cold ratios in §6.4, §7.5, §8.3 (2.39× / 1.45× / 1.35× / 0.69×) understate ES's cost
+  uniformly.** Against BP steady-state 25.11 s the same four variants are **5.88× / 3.57× / 3.34× /
+  1.70×** (or 1.48× using ES's own steady-state 37.17 s).
+- **What survives unchanged:** the 3.46× step and 5.10× decode improvements from §6–§8, which were
+  measured cold-vs-cold on one harness; the gradient-quality results (§1); and the negative learning
+  result (§9.4), which never depended on the ratio.
+
+### 10.4 Why the cold penalties differ so much
+
+ES 42.67 → 37.17 s is a **13%** cold penalty; BP 61.86 → 25.11 s is **146%**. ES's teacher is the
+same vLLM engine that just ran decode, so it is warm by the time it scores; BP's teacher is a
+separate FSDP module whose first forward of the run happens inside the timed phase. Any future
+ES-vs-BP number on this page must be a steady-state median, not a step-1 reading.
+
+Raw records: `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`.
 
 ---
 
