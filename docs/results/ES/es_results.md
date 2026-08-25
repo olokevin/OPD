@@ -52,11 +52,16 @@ sparse, +21.2 pp). **The paper's own task pair does not reproduce it either**
 HellaSwag with *their* model (Qwen2.5-1.5B-Instruct), hyperparameters and horizon,
 `dense` ES learns Countdown **8.0 → 42.0%** while HellaSwag goes **59.70 → 60.20** and
 the prior mean moves **−0.11 pp** — 0.3% relative against their ≈10%. `iso` reaches a level `dense` never
-does (**47.5%**) and, compared at *matched* Countdown accuracy, has lost exactly the same
-prior ability (−0.11 pp at 38%); its larger end-of-run drop (−1.21 pp) is bought by going
-further, not leaked by the subspace. Leading unexplained difference vs the paper: whether
-their HellaSwag probe is generative (format-sensitive) rather than log-likelihood
-ranking.
+does (**47.5%**) and, at *matched* Countdown accuracy, has lost exactly the same prior
+ability (−0.11 pp at 38%). **What does order forgetting is ‖ΔW‖_F, not sparsity and not
+the subspace**: across the three finished arms, drift 3.5e-2 / 4.3e-2 / **9.5e-2**
+(`dense`/`iso`/`fura`) maps monotonically onto prior-mean −0.29 / −1.34 / **−3.20** and
+generative-HellaSwag +0.1 / −2.4 / **−14.3**, while sparsity is unrelated. `fura` at
+σ=1.25e-2 is the only arm that forgets — and it also barely learns (Countdown 18.5% vs
+42.0/47.5), the signature of an over-large step; a σ=1e-3 rerun is testing that. The
+generative-probe explanation for the paper's result is **falsified** (0% unparsed,
+`dense` generative accuracy unchanged); the remaining candidate is simply that their ES
+run sat at a larger ‖ΔW‖ than ours, which they never report.
 
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
@@ -159,12 +164,21 @@ fixed 64-problem batch, not the method, is the ceiling.
    an intermediate-σ sweep to locate where rank-1 stops absorbing the step.
 6. **Broader benchmarks** (AIME24, AMC23, Minerva, OlympiadBench) — five ES arms now
    sit within ±1 pp on MATH-500, so a second axis is needed to separate them.
-7. **Test the generative-probe hypothesis** ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)) —
-   score HellaSwag *generatively* on the saved Countdown `dense` checkpoint. If it
-   collapses while log-likelihood HellaSwag stays flat, the paper's "forgetting" is
-   output-format drift, and the knowledge is intact. This is the single highest-value
-   remaining run and it is cheap (~30 min on one GPU).
-8. **Finish `fura`/`isobtt` on Countdown** — controls now rather than the test.
+7. ~~**Test the generative-probe hypothesis.**~~ **Done — falsified**
+   ([§14.5.2](#1452-the-generative-probe-hypothesis-is-falsified)).
+8. **`fura` at σ=1e-3 on Countdown** (running, GPU 1) — the disambiguating run for
+   [§14.5.1](#1451-drift-is-the-axis--a-clean-dose-response): if `fura` then learns like
+   `dense` and stops forgetting, the whole `fura` effect is step size and the subspace is
+   exonerated. `isobtt` still running on GPU 2.
+9. **Re-run the MATH leg's retention with the generative probe.** It is 4–6× more
+   sensitive than log-likelihood ranking ([§14.5.2](#1452-the-generative-probe-hypothesis-is-falsified)),
+   so the ±0.5 pp nulls in [§14.4](#144-result--nothing-forgets-dense-included) may be
+   understating real (small) movements. Cheap: the six checkpoints are already
+   materialised under `/data/yequan/es/materialized/`.
+10. **Sweep σ against retention directly.** [§14.5.1](#1451-drift-is-the-axis--a-clean-dose-response)
+    makes ‖ΔW‖_F the control variable; a single arm at σ ∈ {1e-3, 5e-3, 1.25e-2, 5e-2}
+    would turn the three-point dose-response into a curve and give an operating-point
+    recommendation for edge training.
 
 ## 1. What we are reproducing
 
@@ -1298,6 +1312,8 @@ outside its own MATH-500 loop needs the weights back.
 | Tables in this section | `scripts/es/collect_forgetting.py` |
 | **In-loop** forgetting probe (curves) | `verl/verl/trainer/es/forget_eval.py`, `es.forget_tasks` |
 | Gate for the in-loop probe | `scripts/es/test_forget_eval.py` |
+| Generative (format-sensitive) HellaSwag probe | `scripts/es/eval_hellaswag_gen.py` |
+| Countdown data / launcher / chain | `scripts/es/prepare_countdown_data.py`, `run_countdown_es.sh`, `chain_countdown.sh` |
 | Curve runs | `scripts/es/run_forget_curves.sh` |
 | Materialized checkpoints / eval JSON | `/data/yequan/es/materialized/<arm>`, `/data/yequan/es/forgetting/<arm>` |
 
@@ -1397,14 +1413,17 @@ Three consequences:
 1. **We cannot confirm "ES ⇒ catastrophic forgetting" as a property of the algorithm.**
    In this setting it is not one. Whatever drives the paper's curves, it is not present
    when a 7B math-specialised base is trained with ES on in-domain MATH.
-2. **The proposed mechanism does not predict retention here.** Across the six arms,
-   drift spans 100× and sparsity spans 7% → 99%, and neither orders the prior-knowledge
-   deltas: the *densest, second-largest* update (`dense`, 7.2% sparse) is the single
-   best retainer at +0.00, while the sparsest (`insparse`, 99.2%) is −0.07 and the
-   largest-drift arm (`fura`, 4.8e-2) is −0.49. ‖ΔW‖ and sparsity are therefore not
-   sufficient statistics for forgetting — they are properties of the *optimiser*, and
-   the paper's ES-vs-GRPO contrast confounds them with everything else that differs
-   between the two algorithms.
+2. **Half the proposed mechanism survives; the sparsity half does not.**
+   **Sparsity does not order retention at all**: the *densest* update (`dense`, 7.2%
+   sparse) is the single best retainer at +0.00, while the *sparsest* (`insparse`,
+   99.2%) is −0.07 — indistinguishable, across a 14× span in density. **Drift is
+   weakly consistent**: the smallest-drift arm (`zoact`, 4.7e-4) is the most positive
+   at +0.20 and the largest (`fura`, 4.8e-2) the most negative at −0.49. But every
+   delta here is inside ±1.2 SE, so this leg can only say the ordering is *not
+   contradicted*, not that it holds. [§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)
+   pushes drift 2–3× higher and there it becomes a clean, significant dose-response —
+   so the honest reading is that **‖ΔW‖ matters and sparsity does not**, and MATH
+   simply does not move the weights far enough for the ‖ΔW‖ effect to clear the noise.
 3. **The question "can iso-ES or fura-ES avoid forgetting?" is not answerable on this
    task**, because there is no forgetting to avoid. What the table *does* establish is
    the other half of the requirement: the structured arms reach full-weight ES accuracy
@@ -1491,7 +1510,9 @@ level `dense` never reaches. Its prior mean does decline late (62.74 → 61.53; 
 over the last three evals, −1.34 pp vs `dense`'s −0.29), which is ~2 SE and the only
 non-null retention signal anywhere in this section.
 
-**But that decline is bought, not leaked.** Compared at *matched new-task accuracy*
+**But that decline is bought, not leaked**, and
+[§14.5.1](#1451-drift-is-the-axis--a-clean-dose-response) shows why: `iso` at σ=5e-2 moves
+the weights 1.2× further than `dense`. Compared at *matched new-task accuracy*
 rather than matched step count:
 
 | | Countdown | prior mean | Δ prior |
@@ -1511,36 +1532,119 @@ reached from the geometry. And on the paper's *own* probe, HellaSwag, both arms 
 Per-task at step 300 (base → arm): `dense` WinoGrande −1.8, ARC-e −1.7, BoolQ +1.9,
 PIQA +0.9; `iso` ARC-e −4.4, ARC-c −2.8, BoolQ −2.8, WinoGrande +1.2, PIQA +1.1.
 
+#### 14.5.1 Drift is the axis — a clean dose-response
+
+Materialising the three finished Countdown arms (`scripts/es/materialize_es_ckpt.py
+--base <Qwen2.5-1.5B-Instruct>`) gives ΔW against the same base, so the arms can be
+ordered by how far they moved the weights:
+
+| arm | σ | ‖ΔW‖_F/‖W‖_F | sparsity | Countdown (peak) | HellaSwag **LL** Δ | HellaSwag **gen** Δ | prior mean Δ |
+|---|---|---|---|---|---|---|---|
+| `dense` | 1e-3 | 3.47e-02 | 3.4% | 42.0 | **+0.5** | **+0.1** | −0.29 |
+| `iso` | 5e-2 | 4.32e-02 | 17.3% | **47.5** | −0.4 | −2.4 | −1.34 |
+| `fura` | 1.25e-2 | **9.50e-02** | 16.2% | 18.5 | **−3.8** | **−14.3** | **−3.20** |
+
+(prior mean Δ = last-three-eval average vs step 0; LL = the in-loop log-likelihood probe,
+gen = §14.5.2's generative probe.)
+
+**Every retention column is monotone in ‖ΔW‖_F, and sparsity is unrelated to any of
+them.** `dense` moves least and loses nothing; `iso` moves 1.2× further and loses a
+little; `fura` moves 2.7× further than `dense` and loses a lot. Note this is the *same
+ordering* the MATH leg hinted at ([§14.4](#144-result--nothing-forgets-dense-included)
+claim 2) but could not resolve, because there the largest drift was 4.8e-2 — half of
+`fura`'s here — and every delta sat inside the noise floor.
+
+So the paper's ℓ2-norm intuition is **right about the axis and wrong about the
+attribution**: drift predicts forgetting, but drift is a function of *step size*, not of
+being ES rather than GRPO, and not of update density. Our `dense` Countdown arm is
+**denser** (3.4% sparse) and **larger-drift** (3.47e-2) than our `dense` MATH arm and
+still loses nothing — what separates `fura` is that σ=1.25e-2 moved it 2.7× further for
+*less* new-task progress.
+
+#### 14.5.2 The generative-probe hypothesis is falsified
+
+The obvious way to reconcile our null with the paper was that our log-likelihood ranking
+is format-immune while theirs might not be. Tested directly on the finished checkpoints
+(`scripts/es/eval_hellaswag_gen.py`, 1000 items, A–D multiple choice, greedy, parse the
+letter):
+
+| model | generative acc | **unparsed** | log-likelihood acc |
+|---|---|---|---|
+| base Qwen2.5-1.5B-Instruct | 57.3 | **0.0%** | 59.7 |
+| `dense` @ 300 | **57.4** | **0.0%** | 60.2 |
+| `iso` @ 300 | 54.9 | 0.0% | 59.3 |
+| `fura` @ 300 | 43.0 | 0.0% | 56.1 |
+
+**Format drift is not the explanation.** After 300 ES iterations on a task whose reward
+is gated on `<think>…</think><answer>…</answer>`, every arm still answers a multiple-choice
+prompt with a bare letter — **0% unparsed everywhere** — and `dense`'s generative accuracy
+is *unchanged* (57.3 → 57.4). So the paper's drop cannot be recovered by switching our
+probe to their (possible) protocol.
+
+What the generative probe *does* buy is **sensitivity**: where a model has genuinely
+degraded, it registers 4–6× more than log-likelihood ranking (`fura` −14.3 vs −3.8;
+`iso` −2.4 vs −0.4). That is worth carrying forward — it is the better instrument for
+this question — but it does not manufacture degradation where there is none.
+
 #### What is left to explain
 
 Since the effect does not survive a faithful re-implementation, the cause is in what we
 did *not* copy. Two candidates, in order of how much we think they matter:
 
-1. **The prior-task evaluation protocol.** We score HellaSwag by log-likelihood ranking
-   over the four endings (lm-eval's standard `acc_norm`), which is immune to output
-   format. If the paper scores it **generatively**, then a model that has been ES-trained
-   to always emit `<think>…</think><answer>…</answer>` will fail to produce a parseable
-   choice, and the metric will fall even though the underlying knowledge is intact. That
-   is a *behavioural* collapse, not forgetting — and it is exactly the reframing the
-   companion paper ([arXiv:2605.30148](https://arxiv.org/abs/2605.30148)) argues for when
-   it calls the loss "performance drift rather than irreversible forgetting". **This is
-   directly testable** on the saved `dense` checkpoint
-   (`/data/yequan/es/ES-forget-cd-q1p5b/cd-dense_q1p5b_b200_N30/es_train_*/es_coef_best.pt`,
-   materialisable with `--base` pointed at Qwen2.5-1.5B-Instruct): if generative
-   HellaSwag collapses while log-likelihood HellaSwag is flat, the mechanism is
-   identified. **Not yet run** — both GPUs are occupied by the remaining arms.
-2. **The ES implementation.** Ours is aligned with the official repo on reward shaping,
+1. ~~**The prior-task evaluation protocol.**~~ **Tested and ruled out**
+   ([§14.5.2](#1452-the-generative-probe-hypothesis-is-falsified)): the generative probe
+   shows 0% unparsed and unchanged accuracy for `dense`.
+2. **The step size their run actually took.** [§14.5.1](#1451-drift-is-the-axis--a-clean-dose-response)
+   shows forgetting is monotone in ‖ΔW‖_F, and we only ever measure ‖ΔW‖ on *our* runs.
+   The paper reports its drift as a ratio to GRPO, never in absolute or relative-to-‖W‖
+   terms, so we cannot tell whether their ES run sat at our `dense` operating point
+   (3.5e-2, harmless) or our `fura` one (9.5e-2, damaging). If theirs is nearer the
+   latter, our results and theirs are **not in conflict at all** — they would simply have
+   run ES at a step size that costs prior ability, which is a tuning statement rather
+   than a property of ES. Reporting ‖ΔW‖_F/‖W‖_F would settle it immediately.
+3. **The ES implementation.** Ours is aligned with the official repo on reward shaping,
    seeds, α=σ/2 and greedy decoding ([§12](#12-alignment-with-the-official-implementation)),
    with one known deviation: `_es_noise` reseeds per layer with the bare seed, so
    same-shaped layers draw identical noise ([§10.9](#109-one-deviation-worth-flagging)).
    That shrinks the effective search dimension; it is not an obvious route to *less*
    drift, but it has never been ablated.
 
-Not candidates: model, task, prior benchmark, population size, step size, or horizon —
-all matched.
+Not candidates: model, task, prior benchmark, population size, nominal σ (for `dense`),
+or horizon — all matched.
 
-`fura` (GPU 1, started 03:21) and `isobtt` (GPU 2, started 06:54) are running behind the
-arms above; they are controls now rather than the test, since there is no forgetting for
-them to avoid.
+#### `fura` — the one arm that does forget, and it also fails to learn
+
+`fura` finished 300 iterations (6 h 19 m) at the σ that tops the MATH leaderboard,
+σ = 1.25e-2 / α = 6.25e-3 ([§11.3](#113-answer-yes--but-scale-σ-not-α)):
+
+| step | 0 | 40 | 80 | 120 | 160 | 200 | 240 | 280 | 300 |
+|---|---|---|---|---|---|---|---|---|---|
+| Countdown | 9.0 | 15.0 | 12.0 | 13.5 | 14.0 | 16.0 | 16.5 | 18.0 | 18.0 |
+| HellaSwag | 59.90 | 59.20 | 58.20 | 58.40 | 57.90 | 57.80 | 56.50 | 55.20 | **56.10** |
+| prior mean | 62.70 | 61.63 | 61.80 | 61.34 | 60.33 | 60.47 | 59.99 | 59.30 | **59.61** |
+
+This is the only arm anywhere in [§14](#14-catastrophic-forgetting--does-the-perturbation-subspace-decide-it)
+that shows a real prior-ability decline — HellaSwag **−3.8 pp**, prior mean **−3.20 pp**
+(last-three-eval average) — and unlike `iso`'s it starts at the very first evals and
+trends down all the way (62.70 → 61.6 by step 40 → 60.3 by 160 → 59.6 at 300) rather than
+appearing only after the new task has been learned. It is also the only arm that fails at the new task: Countdown peaks at
+**18.5%** where `dense` reaches 42.0 and `iso` 47.5.
+
+**Both failures point at step size, not at the BTT subspace.** σ = 1.25e-2 was selected
+on 7B/MATH, where it was footprint-matched to dense ES; nothing re-derived it for a 1.5B
+model on Countdown, and `fura` already had the largest weight-space footprint of any arm
+in [§14.3](#143-update-geometry-of-the-six-arms) (4.78e-2). An arm that is simultaneously
+*worse at learning* and *worse at retaining* is the signature of an over-large step —
+[§11](#11-fura-learning-rate-search) has now shown three times that σ dominates this
+family — not of a subspace that leaks knowledge. **The disambiguating run is `fura` at
+σ = 1e-3 on the same task**: if it then learns like `dense` and stops forgetting, the
+whole effect is step size.
+
+So the arms do not order by subspace; they order by **how hard they are pushed**. `iso`
+at σ=5e-2 pushes furthest and learns most, losing prior ability only in proportion to the
+task progress it buys; `fura` at σ=1.25e-2 is pushed past the point where the step still
+buys anything, and pays without being paid.
+
+`isobtt` (GPU 2, started 06:54) is still running.
 
 <!-- FORGET:COUNTDOWN END -->

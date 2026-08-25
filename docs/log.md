@@ -464,3 +464,29 @@ you are, not which subspace the perturbation lives in. HellaSwag — the paper's
 7-task mean at 1000 docs/task.
 
 -> `docs/results/ES/es_results.md` §14.5
+
+## [2026-08-25] ingest | ES forgetting: drift is the axis; generative-probe hypothesis falsified
+
+`fura` finished its Countdown arm and is **the only arm in §14 that forgets** — HellaSwag
+−3.8 pp, prior mean −3.20 pp — while also being the only arm that fails to learn
+(Countdown peak 18.5% vs `dense` 42.0, `iso` 47.5). It ran at σ=1.25e-2, tuned on
+7B/MATH.
+
+Materialising all three Countdown arms against Qwen2.5-1.5B-Instruct gives the drift
+figures and a **clean dose-response**: ‖ΔW‖_F/‖W‖_F 3.47e-2 / 4.32e-2 / **9.50e-2**
+(`dense`/`iso`/`fura`) maps monotonically onto prior-mean −0.29 / −1.34 / −3.20,
+log-likelihood HellaSwag +0.5 / −0.4 / −3.8, and generative HellaSwag +0.1 / −2.4 /
+−14.3. Sparsity (3.4% / 17.3% / 16.2%) is unrelated. **Corrects the §14.4 claim that
+"neither drift nor sparsity orders retention"** — sparsity does not, drift does; MATH
+simply never moved the weights far enough (max 4.8e-2) for it to clear the noise floor.
+
+New probe `scripts/es/eval_hellaswag_gen.py` (A–D multiple choice, greedy, parse the
+letter) **falsifies the format-drift explanation**: 0% unparsed for every arm and
+`dense` generative accuracy unchanged (57.3 → 57.4). It is however 4–6× more sensitive
+than log-likelihood ranking where degradation is real, so it is the better instrument.
+
+Remaining candidate for the disagreement with arXiv:2601.20861: their ES run's absolute
+‖ΔW‖ (reported only as a ratio to GRPO, never relative to ‖W‖). `fura` at σ=1e-3 now
+running on GPU 1 to confirm the step-size attribution; `isobtt` still on GPU 2.
+
+-> `docs/results/ES/es_results.md` §14.5.1, §14.5.2
