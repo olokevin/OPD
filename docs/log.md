@@ -427,3 +427,26 @@ Fig. 4) but do not predict retention: drift spans 100× and sparsity 7% → 99% 
 with no ordering of the prior-knowledge deltas. `insparse d=1%` reaches GRPO-like
 geometry (99.2% sparse, 7.7× less drift) at +21.2 pp. Countdown → HellaSwag on
 Qwen2.5-1.5B-Instruct now running (dense/fura GPU 1, iso/isobtt GPU 2, ~11 h/arm).
+
+## [2026-08-25] ingest | ES forgetting: negative replication on the paper's own Countdown → HellaSwag pair
+
+`dense` ES finished 300 iterations of Countdown-3to4 on **Qwen2.5-1.5B-Instruct** — the
+paper's own model, task, prior probe (HellaSwag), hyperparameters (σ=1e-3, α=σ/2, N=30,
+200 train problems, greedy) and past its own ~200-iteration convergence point. Countdown
+**8.0 → 42.0%** (learning reproduces), HellaSwag **59.70 → 60.20** (+0.50 pp, whole-run
+range 58.5–60.2), 7-task prior mean **62.74 → 62.63** (−0.11 pp). Measured their way
+(drop from best observed) that is **0.3% relative vs the ≈10% they report** — so the
+effect does not reproduce in either of our two settings, one of which is theirs.
+
+`iso` (210/300 at time of writing) is flat on prior ability *and* ahead of `dense` on the
+new task throughout (47.0 vs 37.5 @ step 200), echoing §7's "fixed spectrum costs
+nothing". `fura`/`isobtt` queued as controls.
+
+Leading unexplained difference, now the top open item: our HellaSwag is log-likelihood
+ranking (format-immune); if theirs is **generative**, an ES run that trains the model to
+always emit `<think>…</think><answer>…</answer>` would fail to produce a parseable choice
+and the metric would fall with the knowledge intact — which is what the companion paper
+(arXiv:2605.30148) means by "drift, not forgetting". Testable in ~30 min on the saved
+checkpoint `/data/yequan/es/ES-forget-cd-q1p5b/cd-dense_q1p5b_b200_N30/es_train_*/es_coef_best.pt`.
+
+-> `docs/results/ES/es_results.md` §14.5

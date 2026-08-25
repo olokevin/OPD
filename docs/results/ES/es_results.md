@@ -47,8 +47,14 @@ the paper's effect would be ≈6.5 pp on HellaSwag. The update statistics reprod
 (`dense` is 7.2% sparse, LayerNorm sparsest — their Figure 4) but do not *predict*:
 drift spans 100× and sparsity 7% → 99% across arms with no ordering of the deltas. The
 structured arms do land on GRPO's side of both axes at full accuracy (`insparse` 99.2%
-sparse, +21.2 pp). Re-running on the paper's own Countdown → HellaSwag pair with
-Qwen2.5-1.5B-Instruct ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair-in-flight)).
+sparse, +21.2 pp). **The paper's own task pair does not reproduce it either**
+([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)): on Countdown →
+HellaSwag with *their* model (Qwen2.5-1.5B-Instruct), hyperparameters and horizon,
+`dense` ES learns Countdown **8.0 → 42.0%** while HellaSwag goes **59.70 → 60.20** and
+the prior mean moves **−0.11 pp** — 0.3% relative against their ≈10%. `iso` matches that
+safety *and* outlearns `dense` (47.0 vs 37.5 @ step 200). Leading unexplained
+difference: whether their HellaSwag probe is generative (format-sensitive) rather than
+log-likelihood ranking.
 
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
@@ -151,10 +157,12 @@ fixed 64-problem batch, not the method, is the ceiling.
    an intermediate-σ sweep to locate where rank-1 stops absorbing the step.
 6. **Broader benchmarks** (AIME24, AMC23, Minerva, OlympiadBench) — five ES arms now
    sit within ±1 pp on MATH-500, so a second axis is needed to separate them.
-7. **Finish the Countdown forgetting leg** ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair-in-flight)) —
-   `dense`/`fura` on GPU 1, `iso`/`isobtt` on GPU 2, ~11 h per arm. If the paper's
-   Pareto front reproduces there, the arms' geometry can finally be scored against it;
-   if it does not, the effect is specific to their implementation, not to ES.
+7. **Test the generative-probe hypothesis** ([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)) —
+   score HellaSwag *generatively* on the saved Countdown `dense` checkpoint. If it
+   collapses while log-likelihood HellaSwag stays flat, the paper's "forgetting" is
+   output-format drift, and the knowledge is intact. This is the single highest-value
+   remaining run and it is cheap (~30 min on one GPU).
+8. **Finish `fura`/`isobtt` on Countdown** — controls now rather than the test.
 
 ## 1. What we are reproducing
 
@@ -1411,10 +1419,10 @@ prior abilities live in a thin post-training layer, vs a base model), **task dis
 best checkpoints at 30–130). Task distance is the one we can test directly, which is
 what §14.5 does.
 
-### 14.5 Countdown → HellaSwag: the paper's own task pair (in flight)
+### 14.5 Countdown → HellaSwag: the paper's own task pair
 
-Since the MATH leg produced no forgetting to compare against, the arms are being re-run
-on the exact pair the paper uses, on the exact model it uses:
+Since the MATH leg produced no forgetting to compare against, the arms were re-run on
+the exact pair the paper uses, on the exact model it uses:
 
 | Knob | Value |
 | --- | --- |
@@ -1426,11 +1434,85 @@ on the exact pair the paper uses, on the exact model it uses:
 | Arms | `dense` → `fura` (GPU 1), `iso` → `isobtt` (GPU 2) |
 | Cost | ~2 min/iteration ⇒ ~11 h/arm; the probe adds 66 s per eval |
 
-Step-0 baseline (Qwen2.5-1.5B-Instruct): Countdown **8.0%**; HellaSwag 59.70, PIQA
-76.30, WinoGrande 63.20, ARC-e 76.50, ARC-c 46.00, OBQA 40.40, BoolQ 77.10, prior mean
-**62.74**. This is the run that decides whether the paper's Pareto front reproduces
-and, if it does, whether the fixed-spectrum and BTT subspaces bend it.
+Step-0 baseline (Qwen2.5-1.5B-Instruct, identical for every arm): Countdown **8.0%**;
+HellaSwag 59.70, PIQA 76.30, WinoGrande 63.20, ARC-e 76.50, ARC-c 46.00, OBQA 40.40,
+BoolQ 77.10, prior mean **62.74**.
 
 <!-- FORGET:COUNTDOWN BEGIN -->
-_(curves land here)_
+
+#### Result — the paper's effect does not reproduce on its own task pair
+
+`dense` finished all 300 iterations (2026-08-25, 8 h 45 m, 104 s/iteration). `iso` is at
+210/300. Countdown accuracy is the 200-problem held-out split; HellaSwag and the prior
+mean are the in-loop probe at 1000 docs/task.
+
+| step | **dense** Countdown | HellaSwag | prior mean | | **iso** Countdown | HellaSwag | prior mean |
+|---|---|---|---|---|---|---|---|
+| 0 | 8.0 | 59.70 | 62.74 | | 8.0 | 59.70 | 62.74 |
+| 20 | 20.5 | 59.30 | 62.40 | | 21.0 | 59.00 | 62.33 |
+| 40 | 27.5 | 59.10 | 62.44 | | 29.0 | 59.00 | 62.41 |
+| 60 | 32.0 | 59.00 | 62.09 | | 34.5 | 59.50 | 62.81 |
+| 80 | 35.0 | 59.50 | 62.43 | | 38.0 | 59.20 | 62.63 |
+| 100 | 36.5 | 60.10 | 62.57 | | **42.0** | 59.60 | 62.43 |
+| 120 | 31.5 | 59.50 | 62.29 | | 42.5 | 59.50 | 62.81 |
+| 140 | 35.5 | 59.60 | 62.39 | | 45.5 | 59.20 | 62.56 |
+| 160 | 37.0 | 59.60 | 62.31 | | 43.0 | 59.30 | 62.76 |
+| 180 | 40.0 | 59.60 | 62.41 | | 43.5 | 59.30 | 62.67 |
+| 200 | 37.5 | 59.40 | 62.24 | | **47.0** | 59.90 | 62.60 |
+| 220 | 40.0 | 60.10 | 62.80 | | — | — | — |
+| 250 | **42.0** | 58.90 | 62.63 | | — | — | — |
+| 280 | 39.5 | 59.30 | 62.34 | | — | — | — |
+| 300 | 38.5 | **60.20** | 62.63 | | — | — | — |
+
+**`dense` ES learns Countdown and does not forget.** Countdown **8.0 → 42.0%** (peak, and
++30.5 pp over base — the paper reports ES reaching 53.0 with a longer run, so the
+learning reproduces). Over the same 300 iterations HellaSwag goes **59.70 → 60.20**
+(**+0.50 pp**, and its whole-run range is 58.5–60.2) and the 7-task prior mean goes
+**62.74 → 62.63** (**−0.11 pp**). Measured the paper's way — drop relative to the *best*
+observed prior score — that is **0.3% relative**, against the **≈10%** they report.
+
+This is a **negative replication on every axis they specify**: their model
+(Qwen2.5-1.5B-Instruct), their new task (Countdown, 200 problems), their prior probe
+(HellaSwag), their hyperparameters (σ=1e-3, α=σ/2, N=30, greedy), and past their own
+convergence point — the paper's Figure 2 has prior accuracy still falling from ~200 to
+500 iterations, whereas ours is flat from 0 to 300 with no trend. Combined with
+[§14.4](#144-result--nothing-forgets-dense-included), **we cannot reproduce ES-induced
+catastrophic forgetting in either of two settings, and one of them is the paper's own.**
+
+**`iso` is not just as safe — it is better at the new task.** At matched iteration count
+`iso` leads `dense` throughout (47.0 vs 37.5 at step 200; 42.0 vs 36.5 at step 100) while
+its prior mean stays in 62.0–63.0. This echoes [§7](#7-results): the fixed-spectrum
+constraint costs nothing and, on this task, converges faster.
+
+#### What is left to explain
+
+Since the effect does not survive a faithful re-implementation, the cause is in what we
+did *not* copy. Two candidates, in order of how much we think they matter:
+
+1. **The prior-task evaluation protocol.** We score HellaSwag by log-likelihood ranking
+   over the four endings (lm-eval's standard `acc_norm`), which is immune to output
+   format. If the paper scores it **generatively**, then a model that has been ES-trained
+   to always emit `<think>…</think><answer>…</answer>` will fail to produce a parseable
+   choice, and the metric will fall even though the underlying knowledge is intact. That
+   is a *behavioural* collapse, not forgetting — and it is exactly the reframing the
+   companion paper ([arXiv:2605.30148](https://arxiv.org/abs/2605.30148)) argues for when
+   it calls the loss "performance drift rather than irreversible forgetting". **This is
+   directly testable** on the saved `dense` checkpoint
+   (`/data/yequan/es/ES-forget-cd-q1p5b/cd-dense_q1p5b_b200_N30/es_train_*/es_coef_best.pt`,
+   materialisable with `--base` pointed at Qwen2.5-1.5B-Instruct): if generative
+   HellaSwag collapses while log-likelihood HellaSwag is flat, the mechanism is
+   identified. **Not yet run** — both GPUs are occupied by the remaining arms.
+2. **The ES implementation.** Ours is aligned with the official repo on reward shaping,
+   seeds, α=σ/2 and greedy decoding ([§12](#12-alignment-with-the-official-implementation)),
+   with one known deviation: `_es_noise` reseeds per layer with the bare seed, so
+   same-shaped layers draw identical noise ([§10.9](#109-one-deviation-worth-flagging)).
+   That shrinks the effective search dimension; it is not an obvious route to *less*
+   drift, but it has never been ablated.
+
+Not candidates: model, task, prior benchmark, population size, step size, or horizon —
+all matched.
+
+`fura` (GPU 1) and `isobtt` (GPU 2) are queued behind the arms above; they are controls
+now rather than the test, since there is no forgetting for them to avoid.
+
 <!-- FORGET:COUNTDOWN END -->
