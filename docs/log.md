@@ -490,3 +490,25 @@ Remaining candidate for the disagreement with arXiv:2601.20861: their ES run's a
 running on GPU 1 to confirm the step-size attribution; `isobtt` still on GPU 2.
 
 -> `docs/results/ES/es_results.md` §14.5.1, §14.5.2
+
+## [2026-08-25] query | How arXiv:2601.20861 actually measures forgetting
+
+Read the paper in full including appendices. Filed into `results/ES/es_results.md` §14.1.
+Key points: **one probe (HellaSwag) on one pair** (Qwen2.5-1.5B-Instruct + Countdown) —
+Table 1's four tasks are new-task accuracy only; per-checkpoint curves give Fig. 1 (Pareto
+scatter) and Fig. 2 (prior acc vs iteration); headline is a ≈10% drop *relative to best
+observed*. Hyperparameters (A.3): pop 30, σ=1e-3, α=5e-4, **max_tokens 1024**, and A.2.2
+notes **fp16** not bf16.
+
+**The HellaSwag scoring protocol is never specified** — no lm-eval reference, no
+log-likelihood-vs-generative, no `acc`/`acc_norm`, no few-shot count, no absolute numbers
+(figures only), no seed repeats. So §14.5.2 was testing a guess, not a stated claim.
+
+**Confound the paper names itself:** their GRPO runs with KL coefficient β=0.001 (A.2.1),
+and A.4.1 attributes GRPO's flat KL to "the explicit KL-regularization factor in GRPO,
+preventing continuous drifts from the base model". Their contrast is therefore
+**anchored vs unanchored**, not gradient-based vs gradient-free — the same variable our
+dose-response isolates, and the reason the companion paper's Anchored Weight Decay fix
+works. Reframes their claim as "an unanchored optimiser at a large enough step forgets".
+
+-> `docs/results/ES/es_results.md` §14.1

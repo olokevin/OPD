@@ -1285,6 +1285,38 @@ reproduces) vs verl GRPO, population 30. Findings:
    is ≈95% for GRPO across every layer and parameter group but near zero for ES.
    Dense, large-norm updates ⇒ global interference ⇒ forgetting.
 
+**How they actually measure it** (§3.2, Limitations, A.2, A.3 — read in full 2026-08-25):
+
+* **One probe, one setting.** HellaSwag is the *only* prior-task benchmark, on the single
+  pair Qwen2.5-1.5B-Instruct + Countdown. Table 1's four tasks × two models are new-task
+  accuracy only and play no part in the forgetting analysis. They concede the point in
+  Limitations: tracking "performance on one task … does not fully capture multi-facetted
+  loss of performance".
+* **Per-checkpoint curves.** "We evaluate task performance across each checkpoint of our
+  trained models" → Fig. 1 (Countdown-vs-HellaSwag Pareto scatter, coloured by iteration)
+  and Fig. 2 (HellaSwag vs iteration). The headline is a **≈10% drop relative to the best
+  observed** prior score, continuing after Countdown converges at ~200 iterations.
+* **Hyperparameters (A.3):** population 30, σ=1e-3, α=5e-4, **max_tokens 1024**.
+  A.2.2 also notes they use **fp16** (not bf16) plus the Qwen chat template.
+
+**What the paper never specifies: the HellaSwag scoring protocol.** There is no mention of
+lm-eval-harness, of log-likelihood ranking vs generative answering, of `acc` vs `acc_norm`,
+of few-shot count, subset size, or normalisation — nor any absolute HellaSwag number
+(figures only), eval frequency, or seed repeats. This is why
+[§14.5.2](#1452-the-generative-probe-hypothesis-is-falsified) had to *guess* at the
+protocol in order to test it.
+
+**A confound the paper names in its own appendix.** Their GRPO runs with an explicit
+**KL coefficient β = 0.001** (A.2.1), and A.4.1 attributes GRPO's flat KL to exactly that:
+"the explicit KL-regularization factor in GRPO, preventing continuous drifts from the base
+model". So the comparison sets an **anchored** optimiser against an **unanchored** one and
+reads the difference as a property of being gradient-free. That is the same variable
+[§14.5.1](#1451-drift-is-the-axis--a-clean-dose-response) isolates — a KL penalty is a
+direct bound on ‖ΔW‖ — and it is why the companion paper's fix (Anchored Weight Decay, a
+pull toward θ₀) works: it gives ES the anchor GRPO already had. On this reading their
+result is not "ES forgets" but "**an unanchored optimiser at a large enough step forgets**",
+which our dose-response supports and which is a tuning statement, not an indictment of ES.
+
 A companion paper, *Overcoming Forgetting in LLM Fine-Tuning with Evolution Strategies*
 ([arXiv:2605.30148](https://arxiv.org/abs/2605.30148)), argues the loss is *drift*
 rather than irreversible forgetting, attributes it to "random-walk behaviour in weakly
@@ -1602,7 +1634,14 @@ did *not* copy. Two candidates, in order of how much we think they matter:
    latter, our results and theirs are **not in conflict at all** — they would simply have
    run ES at a step size that costs prior ability, which is a tuning statement rather
    than a property of ES. Reporting ‖ΔW‖_F/‖W‖_F would settle it immediately.
-3. **The ES implementation.** Ours is aligned with the official repo on reward shaping,
+3. **The KL anchor on their GRPO baseline.** Their ES-vs-GRPO gap is partly (perhaps
+   wholly) a comparison of unanchored vs β=1e-3-KL-anchored training — see §14.1. This
+   does not explain why *our* ES does not forget, but it does mean the paper's own
+   contrast cannot separate "gradient-free" from "unanchored".
+4. **Two setup deltas we did not match:** their **max_tokens = 1024** (ours 512) and
+   **fp16** (ours bf16). Neither is an obvious route to a 6 pp HellaSwag swing, but the
+   token budget is the cheaper of the two to align if this is pushed further.
+5. **The ES implementation.** Ours is aligned with the official repo on reward shaping,
    seeds, α=σ/2 and greedy decoding ([§12](#12-alignment-with-the-official-implementation)),
    with one known deviation: `_es_noise` reseeds per layer with the bare seed, so
    same-shaped layers draw identical noise ([§10.9](#109-one-deviation-worth-flagging)).
