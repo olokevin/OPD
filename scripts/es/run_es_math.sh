@@ -73,6 +73,8 @@ INSPARSE_DENSITY=${INSPARSE_DENSITY:-0.01}
 CALIB_PATH=${CALIB_PATH:-${REPO}/datasets/es_math/calib_qwen2p5_math_7b.pt}
 ISO_BLOCK_SIZE=${ISO_BLOCK_SIZE:-128}   # skew-generator block size; cost is O(b*|W|)
 ISO_PERM=${ISO_PERM:-true}              # re-draw the block basis every seed
+LORA_RANK=${LORA_RANK:-1}               # rank 44 == fura's trainable coefficient count
+LORA_SCALE=${LORA_SCALE:-1.0}
 
 # ---------------- hardware / model / data ----------------
 NUM_ENGINES=${NUM_ENGINES:-1}
@@ -100,6 +102,7 @@ case "$PERTURB_MODE" in
   zoact)    TAG="zoact-r${SUBSPACE_RANK}" ;;
   insparse) TAG="insparse-d${INSPARSE_DENSITY}" ;;
   fura)     TAG="fura-btt-smallcore" ;;
+  lora)     TAG="lora-r${LORA_RANK}" ;;
   iso)      TAG="iso-fixedspec-b${ISO_BLOCK_SIZE}" ;;
   isobtt)   TAG="isobtt-fixedspec-smallcore" ;;
   *)        TAG="$PERTURB_MODE" ;;
@@ -126,6 +129,8 @@ python3 -m verl.trainer.main_es \
     es.insparse_density=${INSPARSE_DENSITY} \
     es.iso_block_size=${ISO_BLOCK_SIZE} \
     es.iso_perm=${ISO_PERM} \
+    es.lora_rank=${LORA_RANK} \
+    es.lora_scale=${LORA_SCALE} \
     es.sigma=${SIGMA} \
     es.alpha=${ALPHA} \
     es.population_size=${POPULATION_SIZE} \

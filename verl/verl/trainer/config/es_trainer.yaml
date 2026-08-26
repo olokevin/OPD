@@ -72,6 +72,12 @@ es:
   iso_block_size: 128       # block size of the skew generator (cost is O(b * |W|))
   iso_perm: true            # re-draw the block basis every seed (reaches all of O(m))
 
+  # lora: W = W_base + lora_scale * B @ A, both factors ES-trained (B zero-init).
+  # Trainable coefficients = lora_rank * sum(out+in) over the 112 fused linear weights
+  # = 2,222,080 per rank on Qwen2.5-Math-7B; rank 44 matches `fura` exactly (97,771,520).
+  lora_rank: 1
+  lora_scale: 1.0
+
   # Evaluate the untouched base model before iteration 1 and log it at step 0.
   eval_before_train: true
   # Save the ES coefficients whenever eval accuracy improves.

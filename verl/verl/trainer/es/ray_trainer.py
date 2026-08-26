@@ -388,6 +388,8 @@ class RayESTrainer:
             'swap_blocks': self.es_config.get('fura_swap_blocks', False),
             'iso_block_size': self.es_config.get('iso_block_size', 128),
             'iso_perm': self.es_config.get('iso_perm', True),
+            'lora_rank': self.es_config.get('lora_rank', 1),
+            'lora_scale': self.es_config.get('lora_scale', 1.0),
         }
         print(f"Installing ES perturbation mode '{mode}' with cfg={cfg} ...")
         infos = ray.get([

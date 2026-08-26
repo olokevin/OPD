@@ -512,3 +512,34 @@ dose-response isolates, and the reason the companion paper's Anchored Weight Dec
 works. Reframes their claim as "an unanchored optimiser at a large enough step forgets".
 
 -> `docs/results/ES/es_results.md` §14.1
+
+## [2026-08-26] ingest | LoRA-ES mode: both factors ES-trained, rank 44 == fura exactly
+
+New `PERTURB_MODE=lora` in `es_worker_extension.py` (~20 lines): `W = W_base + s·B·A` with
+**both** LoRA factors ES-trained, held in one flat fp32 coefficient tensor per layer so
+`_es_noise` / `es_update` / `es_save_coef` / `_es_target` need no special case. `B` is
+zero-init and `A ~ N(0,1/in)` from a CRC-of-name seed, so step 0 is the base model
+bit-exactly (verified: MATH-500 51.6 at step 0, same as every §7 arm).
+
+Cost is `r · Σ(out+in) = r · 2,222,080` over the 112 fused linear weights, so **rank 44
+reproduces `fura`'s 97,771,520 coefficients exactly** (confirmed on the live model) and
+rank 1 is the minimal adapter. `lora` is the natural control for `zoact`: same
+`ΔW = C·V` form, but a *random and trained* projection instead of a *calibrated and
+frozen* one.
+
+Gate `scripts/es/test_lora_es.py` all PASS (identity-at-init and perturb→restore both
+bit-exact). Footprints at σ=1e-3: r=44 **3.25e-3**, r=1 **3.84e-4** — note r=1 is ~4×
+**below** the 1.6e-3 bf16 rollout floor (§6), so its reward signal may not clear
+quantisation; `train/reward_std` is the tell and the fix would be σ, not α (§11.3).
+
+Running on GPU 7 (σ=1e-3, α=5e-3 = 10× dense; r=44 then r=1, 150 iters each). r=44
+iteration 1: reward_std 0.0248 (inside the §7 band 0.020–0.030), acc 51.6 → 52.4,
+385 s/iter.
+
+**Gotcha recorded (§15.4):** enabling the §14 prior-task probe alongside 7B ES training
+hard-kills the Ray worker on the first training iteration — its 512-prompt
+`prompt_logprobs` batch takes the GPU 64.4 → 82.8 GB and the next `generate` dies with no
+Python exception. Harmless on the 1.5B Countdown runs. Run 7B MATH arms with the probe
+off (which also keeps them comparable to §7); score retention offline instead.
+
+-> `docs/results/ES/es_results.md` §15

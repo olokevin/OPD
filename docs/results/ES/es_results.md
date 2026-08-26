@@ -1347,6 +1347,7 @@ outside its own MATH-500 loop needs the weights back.
 | Generative (format-sensitive) HellaSwag probe | `scripts/es/eval_hellaswag_gen.py` |
 | Countdown data / launcher / chain | `scripts/es/prepare_countdown_data.py`, `run_countdown_es.sh`, `chain_countdown.sh` |
 | Curve runs | `scripts/es/run_forget_curves.sh` |
+| LoRA-ES chain / gate | `scripts/es/chain_lora_math.sh`, `scripts/es/test_lora_es.py` |
 | Materialized checkpoints / eval JSON | `/data/yequan/es/materialized/<arm>`, `/data/yequan/es/forgetting/<arm>` |
 
 Reconstruction runs the **trainer's own** `StructuredESMixin.init_es_state` +
@@ -1687,3 +1688,93 @@ buys anything, and pays without being paid.
 `isobtt` (GPU 2, started 06:54) is still running.
 
 <!-- FORGET:COUNTDOWN END -->
+
+## 15. LoRA-ES — a trained random projection, at fura's footprint and at rank 1
+
+> Two arms on the [§7](#7-results) MATH protocol (Qwen2.5-Math-7B, MATH lvl 3–5 →
+> MATH-500, fixed 64-problem batch, N=30, 150 iterations), started 2026-08-26 on GPU 7.
+> wandb `ES-q2p5-7b`, runs `lora-r44_…` and `lora-r1_…`.
+
+### 15.1 Parameterisation
+
+`PERTURB_MODE=lora` adds a standard LoRA adapter and lets ES train **both** factors:
+
+```
+W = W_base + s · B A ,    A ∈ R^{r×in} ,  B ∈ R^{out×r} ,  s = lora_scale
+```
+
+Both factors live in **one flat fp32 coefficient tensor** per layer (`A` first, then `B`),
+so every existing piece of machinery — `_es_noise`, `es_update`, `es_save_coef`,
+`_es_target` — works unchanged; the mode is ~20 lines in
+`es_worker_extension.py`. `B` is **zero-init** (standard LoRA) and `A ~ N(0, 1/in)` from a
+name-derived CRC seed, so step 0 reproduces the base model *bit-exactly* and the curve
+starts from the published 51.6, not from "after one update".
+
+This makes `lora` the natural control for [`zoact`](#2-the-six-runs): both write
+`ΔW = C V` with `C` the trained `out`-side coefficient, but `zoact` freezes `V` to the
+top-r **calibrated activation** directions while `lora` starts from a **random** `V` and
+*also trains it*. The pair therefore separates "does the projection have to be informed?"
+from "does it have to be learned?".
+
+### 15.2 Choosing the ranks
+
+The structured modes cover the 112 fused 2-D linear weights (28 layers ×
+`qkv_proj`/`o_proj`/`gate_up_proj`/`down_proj`), so LoRA costs
+
+```
+r · Σ(out + in) = r · 28 · 79,360 = r · 2,222,080  coefficients
+```
+
+| rank | trainable coeffs | % of 7.6 B | matched to |
+|---|---|---|---|
+| **44** | **97,771,520** | 1.28% | **`fura` exactly** (97,771,520) |
+| **1** | 2,222,080 | 0.029% | minimal adapter |
+
+Rank 44 is an *exact* match, not a rounding — verified against the live model, where
+`init_es_state` reports 97,771,520. (For scale, `zoact r=1`'s 1,390,592 = Σ(out) alone,
+since it trains only the `out` side.)
+
+### 15.3 Numerical gate
+
+`scripts/es/test_lora_es.py` on real Qwen2.5-Math-7B weights — all PASS:
+
+| check | rank 1 | rank 44 |
+|---|---|---|
+| identity at init (`B=0`): max\|W − W_base\| | **0.0** | **0.0** |
+| perturb → restore | **0.0** | **0.0** |
+| (W⁺+W⁻)/2 − W | 2.4e-4 | 4.9e-4 (bf16 ULP ~1.6e-4) |
+| ‖ΔW‖_F/‖W‖_F at σ=1e-3 | 3.84e-04 | 3.25e-03 |
+| `es_update` moves coefficients | ✓ | ✓ |
+
+⚠️ **Rank 1 sits below the bf16 rollout floor.** [§6](#6-numerical-health) put that floor
+at 1.6e-3 relative; `lora r=44` at 3.25e-3 is ~2× above it (the same regime as `zoact`
+4.2e-3 and `fura` 4.0e-3), but **`lora r=1` at 3.84e-4 is ~4× *below*** — most of its
+perturbation is quantisation noise in the weights vLLM actually runs. The fp32
+coefficient masters still accumulate updates, but the reward differences driving them may
+not clear the floor. `train/reward_std` is the tell (the six §7 arms sat at 0.020–0.030);
+if it collapses, the fix is **σ, not α** ([§11.3](#113-answer-yes--but-scale-σ-not-α)).
+
+### 15.4 Setup and status
+
+σ = **1e-3** (the paper / dense-ES value), α = **5e-3** = **10× dense ES's** 5e-4 — so
+α/σ = 5 where the paper convention is 0.5. Per-iteration coefficient motion is
+α/√N ≈ 9.1e-4, about one perturbation's worth per step.
+
+`lora r=44` iteration 1: `reward_std` **0.0248** (inside the §7 band), `train/accuracy`
+51.6 → 52.4, **385 s/iteration** (§7 arms ~363 s). Rank 1 runs next.
+
+**One failure worth recording.** The first launch enabled the
+[§14.2](#142-harness) prior-task probe alongside training and **both ranks were killed
+during the first training iteration** — a hard Ray-worker death (no Python exception, no
+CUDA error). The probe's 512-prompt `prompt_logprobs` batch is a large transient on a
+7B model with a 152k vocab: it completes at step 0, takes the GPU from 64.4 → 82.8 GB,
+and the next `generate` dies. It is fine on the 1.5B Countdown runs
+([§14.5](#145-countdown--hellaswag-the-papers-own-task-pair)), which is why it had not
+surfaced. Running the MATH arms with the probe off — which is also what makes them
+comparable to [§7](#7-results) — fixed it. If retention numbers are wanted for these
+arms, materialise the checkpoints and score them offline instead
+([§14.2](#142-harness)), or drop `es.forget_batch_size` well below 512.
+
+<!-- LORA:RESULTS BEGIN -->
+_(MATH-500 curves land here)_
+<!-- LORA:RESULTS END -->

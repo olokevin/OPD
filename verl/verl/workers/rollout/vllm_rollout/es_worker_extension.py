@@ -1,5 +1,6 @@
 import gc
 import time
+import zlib
 import random
 import numpy as np
 import torch
@@ -378,6 +379,11 @@ class WorkerExtension:
 #                                              the layer's input activations
 #                                              (ZO-Act, arXiv:2607.01125; W_eff = W + V_r B)
 #   insparse P(C)[:, idx] = C                  idx = top-k input channels by activation RMS
+#   lora     P(C) = s * B @ A                  standard LoRA adapter, *both* factors ES-trained
+#                                              (A: r x in, B: out x r, B zero-init so step 0 is
+#                                              the base model exactly).  Same additive form as
+#                                              zoact but with a random projection instead of a
+#                                              calibrated one, and with the projection trainable.
 #   fura     P(C)[:, blk_j] = A_j @ C_j        W_j = A_j R_j is the full-rank BTT
 #                                              (output_one_block) factorization of input
 #                                              block j, A_j = U_j diag(S_j); only the small
@@ -630,6 +636,28 @@ class StructuredESMixin:
                 n_manifold += st["n_blk"] * st["b"] * (st["b"] - 1) // 2
                 # Overwrite W with its exact BTT reconstruction so step 0 is consistent.
                 self._iso_write(p, st, None, 0.0)
+
+            elif mode == "lora":
+                # W = W_base + s * B @ A, with A (r,in) and B (out,r) both ES-trained.
+                # Both factors live in one flat fp32 coefficient tensor so the existing
+                # noise / update / save machinery needs no special case.  B is zero-init
+                # (standard LoRA), so step 0 reproduces the base model exactly.
+                r = int(cfg.get("lora_rank", 1))
+                coef = torch.zeros(r * (in_f + out_f), dtype=torch.float32, device=p.device)
+                gen = torch.Generator(device=p.device)
+                gen.manual_seed(zlib.crc32(name.encode()) & 0x7FFFFFFF)
+                coef[: r * in_f].normal_(0.0, in_f ** -0.5, generator=gen)
+                self._es[name] = {
+                    "kind": "lora",
+                    "base": p.data.detach().clone(),
+                    "coef": coef,
+                    "r": r,
+                    "in_f": in_f,
+                    "out_f": out_f,
+                    "lora_s": float(cfg.get("lora_scale", 1.0)),
+                }
+                n_coef += coef.numel()
+                n_base += p.numel()
 
             elif mode == "fura":
                 n_blk, b = _es_closest_factor_pair(in_f)
@@ -885,6 +913,16 @@ class StructuredESMixin:
         if kind == "insparse":
             c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)
             p.data[:, st["idx"]] = (c + st["base_cols"]).to(p.dtype)
+            return
+        if kind == "lora":
+            c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)
+            r, in_f, out_f = st["r"], st["in_f"], st["out_f"]
+            a = c[: r * in_f].view(r, in_f)
+            b = c[r * in_f :].view(out_f, r)
+            delta = torch.mm(b, a).mul_(st["lora_s"])
+            delta.add_(st["base"])
+            p.data.copy_(delta)
+            del delta
             return
         # fura: W[:, blk_j] = A_j @ (R0_j + coef_j + scale*noise_j)
         R = st["R0"] + st["coef"] if noise is None else torch.add(
