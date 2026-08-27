@@ -1760,8 +1760,9 @@ if it collapses, the fix is **σ, not α** ([§11.3](#113-answer-yes--but-scale-
 α/σ = 5 where the paper convention is 0.5. Per-iteration coefficient motion is
 α/√N ≈ 9.1e-4, about one perturbation's worth per step.
 
-`lora r=44` iteration 1: `reward_std` **0.0248** (inside the §7 band), `train/accuracy`
-51.6 → 52.4, **385 s/iteration** (§7 arms ~363 s). Rank 1 runs next.
+`lora r=44` completed 150/150 in 15 h 06 m at 362 s/iteration (§7 arms ~363 s) —
+see [§15.5](#155-result--rank-44-learns-but-slowly-and-never-plateaus). `lora r=1`
+started 2026-08-27 05:46.
 
 **One failure worth recording.** The first launch enabled the
 [§14.2](#142-harness) prior-task probe alongside training and **both ranks were killed
@@ -1776,5 +1777,49 @@ arms, materialise the checkpoints and score them offline instead
 ([§14.2](#142-harness)), or drop `es.forget_batch_size` well below 512.
 
 <!-- LORA:RESULTS BEGIN -->
-_(MATH-500 curves land here)_
+
+### 15.5 Result — rank 44 learns, but slowly, and never plateaus
+
+`lora r=44` finished 150/150 (15 h 06 m, 362 s/iteration). `reward_std` averaged **0.0226**
+over the whole run (last-10 mean 0.0227), squarely inside the §7 band — the 10× α caused
+no instability and the perturbation cleared the bf16 floor comfortably.
+
+| step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120 | 130 | 140 | 150 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| MATH-500 | 51.6 | 62.4 | 62.6 | 64.2 | 65.0 | 66.0 | 66.2 | 68.0 | 69.0 | 70.6 | 67.8 | 66.4 | 68.0 | 67.6 | 69.2 | **71.6** |
+
+Against the [leaderboard](#leaderboard) (plateau = mean over steps ≥ 40):
+
+| Method | Plateau (≥40) | Best @ step |
+|---|---|---|
+| fura | 72.68 ± 0.90 | 74.0 @ 30 |
+| iso | 72.42 ± 0.78 | 74.0 @ 60 |
+| insparse | 72.07 ± 0.70 | 73.4 @ 80 |
+| isobtt | 71.95 ± 0.94 | 73.4 @ 120 |
+| dense | 71.82 ± 1.19 | 73.4 @ 40 |
+| zoact r=1 | 70.50 ± 0.94 | 72.2 @ 130 |
+| **lora r=44** | **67.95 ± 0.56** | **71.6 @ 150** |
+
+**The plateau statistic understates it, because `lora` never plateaus.** Every other arm is
+flat by step ~40; `lora` is still climbing at 150, where it posts its best score of the
+run (71.6) — within ~1–2 pp of the others' bests. What separates it is **shape, not
+level**: it takes ~90 iterations to reach what `dense` reaches in 10, and the ≥40 mean
+punishes that ramp.
+
+**The likely cause is footprint, not the subspace.** At σ=1e-3 `lora r=44` moves the
+weights **3.25e-3** — the same scale as `zoact` (4.2e-3) and `fura` at the paper σ
+(4.0e-3), all of which are the *slow* configurations. `fura`'s winning entry runs at
+σ=1.25e-2 (footprint ~5e-2, **15× larger**), and [§11.3](#113-answer-yes--but-scale-σ-not-α)
+already showed that moving `fura` from −12.25 pp to +0.82 pp was a **σ** change, not an α
+change. The 10× α here did not substitute: it kept the update stable but could not make a
+small perturbation informative. So the honest reading is that **`lora r=44` has not yet
+been given its operating point**, and the follow-up is a σ sweep (σ ∈ {4e-3, 1.25e-2}),
+not a verdict on random-vs-structured projections.
+
+What *can* be said at matched footprint (~3–4e-3) and matched trainable count
+(97,771,520): a **random, trained** projection (`lora`, 67.95) is behind a **structured
+block-SVD** one (`fura` at the same σ was even further behind, −12.25 pp, before its σ
+fix) and behind a **calibrated, frozen** rank-1 one (`zoact`, 70.50) that has 44× fewer
+coefficients. Rank has not bought quality here.
+
 <!-- LORA:RESULTS END -->

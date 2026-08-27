@@ -9,7 +9,6 @@ similar to main_ppo.py but for zeroth-order optimization.
 import json
 import os
 import socket
-import tempfile
 import time
 
 import hydra
@@ -20,6 +19,7 @@ from transformers import AutoTokenizer
 from vllm import TokensPrompt
 
 from verl.trainer.es.ray_trainer import RayESTrainer
+from verl.trainer.ray_session import init_ray
 from verl.utils.device import auto_set_device
 
 
@@ -116,20 +116,7 @@ def run_es(config) -> None:
     
     # Initialize Ray
     if not ray.is_initialized():
-        # Clean Ray environment
-        os.environ.pop("RAY_ADDRESS", None)
-        os.environ.pop("RAY_HEAD_IP", None)
-        os.environ.pop("RAY_GCS_SERVER_ADDRESS", None)
-        
-        unique_dir = tempfile.mkdtemp(prefix=f"ray_es_session_{int(time.time())}_")
-        
-        ray.init(
-            address="local",
-            include_dashboard=False,
-            ignore_reinit_error=True,
-            _temp_dir=unique_dir,
-            dashboard_port=None
-        )
+        init_ray(prefix=f"ray_es_session_{int(time.time())}_")
     
     # Load tokenizer
     model_path = config.model.path

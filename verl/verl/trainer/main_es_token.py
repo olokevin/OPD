@@ -2,7 +2,6 @@
 Mirrors main_np.py."""
 import os
 import socket
-import tempfile
 import time
 
 import hydra
@@ -11,6 +10,7 @@ from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from verl.trainer.es_token.ray_trainer import RayESTokenTrainer
+from verl.trainer.ray_session import init_ray
 from verl.utils.device import auto_set_device
 
 
@@ -29,14 +29,9 @@ def run_es_token(config) -> None:
     OmegaConf.resolve(config)
 
     if not ray.is_initialized():
-        for k in ("RAY_ADDRESS", "RAY_HEAD_IP", "RAY_GCS_SERVER_ADDRESS"):
-            os.environ.pop(k, None)
         # Short prefix: Ray's plasma socket lives under this dir and AF_UNIX
         # paths are capped at 107 bytes.
-        unique_dir = tempfile.mkdtemp(prefix=f"ray_es_{int(time.time())}_")
-        ray.init(address="local", include_dashboard=False,
-                 ignore_reinit_error=True, _temp_dir=unique_dir,
-                 dashboard_port=None)
+        init_ray(prefix=f"ray_es_{int(time.time())}_")
 
     model_path = config.model.path
     tokenizer = AutoTokenizer.from_pretrained(

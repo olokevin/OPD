@@ -543,3 +543,29 @@ Python exception. Harmless on the 1.5B Countdown runs. Run 7B MATH arms with the
 off (which also keeps them comparable to §7); score retention offline instead.
 
 -> `docs/results/ES/es_results.md` §15
+
+## [2026-08-27] ingest | LoRA-ES rank 44 result: learns, but never plateaus
+
+`lora r=44` finished 150/150 (15 h 06 m, 362 s/iter, reward_std 0.0226 mean — the 10x alpha
+caused no instability). MATH-500 51.6 -> **best 71.6 @ step 150, still rising**; plateau
+mean (>=40) **67.95 +/- 0.56**, below all six section-7 arms (fura 72.68 ... zoact 70.50).
+
+The plateau statistic understates it: every other arm is flat by step ~40, `lora` takes
+~90 iterations to reach what `dense` reaches in 10, so the >=40 mean punishes the ramp.
+Shape differs, not level — its final 71.6 is within 1-2 pp of the others' bests.
+
+Most likely cause is **footprint, not the projection**: at sigma=1e-3 lora r=44 moves the
+weights 3.25e-3, the same scale as zoact (4.2e-3) and fura-at-paper-sigma (4.0e-3), all of
+which are the slow configurations; fura's winning entry is sigma=1.25e-2 (~5e-2, 15x
+larger). Section 11.3 already established that sigma, not alpha, is the operative knob —
+and the 10x alpha here kept the update stable without making a small perturbation
+informative. Follow-up = sigma sweep for lora, not a verdict on random-vs-structured.
+
+At matched trainable count (97,771,520) and matched footprint, a random+trained projection
+(67.95) trails a calibrated+frozen rank-1 one (zoact 70.50) with 44x fewer coefficients —
+rank did not buy quality here.
+
+`lora r=1` started 05:46; its footprint (3.84e-4) is ~4x below the bf16 rollout floor, so
+its reward_std is the number to watch.
+
+-> `docs/results/ES/es_results.md` section 15.5
