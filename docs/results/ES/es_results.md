@@ -1746,13 +1746,24 @@ since it trains only the `out` side.)
 | ‖ΔW‖_F/‖W‖_F at σ=1e-3 | 3.84e-04 | 3.25e-03 |
 | `es_update` moves coefficients | ✓ | ✓ |
 
-⚠️ **Rank 1 sits below the bf16 rollout floor.** [§6](#6-numerical-health) put that floor
-at 1.6e-3 relative; `lora r=44` at 3.25e-3 is ~2× above it (the same regime as `zoact`
-4.2e-3 and `fura` 4.0e-3), but **`lora r=1` at 3.84e-4 is ~4× *below*** — most of its
-perturbation is quantisation noise in the weights vLLM actually runs. The fp32
-coefficient masters still accumulate updates, but the reward differences driving them may
-not clear the floor. `train/reward_std` is the tell (the six §7 arms sat at 0.020–0.030);
-if it collapses, the fix is **σ, not α** ([§11.3](#113-answer-yes--but-scale-σ-not-α)).
+**Rank 1 sits below the bf16 rollout floor — and it does not matter.**
+[§6](#6-numerical-health) put that floor at 1.6e-3 relative; `lora r=44` at 3.25e-3 is ~2×
+above it (the same regime as `zoact` 4.2e-3 and `fura` 4.0e-3), but **`lora r=1` at
+3.84e-4 is ~4× *below***, so most of its per-entry displacement is lost to quantisation in
+the weights vLLM actually runs. We predicted this might collapse the reward signal and
+starve the ES estimator. **Measured: it does not.** `lora r=1`'s first four iterations give
+`train/reward_std` = 0.0211 / 0.0197 / 0.0241 / 0.0294 (mean 0.0236) — inside the same
+0.020–0.030 band the six §7 arms occupy — with train accuracy already climbing
+50.1 → 52.0.
+
+The prediction was wrong because it reasoned about *average per-entry* displacement. A
+rank-1 update is a **single coherent direction** applied across the whole matrix, and the
+ES reward is **binary per problem**: rounding destroys magnitude, not coherence, and only
+a modest logit shift on borderline problems is needed to spread rewards across the 30
+population members. **The bf16 floor bounds how finely a perturbation can be represented,
+not whether a low-rank one is visible in the reward.** Worth carrying forward — the same
+caution in §6 about `zoact`/`fura` being "only 2.6× the bf16 floor" is likewise weaker
+than it reads.
 
 ### 15.4 Setup and status
 

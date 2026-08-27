@@ -569,3 +569,24 @@ rank did not buy quality here.
 its reward_std is the number to watch.
 
 -> `docs/results/ES/es_results.md` section 15.5
+
+## [2026-08-27] lint | The bf16-floor caution is weaker than section 6 implies
+
+Recorded prediction, falsified. `lora r=1`'s weight-space footprint (3.84e-4) is ~4x
+**below** the 1.6e-3 bf16 rollout floor, and we predicted the reward signal might collapse.
+Measured over its first four iterations: `train/reward_std` = 0.0211 / 0.0197 / 0.0241 /
+0.0294 (mean 0.0236), squarely inside the 0.020-0.030 band of the six section-7 arms, with
+train accuracy climbing 50.1 -> 52.0.
+
+Why the prediction failed: it reasoned about *average per-entry* displacement, but a rank-1
+update is a single **coherent** direction across the whole matrix and the ES reward is
+**binary per problem**. Rounding destroys magnitude, not coherence; a modest logit shift on
+borderline problems suffices to spread reward across 30 population members. The bf16 floor
+bounds how finely a perturbation can be *represented*, not whether a low-rank one is
+*visible in the reward*.
+
+Consequence for the wiki: section 6's warning that zoact/fura sit at "only 2.6x the bf16
+quantisation floor" reads as more alarming than the evidence supports, and section 15.3 now
+says so.
+
+-> `docs/results/ES/es_results.md` section 15.3
