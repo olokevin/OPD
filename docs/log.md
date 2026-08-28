@@ -590,3 +590,28 @@ quantisation floor" reads as more alarming than the evidence supports, and secti
 says so.
 
 -> `docs/results/ES/es_results.md` section 15.3
+
+## [2026-08-27] ingest | LoRA-ES rank 1 done: a calibrated direction beats a learned one by 15 pp
+
+`lora r=1` finished 150/150 (15 h 25 m, 370 s/iter, reward_std 0.0246 mean). MATH-500
+51.6 -> **58.6 @ 150** (+7.0 pp), plateau (>=40) **55.07 +/- 0.65**. Like r=44 it is still
+rising at 150 where every section-7 arm is flat by 40.
+
+**The designed control pays off.** `lora` and `zoact` both write dW = C*V and differ only in
+where V comes from: `zoact r=1` uses the **calibrated, frozen** top-1 activation singular
+direction (1,390,592 coeffs, plateau 70.50); `lora r=1` uses a **random** one that ES also
+**trains** (2,222,080 coeffs, plateau 55.07). A **15 pp gap in favour of calibration**, with
+lora holding the strictly larger hypothesis class -- it could rotate A onto the calibrated
+direction and over 150 iterations does not get close. With a population of 30 in a 2.2M-dim
+coefficient space ES has too few probes per step to *discover* an input subspace; it can
+only exploit one it is handed.
+
+**Caveat, flagged prominently:** the comparison is confounded by footprint. At sigma=1e-3
+zoact r=1 moves 4.2e-3 and lora r=1 moves 3.84e-4 -- an 11x gap; likewise lora r=44
+(3.25e-3) vs fura's winning 5e-2. Section 11.3 moved fura 13 pp on sigma alone, so a sigma
+sweep is a prerequisite before reading any of this as a subspace verdict. What is NOT
+confounded is within-lora (identical sigma/alpha/protocol): rank 44 +20.0 pp vs rank 1
++7.0 pp -- rank buys a lot for a random projection, the mirror image of zoact where rank 1
+on the *right* direction already reaches 70.50.
+
+-> `docs/results/ES/es_results.md` sections 15.5, 15.6

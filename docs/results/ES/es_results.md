@@ -63,6 +63,18 @@ generative-probe explanation for the paper's result is **falsified** (0% unparse
 `dense` generative accuracy unchanged); the remaining candidate is simply that their ES
 run sat at a larger ‖ΔW‖ than ours, which they never report.
 
+**LoRA-ES ([§15](#15-lora-es--a-trained-random-projection-at-furas-footprint-and-at-rank-1)).**
+A new `lora` mode trains **both** LoRA factors with ES; cost is `r · 2,222,080` coefficients,
+so **rank 44 reproduces `fura`'s 97,771,520 exactly**. At σ=1e-3 / α=5e-3 (10× dense),
+r=44 gains **+20.0 pp** (best 71.6 @ 150) and r=1 **+7.0 pp** (58.6) — both **still rising
+at 150** where every §7 arm is flat by 40. The designed control is the headline: against
+`zoact r=1`, whose projection is **calibrated and frozen**, `lora r=1`'s **random and
+trained** projection loses **15 pp** (55.07 vs 70.50) while holding the strictly larger
+hypothesis class — one calibration forward pass beats 150 × 30 ES probes at finding the
+input direction. Both LoRA arms are under-scaled (footprints 3.25e-3 / 3.84e-4 vs `fura`'s
+winning 5e-2), so a σ sweep is a prerequisite before reading any of this as a verdict on
+subspaces.
+
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
 early**. On what did run, BP reaches ES-level accuracy in ~1 h vs ~15 h, `iso` again
@@ -1789,15 +1801,19 @@ arms, materialise the checkpoints and score them offline instead
 
 <!-- LORA:RESULTS BEGIN -->
 
-### 15.5 Result — rank 44 learns, but slowly, and never plateaus
+### 15.5 Result — both ranks learn, neither plateaus, and rank matters enormously
 
-`lora r=44` finished 150/150 (15 h 06 m, 362 s/iteration). `reward_std` averaged **0.0226**
-over the whole run (last-10 mean 0.0227), squarely inside the §7 band — the 10× α caused
-no instability and the perturbation cleared the bf16 floor comfortably.
+Both arms finished 150/150 (r=44: 15 h 06 m / 362 s per iteration; r=1: 15 h 25 m / 370 s).
+`reward_std` averaged **0.0226** and **0.0246** respectively — both inside the §7 band, so
+the 10× α caused no instability at either rank.
 
 | step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120 | 130 | 140 | 150 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| MATH-500 | 51.6 | 62.4 | 62.6 | 64.2 | 65.0 | 66.0 | 66.2 | 68.0 | 69.0 | 70.6 | 67.8 | 66.4 | 68.0 | 67.6 | 69.2 | **71.6** |
+| **lora r=44** | 51.6 | 62.4 | 62.6 | 64.2 | 65.0 | 66.0 | 66.2 | 68.0 | 69.0 | 70.6 | 67.8 | 66.4 | 68.0 | 67.6 | 69.2 | **71.6** |
+| **lora r=1** | 51.6 | 53.8 | 51.8 | 53.4 | 51.6 | 54.2 | 53.2 | 54.0 | 52.2 | 53.4 | 56.4 | 56.2 | 56.6 | 57.4 | 57.0 | **58.6** |
+
+`lora r=1` gains **+7.0 pp** (plateau 55.07 ± 0.65) against `lora r=44`'s **+20.0 pp**.
+Both are still rising at step 150.
 
 Against the [leaderboard](#leaderboard) (plateau = mean over steps ≥ 40):
 
@@ -1810,6 +1826,7 @@ Against the [leaderboard](#leaderboard) (plateau = mean over steps ≥ 40):
 | dense | 71.82 ± 1.19 | 73.4 @ 40 |
 | zoact r=1 | 70.50 ± 0.94 | 72.2 @ 130 |
 | **lora r=44** | **67.95 ± 0.56** | **71.6 @ 150** |
+| **lora r=1** | **55.07 ± 0.65** | **58.6 @ 150** |
 
 **The plateau statistic understates it, because `lora` never plateaus.** Every other arm is
 flat by step ~40; `lora` is still climbing at 150, where it posts its best score of the
@@ -1827,10 +1844,34 @@ small perturbation informative. So the honest reading is that **`lora r=44` has 
 been given its operating point**, and the follow-up is a σ sweep (σ ∈ {4e-3, 1.25e-2}),
 not a verdict on random-vs-structured projections.
 
-What *can* be said at matched footprint (~3–4e-3) and matched trainable count
-(97,771,520): a **random, trained** projection (`lora`, 67.95) is behind a **structured
-block-SVD** one (`fura` at the same σ was even further behind, −12.25 pp, before its σ
-fix) and behind a **calibrated, frozen** rank-1 one (`zoact`, 70.50) that has 44× fewer
-coefficients. Rank has not bought quality here.
+### 15.6 The `lora`-vs-`zoact` control: a calibrated direction beats a learned one
+
+This is what the mode was built for. Both write `ΔW = C·V` with `C` the trained `out`-side
+coefficient; they differ only in where `V` comes from:
+
+| | `V` | trainable coeffs | plateau (≥40) | best |
+|---|---|---|---|---|
+| `zoact r=1` | **calibrated**, frozen (top-1 activation singular direction) | 1,390,592 | **70.50 ± 0.94** | 72.2 |
+| `lora r=1` | **random**, and *also trained* | 2,222,080 | **55.07 ± 0.65** | 58.6 |
+
+**A 15 pp gap, with `lora` holding the strictly larger hypothesis class.** `lora r=1` can
+in principle rotate `A` onto the calibrated direction — it has 1.6× more coefficients and
+strictly more freedom — and over 150 iterations it does not get close. One forward pass of
+calibration ([§5](#5-calibration-runs-2--3)) hands ES a direction that 150 iterations ×
+30 probes cannot find on its own. With a population of 30 in a 2.2 M-dimensional
+coefficient space, ES simply has too few probes per step to *discover* the input subspace;
+it can only exploit one it is given.
+
+⚠️ **Confounded by footprint, and not by a little.** At σ=1e-3 the two move the weights by
+very different amounts: `zoact r=1` **4.2e-3** vs `lora r=1` **3.84e-4** — an **11×** gap
+(§15.3). So this comparison mixes *projection quality* with *step size*, and the same
+applies to `lora r=44` (3.25e-3) against `fura`'s winning 5e-2. **The σ sweep is a
+prerequisite, not a refinement**, before any of these are read as statements about
+subspaces: [§11.3](#113-answer-yes--but-scale-σ-not-α) moved `fura` 13 pp on σ alone.
+
+What is *not* confounded is the comparison **within** `lora`, where σ, α, protocol and
+seed are identical: **rank 44 gains +20.0 pp, rank 1 gains +7.0 pp**. Rank buys a great
+deal for a random projection — which is the mirror image of `zoact`, where rank 1 on the
+*right* direction already reaches 70.50.
 
 <!-- LORA:RESULTS END -->
