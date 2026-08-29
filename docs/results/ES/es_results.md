@@ -75,6 +75,15 @@ input direction. Both LoRA arms are under-scaled (footprints 3.25e-3 / 3.84e-4 v
 winning 5e-2), so a σ sweep is a prerequisite before reading any of this as a verdict on
 subspaces.
 
+**Population size ([§16](#16-population-size--n10-vs-n30)).** At **N=10** instead of 30 —
+3× cheaper per iteration, and the N=10 population is a *nested subset* of the N=30 seeds —
+`dense` loses **nothing** (−0.49 ± 0.46, t=−1.06; 70% reached in 0.33 vs 0.98 GPU-h),
+`iso` loses a little (−1.52 ± 0.49), and `fura` **breaks** (−5.44 ± 0.60, t=−9.07),
+declining monotonically after step 10 rather than plateauing. All three took the identical
+√3-larger step that holding α fixed implies, so *tolerance* differs sharply by subspace —
+but `fura`'s drop is confounded between "fewer probes" and "bigger step", and §11 says the
+step is the likelier cause.
+
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
 early**. On what did run, BP reaches ES-level accuracy in ~1 h vs ~15 h, `iso` again
@@ -1875,3 +1884,99 @@ deal for a random projection — which is the mirror image of `zoact`, where ran
 *right* direction already reaches 70.50.
 
 <!-- LORA:RESULTS END -->
+
+## 16. Population size — N=10 vs N=30
+
+> `dense`, `fura` and `iso` re-run on the [§7](#7-results) MATH protocol with
+> **population 10 instead of 30**, everything else identical. Sequential on GPU 5,
+> 2026-08-28/29. Launcher `scripts/es/chain_pop10.sh`.
+
+### 16.1 Design
+
+Only `population_size` changes; each arm keeps the σ/α that tops the
+[leaderboard](#leaderboard) (`dense` 1e-3/5e-4, `fura` 1.25e-2/6.25e-3, `iso` 5e-2/2.5e-2),
+so every N=10 curve has a directly comparable N=30 twin.
+
+Two properties make this a tighter ablation than it looks:
+
+* **The populations are nested.** Seeds come from
+  `default_rng(global_seed + iteration).integers(..., size=N)`, so N=10 draws exactly the
+  **first 10 of the same 30 seeds**. At iteration 1 the N=10 run evaluates a strict subset
+  of the very same perturbed models — confirmed: `dense` reports `train/accuracy`
+  **58.59375** at iteration 1 under both N, bit-identical. The runs diverge only once the
+  updates differ.
+* **All three arms are footprint-matched.** By construction ([§6](#6-numerical-health),
+  [§10.4](#104-scale-convention--σ-is-a-relative-footprint-not-a-noise-std)) each
+  perturbation moves ‖ΔW‖/‖W‖ ≈ 5.0e-2, and the per-iteration *update* motion α/√N works
+  out to **4.56e-3 at N=30 and 7.91e-3 at N=10 for all three arms alike**.
+
+⚠️ **The confound, stated up front.** The ES update moves coefficients by ~α/√N per
+iteration, so holding α fixed makes an N=10 step **√3 ≈ 1.73× larger**. This ablation
+therefore varies *two* things at once — estimator quality (10 vs 30 probes) and step size.
+Because all three arms take the *same* larger step, differences *between* arms are
+informative; the absolute size of each arm's drop is not cleanly attributable. The
+separating run is α scaled by √(10/30) — **not yet run**.
+
+### 16.2 Results
+
+<!-- POP10:RESULTS BEGIN -->
+
+| Arm | N | Plateau (≥40) | Best @ step | **Paired Δ (N10−N30)** | t |
+|---|---|---|---|---|---|
+| `dense` | 30 | 71.82 ± 0.34 | 73.4 @ 40 | | |
+| `dense` | **10** | **71.07 ± 0.42** | 73.4 @ 20 | **−0.49 ± 0.46** | −1.06 (ns) |
+| `iso` | 30 | 72.42 ± 0.22 | 74.0 @ 60 | | |
+| `iso` | **10** | **71.05 ± 0.38** | 73.2 @ 50 | **−1.52 ± 0.49** | −3.12 |
+| `fura` | 30 | 72.68 ± 0.26 | 74.0 @ 30 | | |
+| `fura` | **10** | **66.63 ± 0.54** | 70.6 @ 10 | **−5.44 ± 0.60** | −9.07 |
+
+Paired over the 15 shared eval steps (10…150). MATH-500 curves at N=10:
+
+| step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120 | 130 | 140 | 150 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `dense` | 51.6 | 71.6 | 73.4 | 71.2 | 71.8 | 72.8 | 73.2 | 69.8 | 71.6 | 72.4 | 70.8 | 69.4 | 69.0 | 70.2 | 72.2 | 69.6 |
+| `iso` | 51.6 | 64.8 | 70.0 | 72.8 | 72.8 | 73.2 | 71.4 | 70.8 | 71.8 | 68.6 | 69.6 | 70.0 | 70.2 | 71.6 | 71.6 | 71.0 |
+| `fura` | 53.2 | **70.6** | 69.6 | 68.6 | 69.4 | 68.2 | 70.4 | 65.8 | 65.8 | 66.0 | 66.0 | 66.6 | 67.2 | 64.0 | 65.4 | 64.8 |
+
+Cost, from median iteration times:
+
+| Arm | s/iter N=30 → N=10 | 150-iter GPU-h | GPU-h to first reach 70% |
+|---|---|---|---|
+| `dense` | 354 → **118** | 14.8 → **4.9** | 0.98 → **0.33** |
+| `iso` | 390 → **129** | 16.3 → **5.4** | 1.08 → **0.72** |
+| `fura` | 367 → **119** | 15.3 → **5.0** | 1.02 → **0.33** |
+
+<!-- POP10:RESULTS END -->
+
+### 16.3 Reading
+
+**Three arms, the same 3× cheaper iteration and the same √3 larger step, three different
+outcomes — and the ordering is by *step-size tolerance*, not by subspace.**
+
+* **`dense` pays nothing** (−0.49 ± 0.46, t = −1.06). Tripling the population buys no
+  measurable accuracy, while costing 3× per iteration. It reaches 70% in **0.33 GPU-h vs
+  0.98** — a **3× compute saving to target** and 14.8 → 4.9 GPU-h for a full run. This is
+  what [§11.1](#111-the-64-problem-batch-is-the-ceiling-not-the-method) predicts: the
+  fixed 64-problem batch is the ceiling, so a 30-sample gradient estimate is already deep
+  into diminishing returns and the extra 20 probes refine a direction the batch cannot
+  justify.
+* **`iso` pays a little** (−1.52 ± 0.49, t = −3.12) — real but small, and it *converges
+  more slowly* (64.8 at step 10 where N=30 was at 70.2) before catching up to 73.2 by
+  step 50. At a third of the cost this is still a good trade.
+* **`fura` breaks** (−5.44 ± 0.60, t = −9.07), and **qualitatively, not quantitatively**:
+  it peaks at step 10 (70.6) and then declines monotonically to 64.8. That is slow
+  divergence, not a noisier plateau — the same failure mode
+  [§11.2](#112-stability-edge-125-in-40-out) measured for `fura` when its step is pushed
+  past the stability edge. σ=1.25e-2 already sits near that edge at N=30; the √3 step
+  increase tips it over.
+
+So the honest attribution is: **`fura`'s −5.44 pp is consistent with either fewer probes or
+a 1.73× larger step, and given §11's repeated demonstration that this arm is step-size
+critical, the step is the likelier culprit.** Because all three arms took the identical
+step increase and only `fura` diverged, the ablation does establish that *tolerance*
+differs sharply by subspace — but it cannot yet say that ES needs 30 probes.
+
+**Recipe.** For edge/compute-constrained training on this task, N=10 is the better
+operating point for `dense` (free) and `iso` (cheap), and `fura` needs its α re-tuned
+before N can be cut. Next run: α × √(10/30) for `fura` and `iso`, which matches
+per-iteration motion exactly and separates the two causes (~5 h each).

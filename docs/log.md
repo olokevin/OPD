@@ -615,3 +615,140 @@ confounded is within-lora (identical sigma/alpha/protocol): rank 44 +20.0 pp vs 
 on the *right* direction already reaches 70.50.
 
 -> `docs/results/ES/es_results.md` sections 15.5, 15.6
+
+## [2026-08-26] ingest | The setting where BP-OPD learns; es_token measured against it
+
+-> `docs/results/zo_opd.md` section 11 (new), plus summary-table row and a rewritten bottom line.
+
+Found the pair/config where BP-OPD demonstrably learns on one GPU: `Qwen/Qwen3-1.7B` (non-thinking)
+<- `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`, NERSC slurm hyperparameters verbatim
+(`slurm/opd/full/opd_2node_env.sh`). The long-standing "neither BP-OPD nor es_token learns" result
+was `enable_thinking` defaulting TRUE on a hybrid Qwen3 student, so every rollout hit the token cap
+mid-`<think>` -- not the algorithms.
+
+Apples-to-apples n=8 eval of base / BP step279 / ES step169: BP up on 4/4 benchmarks
+(MATH-500 0.7250 -> 0.7532, AMC23 0.3931 -> 0.4172); es_token inside noise on all four, RMS(dW) only
+0.18% of typical weight magnitude. BP tracks the 8-GPU reference exactly to step 60 then plateaus at
+the 3072 cap (reference response length grows to 3583).
+
+Shipped: `es_token.fp32_master` (host-resident), es_token HF checkpointing incl. fused->split weight
+conversion, `enable_thinking` plumbing in `es/task_utils.py`, `es_token.max_prompt_length` filter,
+`teacher_max_model_len`, `--enable-thinking` in eval_math.py, launchers under
+`scripts/zo_opd/nersc_align/`. Corrected two earlier claims: bf16 masters attenuate rather than
+freeze updates, and the greedy heldout probe is not a usable ruler.
+
+Top open item: es_token's training-time decode inflates response length 1397 -> 3024 while the
+trained checkpoint generates exactly what base does -- possible off-distribution gradient estimation.
+
+## [2026-08-28] ingest | Why es_token does not learn: the update footprint, not the code and not sigma
+
+-> `docs/results/zo_opd.md` section 12 (new), plus corrected rows in `docs/index.md` for
+   `wiki/es_token_trainer.md` and `results/zo_opd.md`.
+
+Follow-up on section 11.7. Four candidate causes tested; three falsified by measurement.
+
+NOT the implementation: diffing every tensor of the trained checkpoints against base shows the
+ES step_169 model is 1.6-2.4x FURTHER from base than BP step_279 on the layers both train
+(per-linear rel. 9.0e-4..1.17e-3 vs 3.7e-4..7.2e-4), all 196 HF keys matched, fused
+qkv_proj/gate_up_proj split correct. NOT the LR relative to BP: ES's per-step update is ~4x
+BP's (footprint 6.5e-5 -> 1.3e-4 vs Adam's 3.0e-5). NOT sigma: new harness `es_grad_audit.py`
+(all 196 linears perturbed, real teacher log q, 576 probe positions x 8 rails) shows cosine flat
+and ~0 across sigma 1e-5..3e-2, with the linear regime intact to 1e-2. NOT the clean-KV myopia:
+cos(g_direct, g_full) = +0.28/+0.24/+0.07/+0.92/+1.00 by depth.
+
+The defect is two-part. (a) Section 1's cosine law does not transfer: that gate perturbed ONE
+layer and re-probed ONE loss so every probe measured the same gradient, but in training each
+token draws its own noise and probes its OWN near-orthogonal gradient (rho = 0.77), so the token
+count cancels and `cos ~ sqrt(N/D)`. Measured +7.0e-4 one-layer against sqrt(8/12.6e6)=8.0e-4
+predicted (13% agreement), and <=2e-4 with all layers perturbed. Section 1's "cos ~ 0.20 at
+training scale" never applied, and the per-token decode buys nothing over sequence-level ES at
+the same rail count (shared-direction control in `es_seq_audit.py` agrees). (b) A noisy but
+unbiased ES estimate still learns -- the sequence-level `es` trainer does at comparable cosine --
+provided the step is big enough. Two DIFFERENT footprints, and es_token is mis-set on both:
+its PROBE footprint is sigma/RMS(W) = 0.30 against dense ES's 5.0e-2 (6x too far), while its
+UPDATE footprint is 6.5e-5..1.3e-4 against the alpha/sqrt(N) = 4.6e-3 that both `dense` and `iso`
+ES use to gain +20 pp (35-70x too short). The 1.6e-2..5e-2 numbers quoted in es_results.md 6/15.5
+are probe footprints, not update footprints.
+
+Two real secondary bugs: the es training decode samples with NO top-p while BP's rollout and
+every eval use 0.95 (this, not the model, explains the 1397-vs-837 step-0 length gap in 11.7
+item 1), and `_np_is_eos` falls back to config.json's single 151645 and misses 151643.
+
+Shipped: `train/update_footprint` and `train/dW_cos_prev_mean` per step (the run was blind to
+the exact quantity that decides it); harnesses `es_grad_audit.py`, `es_seq_audit.py`,
+`check_weight_displacement.py` under `scripts/zo_opd/es_token_checks/`.
+
+Relaunched the section-11.7 item-3 LR sweep in the setting where BP demonstrably learns:
+lr=1e-4 on GPU 6 and lr=1e-3 on GPU 7 (measured step-0 footprints 6.50e-4 / 6.50e-3), 200 steps,
+everything else identical to the flat run. Section 9.2's "1e-3 destroys the model" predates the
+enable_thinking fix and is being re-tested rather than assumed.
+
+## [2026-08-28] ingest | Sequence-level ES-OPD built, and its sigma calibrated by measurement
+
+-> `docs/results/zo_opd.md` section 13 (new), plus the `results/zo_opd.md` row in `docs/index.md`.
+
+Section 12 showed es_token's rails never write KV and are perturbed only at the current decode
+step, so the token dimension multiplies TARGETS rather than probes. This builds the other design
+as a baseline: `es.fitness=opd_kl` in the sequence-level `es` trainer. One fixed Gaussian
+perturbation of EVERY named_parameter is held for the WHOLE rollout, each rail generates its own
+trajectory, and the fitness is the OPD loss itself -- fitness_n = -mean_t[log pi_n(y_t) - log
+q(y_t)], y ~ pi_n. Unbiased only for SAMPLED rollouts, so the trainer hard-fails at temperature=0.
+log pi_n comes free from generation (logprobs=0); log q is one teacher prefill per rollout.
+N=30, perturb_mode=dense, T=1.0, top_p=0.95, same student/teacher/data as the BP and es_token runs.
+
+Sigma was calibrated by measurement rather than assumed (`es_seq_sigma_probe.sh`, one iteration
+per sigma; sigma=0 is the unperturbed reference since all rails share the generation seed, so all
+spread at sigma>0 is perturbation-induced):
+  sigma=0    KL 0.2838  spread 0
+  sigma=1e-3 KL 0.3116  spread 0.0115
+  sigma=2e-3 KL 0.3865  spread 0.0398
+  sigma=3e-3 KL 0.6420  spread 0.0879
+  sigma=6e-3 KL 4.945   spread 7.44    <- cliff, population destroyed
+The sigma=0 reference reproduces es_token's L_clean_mean ~0.30 from a completely separate
+implementation, which validates the whole fitness path end to end. Chose sigma=3.0e-3,
+alpha=sigma/2=1.5e-3: probe footprint 4.9e-2 and per-iteration motion alpha/sqrt(N)/RMS(W)=4.5e-3,
+matching the dense/iso arms' 5.0e-2 and 4.6e-3, with a measured 2x margin to the cliff. Fallback
+sigma=2e-3/alpha=1e-3 if it destabilises.
+
+Four bugs fixed bringing it up: vLLM's "ray" executor spawns a worker demanding a WHOLE GPU so a
+co-located teacher's fractional bundle can never be granted (-> es.distributed_executor_backend=uni
+plus es.engine_gpu_fraction); ESNcclLLM.__init__ popped CUDA_VISIBLE_DEVICES unconditionally and
+with the uni executor that sent vLLM to physical GPU0 (-> ES_KEEP_CUDA_VISIBLE=1, the identical
+gate NPNcclLLM already carried); the sympy task-reward grader ran on all 30 rails (~48 s/iteration)
+though it is only a diagnostic here (-> one rail); the teacher engine was never torn down.
+
+Also corrected section 12.5(b): the earlier table compared the `es` arms' PROBE footprint against
+es_token's UPDATE footprint. Two different axes -- es_token probes 6x too far (0.30 vs 5.0e-2) and
+steps 35-70x too short (6.5e-5..1.3e-4 vs 4.6e-3).
+
+Pending: the two es_token LR arms (1e-4, 1e-3) finish ~11 h out; `pick_better_lr.sh` then scores
+both final checkpoints offline, ranks them and prunes the loser (deletion gated behind DELETE=1),
+and the ES-OPD run goes on the freed GPUs with num_engines=2.
+
+## [2026-08-29] ingest | Population-size ablation: N=10 vs N=30 for dense / fura / iso
+
+Ran the section-7 MATH protocol at N=10 with everything else fixed (each arm keeps its
+leaderboard sigma/alpha), sequentially on GPU 5 via new `scripts/es/chain_pop10.sh`.
+
+Two properties tighten the ablation: the N=10 seeds are the **first 10 of the same 30**
+(`default_rng(seed+iter).integers(size=N)`), so iteration 1 evaluates a strict subset of the
+same perturbed models — `dense` reports train/accuracy 58.59375 at iteration 1 under both N,
+bit-identical; and all three arms are footprint-matched, with per-iteration update motion
+alpha/sqrt(N) = 4.56e-3 (N=30) / 7.91e-3 (N=10) for every arm alike.
+
+Paired over 15 shared eval steps: **dense -0.49 +/- 0.46 (t=-1.06, ns)**, **iso -1.52 +/-
+0.49 (t=-3.12)**, **fura -5.44 +/- 0.60 (t=-9.07)**. fura's failure is *qualitative*: it
+peaks at step 10 (70.6) then declines monotonically to 64.8 — slow divergence, the same
+failure mode section 11.2 measured past its stability edge. Cost: 354->118 s/iter for dense
+(14.8 -> 4.9 GPU-h per run; 70% reached in 0.33 vs 0.98 GPU-h).
+
+**Confound stated up front:** holding alpha fixed makes an N=10 step sqrt(3) ~ 1.73x larger,
+so the ablation varies estimator quality and step size together. Because all three arms took
+the identical increase and only fura diverged, tolerance clearly differs by subspace — but
+fura's -5.44 is not yet attributable to having fewer probes. Separating run = alpha *
+sqrt(10/30) for fura and iso (~5 h each), not yet run.
+
+Recipe: N=10 is the better operating point for dense (free) and iso (cheap); fura needs
+alpha re-tuned before N can be cut.
+
+-> `docs/results/ES/es_results.md` section 16
