@@ -752,3 +752,86 @@ Recipe: N=10 is the better operating point for dense (free) and iso (cheap); fur
 alpha re-tuned before N can be cut.
 
 -> `docs/results/ES/es_results.md` section 16
+
+## [2026-08-29] ingest | es_token LR endpoint: both LRs damage the model; random-walk model confirmed
+
+-> `docs/results/zo_opd.md` section 12.8 (new), 13.4 (updated).
+
+Both es_token LR arms finished 200 steps. MATH-500 greedy n=1 against a base reference of
+73.60 +- 1.97 measured under an identical protocol:
+  lr 1e-4: 73.8 -> 70.8, OLS slope -1.28 pp/100 steps (t = -3.2)
+  lr 1e-3: 70.6 -> 57.4, OLS slope -6.52 pp/100 steps (t = -11.4)
+
+CORRECTION to the section 12.7 prediction: it said lr 1e-4 would end FLAT. It does not -- the
+decline is statistically clear. Both LRs damage the model at a rate scaling with step size; the
+earlier lr 1e-5 run looked flat only because its damage rate is below the +-2 pp probe resolution.
+
+The random-walk model is confirmed by direct measurement. lr 1e-4 step-199 displacement from base
+is 1.05e-2 per perturbed linear (79-80% of elements moved), against a random-walk prediction of
+9.2e-3..1.4e-2 (sqrt(200) x footprint) and a coherent-accumulation prediction of 0.13..0.20. So the
+update is >=92% incoherent, independently agreeing with the dW_cos_prev bound (cos <~ 0.01) and the
+offline audit (cos <~ 2e-4). Verdict: at cos ~ 0 there is no good step size -- the estimator supplies
+a step length but no direction. lr 1e-3's checkpoints were deleted per the keep-the-better
+instruction, so its displacement (predicted 9.2e-2, right at the 13.2 cliff) was not measured.
+
+Kept lr 1e-4 (70.8), deleted lr 1e-3 (57.4, 6.5 GB).
+
+Sequence-level ES-OPD launched, one arm per GPU. A multi-engine run failed first: ES_KEEP_CUDA_VISIBLE=1
+(needed so the uni executor honours the pinned card) makes both engine actors inherit the same device
+list, so both land on GPU0 of the set and _init_inter_engine_group dies with "NCCL error: invalid
+usage". num_engines is now pinned to 1 and documented; two cards = two separate jobs. Running:
+sigma=3e-3/alpha=1.5e-3 on GPU 6 and the 13.2 fallback sigma=2e-3/alpha=1e-3 on GPU 7, N=30,
+batch 16, 1536 tokens, 120 iterations.
+
+## [2026-08-29] ingest | ES-OPD length-hacked its own fitness; mean -> sum aggregation
+
+-> `docs/results/zo_opd.md` section 13.5 (new), 13.4 (corrected).
+
+The first two sequence-level ES-OPD arms were killed at iteration 30. They were minimising the
+fitness and getting WORSE at the task: MATH-500 73.2 -> 68.2 (sigma=3e-3) and 73.2 -> 71.4
+(sigma=2e-3), while KL/ref fell 3.25 -> 1.30 and 1.39 -> 0.94.
+
+Mechanism, unambiguous: response length grew +20.8 and +14.7 tokens/iteration (t = +14.9, +10.9),
+corr(length, KL) = -0.884 and -0.874, both arms reaching 92-94% of the 1536-token cap. The fitness
+was a per-token MEAN, so a rail lowers its score by appending easy low-KL filler that dilutes the
+high-KL reasoning tokens, and ES selects exactly for that. The KL decline recorded earlier in 13.4
+(t = -6.8 / -4.8) was therefore substantially length-hacking, not distillation -- corrected there.
+
+BP-OPD does not have this failure because its token-mean loss is differentiated over a FIXED
+rollout; length is not a decision variable. Under ES the fitness COMPARES rollouts, so any
+length-dependent term becomes selection pressure. Aggregation is a free choice under BP and a
+load-bearing one under ES -- a metric that is standard on the BP side cannot be copied across
+unexamined.
+
+Fix: new `es.opd_kl_agg` (default `sum`) scores the per-sequence TOTAL log-ratio -- the true
+sequence-level reverse KL, EOS included -- averaged over prompts, estimating E_x[KL(pi||q)].
+`mean` kept as a documented-hackable ablation. Relaunched both sigmas with sum aggregation.
+
+## [2026-08-29] ingest | fura's N=10 collapse was the step size, not the probe count
+
+Follow-up to section 16 (`scripts/es/chain_fura_pop10_lr.sh`, GPU 5). The ES update moves
+coefficients by ~alpha/sqrt(N), so the N=10 run at the leaderboard alpha took a step
+sqrt(3) = 1.73x larger than its N=30 twin. Re-ran fura at N=10 with alpha scaled to restore
+the N=30 motion (6.25e-3 * sqrt(10/30) = 3.6084e-3), plus a half-motion point. sigma stayed
+1.25e-2 -- this varies alpha only.
+
+| fura N=10 | motion | plateau(>=40) | best | vs N=30 |
+| alpha 6.25e-3 | 1.73x | 66.63 +/- 0.54 | 70.6 @ 10 | -5.44 +/- 0.60, t=-9.07 |
+| alpha 3.61e-3 | 1.00x | **73.17 +/- 0.33** | **77.4 @ 30** | **+0.41 +/- 0.43, ns** |
+| alpha 1.80e-3 | 0.50x | 72.77 +/- 0.23 | 73.8 @ 150 | -1.03 +/- 0.66, ns |
+
+**Section 16.3's attribution is retracted.** N=10 costs fura nothing; 1.73x its step does.
+The shape recovers too -- the monotone slide to 64.8 becomes a normal 73-75 plateau. The
+alpha response is unimodal with a wide low-side basin (0.5x still fine, just slower to
+start: 64.0 vs 70.2 at step 10) and one-sided failure.
+
+Consequences: (1) rule is **hold alpha/sqrt(N) fixed when changing N**; (2) the 3x compute
+saving is general, not dense-only (fura N=10 = 5.0 GPU-h vs 15.3); (3) iso's -1.52 +/- 0.49
+is now suspect for the same reason -- control alpha = 2.5e-2*sqrt(10/30) = 1.443e-2, not yet
+run.
+
+Caveat kept in the doc: 77.4 @ 30 is the highest single MATH-500 eval on the page but is a
+max over 16 noisy evals (~2.2 pp per-eval SE); the honest statistic is the plateau 73.17,
+nominally the best anywhere here but not significantly above fura N=30's 72.68.
+
+-> `docs/results/ES/es_results.md` section 16.4

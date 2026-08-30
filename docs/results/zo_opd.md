@@ -1199,6 +1199,49 @@ fixing the *direction* (§13) rather than the step.
 
 Recorded here before the endpoint so it can be falsified: the endpoint may still surprise.
 
+### 12.8 Endpoint — both LRs degrade; the random-walk model is confirmed quantitatively
+
+Both arms ran the full 200 steps. MATH-500 greedy n=1, base reference **73.60 ± 1.97**:
+
+| step | 0 | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 199 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **lr 1e-4** | 73.8 | 72.4 | 73.8 | 71.2 | 71.6 | 73.0 | 71.2 | 71.2 | 72.2 | 70.4 | **70.8** |
+| **lr 1e-3** | 70.6 | 69.4 | 66.8 | 67.4 | 67.0 | 63.6 | 60.8 | 59.8 | 61.0 | 59.8 | **57.4** |
+
+| arm | OLS slope | t | end vs base |
+|---|---:|---:|---:|
+| lr 1e-4 | **−1.28 pp / 100 steps** | −3.2 | −2.8 |
+| lr 1e-3 | **−6.52 pp / 100 steps** | −11.4 | **−16.2** |
+
+**Correction to §12.7's prediction.** It said lr 1e-4 would end *flat*. It does not — the decline is
+statistically clear (t = −3.2). The prediction was right about lr 1e-3 (severe degradation) and
+right about the ordering, but wrong to call 1e-4 flat. The correct statement is that **both LRs
+damage the model, at a rate that scales with step size**, and the earlier lr 1e-5 run looked flat
+only because its damage rate (~10× smaller again) is below the ±2 pp resolution of this probe.
+
+**The random-walk model is confirmed by direct measurement.** Displacement of the lr 1e-4 step-199
+checkpoint from base (`check_weight_displacement.py`):
+
+| | predicted | measured |
+|---|---:|---:|
+| coherent accumulation (`S × footprint`) | 0.13 – 0.20 | — |
+| **random walk (`√S × footprint`)** | **9.2e-3 – 1.4e-2** | **1.05e-2** per perturbed linear |
+
+(footprint 6.5e-4 at step 0 rising to ~1.0e-3; `√200` = 14.1. Global ratio 5.36e-3, diluted by the
+untouched norms/embeddings; 79–80 % of elements moved, vs 20–33 % for the lr 1e-5 run.)
+
+The measurement lands inside the random-walk bracket and is **5–8 % of** what coherent accumulation
+would give, so the update is ≥ 92 % incoherent — independently agreeing with the `dW_cos_prev`
+bound (cos ≲ 0.01, §12.7) and the offline audit (cos ≲ 2e-4, §12.5).
+
+**Verdict on the LR question.** 1e-5 flat-within-noise, 1e-4 −1.3 pp/100 steps, 1e-3 −6.5 pp/100
+steps: monotone damage with no learning anywhere in the bracket. This is what §12.7 anticipated —
+**at cos ≈ 0 there is no good step size**, because the estimator supplies no direction to descend,
+only a step length. Fixing the step was never going to work; the direction has to change (§13).
+
+`lr 1e-3`'s checkpoints were deleted per the keep-the-better-arm instruction, so its displacement
+was not measured — a small missed cross-check (the model predicts 9.2e-2, right at the §13.2 cliff).
+
 ---
 
 ## Session 2026-08-28b — sequence-level ES-OPD: the baseline es_token should have been measured against
@@ -1283,9 +1326,116 @@ far) and update footprint 6.5e-5–1.3e-4 (35–70× too short).
 | max_tokens | 2048 (train), 3072 (eval) |
 | eval | MATH-500 greedy, every 10 iterations |
 
+**`num_engines` must be 1.** `ES_KEEP_CUDA_VISIBLE=1` — required so the `uni` executor puts vLLM
+on the pinned card instead of physical GPU0 (§13.3) — makes every engine actor inherit the *same*
+device list, so two engines both land on the first GPU and `_init_inter_engine_group` dies with
+`NCCL error: invalid usage`. Multi-engine needs per-actor device assignment, which is not wired up.
+To use two cards, run two **separate single-engine jobs**.
+
+**Running (2026-08-29), one arm per GPU** — the σ pair §13.2 could not separate on one iteration,
+now run to 120 iterations each at N=30, batch 16, 1536 tokens:
+
+| GPU | σ | α | rationale |
+|---|---|---|---|
+| 6 | 3.0e-3 | 1.5e-3 | footprint-matched to `dense`/`iso` (probe 4.9e-2, motion 4.5e-3) |
+| 7 | 2.0e-3 | 1.0e-3 | the §13.2 fallback — keeps the population at 1.36× the reference instead of 2.26× |
+
+**The §13.2 probe under-measured σ, because it ran at 512 tokens.** First production iteration
+(N=30, batch 16, **1536** tokens) vs the probe (N=8, batch 16, **512** tokens), same σ:
+
+| σ | probe KL @512 | production KL @1536 | production spread |
+|---|---:|---:|---:|
+| 2.0e-3 | 0.386 (1.36× ref) | **0.400** (1.41×) | 0.081 |
+| 3.0e-3 | 0.642 (2.26× ref) | **0.936** (3.30×) | **1.758** |
+
+**The σ=0 reference is length-invariant; only the perturbation compounds.** Re-measured at 1536
+tokens: **0.2878** (resp_len 1142), against 0.2838 at 512 — unchanged, as expected for a per-token
+mean on the clean model. So the whole length effect sits in the perturbation:
+
+| σ | KL/ref @512 | KL/ref @1536 |
+|---|---:|---:|
+| 0 | 1.00 | 1.00 (0.2878) |
+| 2.0e-3 | 1.36× | **1.39×** |
+| 3.0e-3 | 2.26× | **3.25×** |
+
+σ=2e-3 is stable across lengths; σ=3e-3 degrades badly, and its fitness spread is **22× larger**
+than σ=2e-3's — heavy-tailed, with individual rails blown out rather than informatively perturbed.
+**A fixed weight perturbation compounds along the trajectory, so a σ that is inside the linear
+regime at 512 tokens can be outside it at 1536** — the probe must be run at the production
+`max_tokens`, which §13.2's was not. Same class of mistake as §12.5(a): calibrating on a cheap
+proxy and extrapolating. On present evidence the **fallback σ=2e-3 is the better operating point**,
+and the footprint-matching argument that picked 3e-3 (probe footprint 4.9e-2 ≈ `dense`'s 5.0e-2)
+does not survive contact with the real sequence length.
+
+Measured cost: **~240 s/iteration** at N=30 / batch 16 / 1536 tokens on one H100 — 4× faster than
+the 17 min/iteration estimated from the probe, so 120 iterations is ~8 h, not ~35 h.
+
+**Do not read `train/kl_mean` as a learning curve — §9.1 repeats here.** The batch is *resampled
+every iteration* (16 problems from a pool of 17,917), so `kl_mean` moves with the draw, not just
+with the weights. First three iterations:
+
+| iter | 1 | 2 | 3 |
+|---|---:|---:|---:|
+| σ=3e-3 | 0.9358 | 0.7093 | 0.6710 |
+| σ=2e-3 | 0.4004 | 0.4634 | 0.3837 |
+
+σ=2e-3 is non-monotone with a ±0.08 swing on a 0.40 mean — that swing *is* the batch noise floor,
+and it is the same order as any plausible per-iteration learning signal. (Resampling is correct for
+the *update* — every rail shares the batch within an iteration, so the z-scores stay comparable and
+it prevents the fixed-batch overfitting [ES §11.1](ES/es_results.md) measured — it just makes the
+metric useless as progress.) **The honest ruler is `eval/accuracy`**: MATH-500 greedy on a fixed
+500-prompt set every 10 iterations, deterministic given the weights, σ ≈ 2 pp. Both arms read 73.2
+there before training, matching the 73.60 ± 1.97 base reference measured through a separate harness.
+
 New metrics: `train/kl_mean`, `train/kl_min`, `train/kl_spread`, `train/resp_len`.
 `kl_spread` is the ES signal strength — at 0.0879 it is ~4× the `reward_std` ≈ 0.023 the math-
 accuracy fitness gives in [ES §15.5](ES/es_results.md), which is the point of a dense objective.
+
+### 13.5 The first ES-OPD run length-hacked its own fitness — and the fix
+
+The first two arms (σ=3e-3 / 2e-3, N=30, 30 iterations) were **killed at iteration 30**. They were
+minimising the fitness successfully and getting *worse* at the task:
+
+| | eval @0 | @10 | @20 | @30 | KL/ref @1 → @30 | resp_len @1 → @30 |
+|---|---:|---:|---:|---:|---:|---:|
+| σ=3e-3 | 73.2 | 74.8 | 73.8 | **68.2** | 3.25 → 1.30 | 893 → 1438 (**+61 %**) |
+| σ=2e-3 | 73.2 | 73.4 | 73.4 | **71.4** | 1.39 → 0.94 | 1069 → 1408 (**+32 %**) |
+
+The mechanism is unambiguous:
+
+| | length slope | t | corr(length, KL) | % of the 1536 cap at iter 30 |
+|---|---:|---:|---:|---:|
+| σ=3e-3 | +20.8 tok/iter | +14.9 | **−0.884** | 94 % |
+| σ=2e-3 | +14.7 tok/iter | +10.9 | **−0.874** | 92 % |
+
+**The fitness was a per-token MEAN** — `−mean_t[log π_n(y_t) − log q(y_t)]`. A rail lowers that by
+appending easy, low-KL filler that dilutes the high-KL reasoning tokens, so ES selects for length:
+both arms grew toward the cap and accuracy fell. The KL decline reported at iteration 20
+(§13.4, t = −6.8 / −4.8) was therefore **substantially length-hacking, not distillation** — a
+correction to that reading.
+
+**Why BP-OPD does not have this failure.** Its token-mean loss is differentiated over a *fixed*
+rollout; length is not a decision variable. In ES the fitness *compares rollouts*, so any
+length-dependent term becomes selection pressure. **Aggregation is a free choice under BP and a
+load-bearing one under ES** — the general lesson, and the reason a metric that is standard on the
+BP side cannot be copied across unexamined.
+
+**Fix (`es.opd_kl_agg`, default `sum`).** Score the per-sequence **total** log-ratio, i.e. the true
+sequence-level reverse KL of the trajectory, EOS included, then average over prompts — an estimator
+of `E_x[KL(π(·|x) ‖ q(·|x))]`. Padding then costs exactly what it is worth, and stopping early is
+rewarded only when the teacher agrees. `mean` is kept as an ablation and is documented as hackable.
+
+**Why this does not just invert the failure.** `sum` penalises length, so the obvious worry is a
+mirror-image collapse to very short answers. It is self-correcting **only if the EOS token is
+scored** — otherwise stopping early is free. Verified in the installed vLLM: the stop token is
+excluded from the detokenised *text* but explicitly appended back to `token_ids`
+(`v1/engine/detokenizer.py:126`, "Cleanup after skipping detokenization"), and `check_stop` fires on
+`output_token_ids[-1]` (`v1/core/sched/utils.py:59`). So EOS is in the scored response, and an
+early stop the teacher disagrees with carries a large positive log-ratio. **`train/resp_len` is
+still the metric to watch** — a significant negative slope would mean the penalty is not biting.
+
+Raw records: `logs/esseq/meanagg_sig{3e-3,2e-3}.log`. Relaunched at the same two σ with
+`opd_kl_agg=sum` → `logs/esseq/sumagg_sig{3e-3,2e-3}.log`.
 
 ---
 

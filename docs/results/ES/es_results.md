@@ -78,11 +78,13 @@ subspaces.
 **Population size ([§16](#16-population-size--n10-vs-n30)).** At **N=10** instead of 30 —
 3× cheaper per iteration, and the N=10 population is a *nested subset* of the N=30 seeds —
 `dense` loses **nothing** (−0.49 ± 0.46, t=−1.06; 70% reached in 0.33 vs 0.98 GPU-h),
-`iso` loses a little (−1.52 ± 0.49), and `fura` **breaks** (−5.44 ± 0.60, t=−9.07),
-declining monotonically after step 10 rather than plateauing. All three took the identical
-√3-larger step that holding α fixed implies, so *tolerance* differs sharply by subspace —
-but `fura`'s drop is confounded between "fewer probes" and "bigger step", and §11 says the
-step is the likelier cause.
+`iso` loses a little (−1.52 ± 0.49), and `fura` appears to **break** (−5.44 ± 0.60).
+**That break was the step size, not the probe count** ([§16.4](#164-it-was-the-step-size-fura-at-n10-fully-recovers)):
+holding α fixed makes an N=10 step √3 larger, and restoring the motion
+(α × √(10/30) = 3.61e-3) takes `fura` from **−5.44 to +0.41 ± 0.43 (ns)** — matching its
+N=30 twin, at 5.0 GPU-h instead of 15.3. **The rule is to hold α/√N fixed when changing N.**
+So the 3× compute saving is general, and `iso`'s −1.52 is now suspect for the same reason
+(its motion-matched control, α=1.443e-2, is not yet run).
 
 **BP leg — half done, not yet conclusive.** `isobtt` and `isobtt_mix` finished
 138/138, but **`dense` (SIGTERM @22) and `iso` (CUDA illegal memory access @20) died
@@ -1970,13 +1972,58 @@ outcomes — and the ordering is by *step-size tolerance*, not by subspace.**
   past the stability edge. σ=1.25e-2 already sits near that edge at N=30; the √3 step
   increase tips it over.
 
-So the honest attribution is: **`fura`'s −5.44 pp is consistent with either fewer probes or
-a 1.73× larger step, and given §11's repeated demonstration that this arm is step-size
-critical, the step is the likelier culprit.** Because all three arms took the identical
-step increase and only `fura` diverged, the ablation does establish that *tolerance*
-differs sharply by subspace — but it cannot yet say that ES needs 30 probes.
+~~So the honest attribution is that `fura`'s −5.44 pp is consistent with either cause.~~
+**Resolved in [§16.4](#164-it-was-the-step-size-fura-at-n10-fully-recovers): it was
+entirely the step size.**
 
-**Recipe.** For edge/compute-constrained training on this task, N=10 is the better
-operating point for `dense` (free) and `iso` (cheap), and `fura` needs its α re-tuned
-before N can be cut. Next run: α × √(10/30) for `fura` and `iso`, which matches
-per-iteration motion exactly and separates the two causes (~5 h each).
+### 16.4 It was the step size — `fura` at N=10 fully recovers
+
+`fura` re-run at N=10 with α scaled to restore the N=30 per-iteration motion
+(α × √(10/30) = 3.6084e-3), plus a half-motion point. σ stays 1.25e-2 throughout, so this
+varies **α only** — unlike [§11.3](#113-answer-yes--but-scale-σ-not-α), which moved σ.
+Launcher `scripts/es/chain_fura_pop10_lr.sh`.
+
+<!-- POP10:FURA-LR BEGIN -->
+
+| `fura` | α | motion α/√N | Plateau (≥40) | Best @ step | Paired Δ vs N=30 | t |
+|---|---|---|---|---|---|---|
+| N=30 (leaderboard) | 6.25e-3 | 1.141e-3 | 72.68 ± 0.26 | 74.0 @ 30 | — | — |
+| N=10, α unchanged | 6.25e-3 | **1.976e-3** (1.73×) | 66.63 ± 0.54 | 70.6 @ 10 | **−5.44 ± 0.60** | −9.07 |
+| **N=10, motion-matched** | **3.6084e-3** | **1.141e-3** (1.00×) | **73.17 ± 0.33** | **77.4 @ 30** | **+0.41 ± 0.43** | +0.96 (ns) |
+| N=10, half motion | 1.8042e-3 | 5.705e-4 (0.50×) | 72.77 ± 0.23 | 73.8 @ 150 | −1.03 ± 0.66 | −1.57 (ns) |
+
+| step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120 | 130 | 140 | 150 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| α=6.25e-3 | 53.2 | 70.6 | 69.6 | 68.6 | 69.4 | 68.2 | 70.4 | 65.8 | 65.8 | 66.0 | 66.0 | 66.6 | 67.2 | 64.0 | 65.4 | 64.8 |
+| α=3.61e-3 | 53.2 | 70.2 | 70.6 | **77.4** | 73.4 | 74.6 | 74.8 | 74.0 | 72.8 | 73.6 | 73.4 | 73.6 | 72.2 | 73.0 | 71.6 | 71.0 |
+| α=1.80e-3 | 53.2 | 64.0 | 67.0 | 70.4 | 71.4 | 73.4 | 73.4 | 71.8 | 72.4 | 73.0 | 71.6 | 72.8 | 73.2 | 73.2 | 73.2 | 73.8 |
+
+<!-- POP10:FURA-LR END -->
+
+**The collapse was the learning rate, and nothing else.** Restoring the per-iteration
+motion moves `fura` from **−5.44 pp to +0.41 pp** — statistically indistinguishable from
+its N=30 twin (slightly above, ns). The *shape* recovers too: the monotone slide to 64.8
+is gone, replaced by a normal plateau at 73–75 from step 30 on.
+
+**The response in α is unimodal and the basin is wide on the low side.** At matched motion
+(1.00×) `fura` is at its best; at half motion it loses only 1.03 pp (ns) and merely starts
+slower (64.0 at step 10 against 70.2); at 1.73× it diverges. So the usable range runs from
+about 0.5× to 1× the N=30 motion, and the failure is one-sided — too big a step, not too
+small.
+
+**Consequences.**
+
+1. **[§16.3](#163-reading)'s attribution was wrong and is retracted.** N=10 does not cost
+   `fura` accuracy; 1.73× its step does. The rule is to hold **α/√N** fixed when changing
+   N, not α.
+2. **The 3× compute saving is general, not `dense`-only.** With α set correctly, `fura` at
+   N=10 matches N=30 at 119 s/iteration against 367 — 5.0 GPU-h per run instead of 15.3.
+3. **`iso`'s −1.52 ± 0.49 is now suspect for the same reason** — it was also measured at
+   fixed α, so it took the same 1.73× overshoot. The matching control is
+   α = 2.5e-2 × √(10/30) = **1.443e-2**. Not yet run.
+
+⚠️ **77.4 @ step 30 is the highest single MATH-500 eval on this page** (previous high 74.0,
+and 74.4 in the off-protocol aligned sweep). Treat it as a max over 16 noisy evals with
+~2.2 pp per-eval SE, not as a headline: the honest statistic is the plateau, 73.17 ± 0.33,
+which is nominally the best plateau anywhere here but **not** significantly above `fura`
+N=30's 72.68 (+0.41 ± 0.43).
