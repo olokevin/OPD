@@ -31,6 +31,10 @@ import torch
 
 from verl.trainer.es_token.grad_estimator import assemble_chunk
 from verl.trainer.es_token.rail_kernel import apply_rail, rail_supported
+from verl.trainer.es_token.rail_attn_kernel import (
+    RailAttnWorkspace, pick_num_splits, rail_attention_fold, rail_attention_shared)
+from verl.trainer.es_token.lm_head_kernel import (
+    LMHeadWorkspace, lm_head_gather_logit, lm_head_stream)
 from verl.trainer.es_token.noise_kernel import fill_rademacher_rows
 from verl.trainer.es_token.seeding import (
     build_noise_layout, build_seed_table, draw_token_noise, es_token_seed)
@@ -48,6 +52,88 @@ try:  # vLLM-internal import used by capture/eager forwards (matches NP).
     from vllm.forward_context import set_forward_context
 except Exception:  # pragma: no cover - CPU unit tests don't import vLLM
     set_forward_context = None
+try:
+    from vllm._custom_ops import reshape_and_cache_flash
+except Exception:  # pragma: no cover
+    reshape_and_cache_flash = None
+
+
+class ESRailAttention(torch.nn.Module):
+    """Wraps a vLLM `Attention` module. Transparent outside es mode or when
+    st["es_attn_impl"] == "rows" (the shipping path: every rail row is its own
+    FA request, so the slot's KV pages are re-read once per rail). Otherwise it
+    (1) writes the clean rows' K/V into the paged cache with the same op vLLM
+    uses (rail rows carry slot -1 and are skipped) and (2) runs a rail-aware
+    attention that reads each KV page ONCE per slot for all (1+N) rails
+    (opd_profile_plan.md §18):
+
+        "shared" -- Triton split-KV kernel, rails x GQA-group as one query tile
+                    (rail_attn_kernel.rail_attention_shared)
+        "fold"   -- rails folded into the head axis, stock FA3 GQA packing
+
+    Semantics are identical to "rows": rails attend the clean history including
+    the clean current-token K/V; only the clean row writes KV.
+    """
+
+    def __init__(self, wrapped, name, st_ref):
+        super().__init__()
+        self.wrapped = wrapped
+        self.name = name
+        self._st_ref = st_ref
+
+    def forward(self, query, key, value, output_shape=None):
+        st = self._st_ref()
+        impl = st.get("es_attn_impl", "rows")
+        if st.get("mode") != "perturb_es" or impl == "rows":
+            if output_shape is not None:
+                return self.wrapped(query, key, value, output_shape=output_shape)
+            return self.wrapped(query, key, value)
+        from vllm.forward_context import get_forward_context
+        attn = self.wrapped
+        fc = get_forward_context()
+        attn_metadata = fc.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[attn.layer_name]
+        kv_cache = attn.kv_cache[fc.virtual_engine]
+        key_cache, value_cache = kv_cache.unbind(0)
+        H = attn.impl.num_heads
+        Hkv = attn.impl.num_kv_heads
+        D = attn.impl.head_size
+        n_rows = query.shape[0]
+        reshape_and_cache_flash(
+            key.view(n_rows, Hkv, D), value.view(n_rows, Hkv, D), key_cache,
+            value_cache, attn_metadata.slot_mapping, attn.impl.kv_cache_dtype,
+            attn._k_scale, attn._v_scale)
+        am = st["es_attn_meta"]
+        out = torch.empty_like(query)
+        q4 = query.view(am["bucket"], am["width"], H, D)
+        o4 = out.view(am["bucket"], am["width"], H, D)
+        if impl == "shared":
+            rail_attention_shared(q4, key_cache, value_cache, am["bt_B"], am["sl_B"],
+                                  attn.impl.scale, out=o4, ws=am["ws"],
+                                  num_splits=am["num_splits"],
+                                  block_n=int(os.environ.get("ES_RAIL_ATTN_BLOCK_N", 64)))
+        elif impl in ("fold", "fold2"):
+            rail_attention_fold(q4, key_cache, value_cache, am["bt_B"], am["sl_B"],
+                                attn.impl.scale, am["max_seqlen_k"], out=o4,
+                                fa_version=(2 if impl == "fold2" else 3),
+                                cu_seqlens_q=am["cu_b"],
+                                q_fold_buf=am["q_fold_buf"], o_fold_buf=am["o_fold_buf"])
+        else:
+            raise ValueError(f"unknown es_attn_impl {impl!r}")
+        if os.environ.get("ES_ATTN_CHECK"):   # debug: per-layer diff vs FA rows path
+            ref = torch.zeros_like(out)
+            attn.impl.forward(attn, query.view(n_rows, H, D), key.view(n_rows, Hkv, D),
+                              value.view(n_rows, Hkv, D), kv_cache, attn_metadata,
+                              output=ref.view(n_rows, H, D))
+            d = (out.float() - ref.float()).abs()
+            per_row = d.view(n_rows, -1).amax(1)
+            i = int(per_row.argmax())
+            print(f"[attn-check] {self.name} max|d|={float(d.max()):.4e} "
+                  f"mean={float(d.mean()):.2e} ref_max={float(ref.float().abs().max()):.3f} "
+                  f"worst_row={i} (slot {i // am['width']}, rail {i % am['width']}) "
+                  f"sl={am['sl_B'].tolist()}", flush=True)
+        return out
 
 
 class ESTokenLinear(torch.nn.Module):
@@ -143,6 +229,22 @@ class WorkerExtension(NPWorkerExtension):
                 f"(got {w.dtype}).")
             layer_dims.append((layer_name, int(w.shape[0]), int(w.shape[1])))
 
+        # Wrap every vLLM Attention module so es mode can route to the
+        # rail-aware kernels (transparent when es_attn_impl == "rows").
+        from vllm.attention.layer import Attention as _VLLMAttention
+        self.es_attn_modules = {}
+        for mod_name, mod in list(model.named_modules()):
+            if isinstance(mod, ESRailAttention):
+                self.es_attn_modules[mod_name] = mod
+            elif isinstance(mod, _VLLMAttention) and not mod_name.endswith(".wrapped"):
+                parent = model
+                *path, leaf = mod_name.split(".")
+                for p in path:
+                    parent = getattr(parent, p)
+                wrapped_attn = ESRailAttention(mod, mod_name, lambda: self.np_state)
+                setattr(parent, leaf, wrapped_attn)
+                self.es_attn_modules[mod_name] = wrapped_attn
+
         layout, d_total = build_noise_layout(layer_dims)
         self.es_layout = layout
         self.es_d_total = int(d_total)
@@ -207,7 +309,7 @@ class WorkerExtension(NPWorkerExtension):
                 noise_buf.dtype, method))
 
     # ------------------------------------------------------------- capture ---
-    def _es_install_state(self, bucket, n_sample, device):
+    def _es_install_state(self, bucket, n_sample, device, attn_impl="rows"):
         """Allocate (or reuse) the per-bucket persistent es buffers and install
         them on np_state. Returns the runstate dict the decode loop uses.
         For the graphed path these EXACT objects are pinned by the capture --
@@ -240,8 +342,10 @@ class WorkerExtension(NPWorkerExtension):
             "clean_row_idx": clean_row_idx,
             "es_rail_idx": rail_idx,
             "es_prompt_idx": prompt_idx,
+            "es_attn_impl": str(attn_impl),
         })
         return {
+            "attn_impl": str(attn_impl),
             "noise_buf": noise_buf,
             "sigma_buf": sigma_buf,
             "clean_row_idx": clean_row_idx,
@@ -251,6 +355,62 @@ class WorkerExtension(NPWorkerExtension):
             "bucket": bucket,
             "n_sample": n_sample,
         }
+
+    def _es_build_attn_meta(self, bucket, width, bt_B, sl_B, max_seq_len_cap,
+                            device, attn_impl):
+        """Per-slot metadata + workspaces for the rail-aware attention.
+        bt_B [bucket, max_blocks] int32, sl_B [bucket] int32 (seqused_k incl.
+        the current token) -- the graphed path passes persistent tensors it
+        mutates in place; the eager oracle builds fresh ones per token."""
+        am = dict(bucket=int(bucket), width=int(width), bt_B=bt_B, sl_B=sl_B,
+                  max_seqlen_k=int(max_seq_len_cap), impl=str(attn_impl))
+        if attn_impl != "rows" and getattr(self, "es_attn_modules", None):
+            a0 = next(iter(self.es_attn_modules.values())).wrapped
+            Hq, Hkv, D = a0.impl.num_heads, a0.impl.num_kv_heads, a0.impl.head_size
+            G = Hq // Hkv
+            ns = pick_num_splits(bucket, Hkv)
+            am["num_splits"] = ns
+            am["ws"] = RailAttnWorkspace(bucket, Hkv, width, G, ns, D, device)
+            am["cu_b"] = torch.arange(bucket + 1, dtype=torch.int32, device=device)
+            if attn_impl in ("fold", "fold2"):
+                am["q_fold_buf"] = torch.empty(bucket, Hkv * width * G, D,
+                                               dtype=self.es_dtype, device=device)
+                am["o_fold_buf"] = torch.empty_like(am["q_fold_buf"])
+            else:
+                am["q_fold_buf"] = am["o_fold_buf"] = None
+        return am
+
+    def _es_refresh_kv_pages(self, gs, states):
+        """Copy THIS wave's KV page ids into the graph's pinned block table.
+
+        The table was built at capture from the first wave's prefill states,
+        but _np_prefill_packed carves each wave's pages by (longest prompt +
+        max_tokens), so a later wave with a different longest prompt owns
+        DIFFERENT pages and the captured table would read stale KV. Refreshed
+        in place (same storage the graph holds), so it is graph-safe."""
+        if os.environ.get("ES_NO_KV_REFRESH"):
+            return
+        bt = gs["meta_bufs"]["block_table"]
+        width = 1 + int(gs["n_sample"])
+        bt_cpu = torch.zeros(bt.shape, dtype=bt.dtype)
+        for p, s in enumerate(states):
+            ids = torch.tensor(s["block_ids"], dtype=bt.dtype)
+            r0 = p * width
+            bt_cpu[r0:r0 + width, : ids.numel()] = ids
+        bt.copy_(bt_cpu.to(bt.device))
+        am = gs.get("es_attn_meta")
+        if am is not None:
+            am["bt_B"].copy_(bt[::width])
+
+    def es_reset_graphs(self):
+        """Drop every cached decode graph (bench sweeps capture many)."""
+        import gc as _gc
+        self._es_graph_by_bucket = {}
+        self._np_active_graph = None
+        _gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        return True
 
     def _es_capture_step_packed(self, model, device, bucket, n_sample,
                                 prefill_states, max_seq_len_cap, rs):
@@ -297,6 +457,15 @@ class WorkerExtension(NPWorkerExtension):
         input_ids_buf.copy_(ids_cpu.to(device))
         positions_buf.copy_(pos_cpu.to(device))
 
+        # Per-slot metadata for the rail-aware attention: the slot's block
+        # table row (pinned; refreshed per wave) and a [bucket] seqused_k
+        # mutated per token next to the per-row one. Pinned by the capture.
+        sl_B = meta_bufs["seq_lens_gpu"][::width].clone()
+        am = self._es_build_attn_meta(bucket, width, meta_bufs["block_table"][::width].contiguous(),
+                                      sl_B, max_seq_len_cap, device, rs.get("attn_impl", "rows"))
+        rs["es_attn_meta"] = am
+        self._ensure_np_state()["es_attn_meta"] = am
+
         for _ in range(3):
             with torch.no_grad(), set_forward_context(
                 attn_meta, self.model_runner.vllm_config, num_tokens=total,
@@ -314,10 +483,22 @@ class WorkerExtension(NPWorkerExtension):
             _gc.collect()
             torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
+        # Under TP the all-reduce (custom AR / NCCL) must be captured inside
+        # vLLM's own graph_capture() context on its capture stream, exactly as
+        # gpu_model_runner does; TP=1 has no collective and needs neither.
+        from contextlib import nullcontext
+        gc_ctx = nullcontext()
+        try:
+            from vllm.distributed.parallel_state import get_tp_group
+            from vllm.distributed.parallel_state import graph_capture as _vllm_gc
+            if get_tp_group().world_size > 1:
+                gc_ctx = _vllm_gc(device=device)
+        except Exception:  # pragma: no cover - single-GPU / CPU tests
+            pass
         with torch.no_grad(), set_forward_context(
             attn_meta, self.model_runner.vllm_config, num_tokens=total,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE):
-            with torch.cuda.graph(graph):
+            cudagraph_runtime_mode=CUDAGraphMode.NONE), gc_ctx as gcc:
+            with torch.cuda.graph(graph, stream=getattr(gcc, "stream", None)):
                 hidden_buf = model(input_ids=input_ids_buf,
                                    positions=positions_buf)
         self._np_active_graph = graph
@@ -370,6 +551,7 @@ class WorkerExtension(NPWorkerExtension):
         mb = gs["meta_bufs"]
         sm = mb["slot_mapping"]
         sl = mb["seq_lens_gpu"]
+        sl_B = gs["es_attn_meta"]["sl_B"] if gs.get("es_attn_meta") is not None else None
         for p in range(bucket):
             m = meta[p]
             base = p * width
@@ -377,12 +559,15 @@ class WorkerExtension(NPWorkerExtension):
             pos_buf[base:base + width].fill_(m["q_pos"])
             sl[base:base + width].fill_(m["seq_len"])
             sm[base].fill_(m["clean_slot"])
+            if sl_B is not None:
+                sl_B[p].fill_(m["seq_len"])
         return meta
 
     def _es_replay_step_packed(self, model, states, n_sample, es_cfg, step_t,
                                slot_rollout_ids, gs):
         """One graphed decode token: in-place buffer refill + ONE fused noise
-        draw per slot + replay + eager compute_logits. NO per-token full sync
+        draw per slot + replay; returns the [R, d] hidden buffer (the LM head
+        runs in the orchestrator: full or streaming). NO per-token full sync
         (the sampled tokens' .tolist() in the orchestrator is the only host
         read; ES_FULL_SYNC=1 restores the blanket sync for debugging)."""
         self._es_update_step_buffers(gs, states, n_sample)
@@ -392,8 +577,7 @@ class WorkerExtension(NPWorkerExtension):
         gs["graph"].replay()
         if os.environ.get("ES_FULL_SYNC"):
             torch.cuda.synchronize()
-        logits = model.compute_logits(gs["hidden_buf"])   # [R, vocab]
-        return logits
+        return gs["hidden_buf"]                           # [R, d]
 
     def _es_eager_step_packed(self, model, device, states, n_sample, es_cfg,
                               step_t, slot_rollout_ids, rs, max_seq_len_cap):
@@ -442,11 +626,22 @@ class WorkerExtension(NPWorkerExtension):
 
         attn_meta, total = self._np_build_attn_metadata_packed(
             per_row_block_ids, query_lens, seq_lens, slot_mapping, positions)
+        attn_impl = rs.get("attn_impl", "rows")
+        if attn_impl != "rows":
+            mr = self.model_runner
+            max_blocks = int(
+                mr.input_batch.block_table.block_tables[0].max_num_blocks_per_req)
+            bt_B = torch.zeros((bucket, max_blocks), dtype=torch.int32, device=device)
+            for p in range(bucket):
+                ids = states[p]["block_ids"]
+                bt_B[p, : len(ids)] = torch.tensor(ids, dtype=torch.int32, device=device)
+            sl_B = torch.tensor(seq_lens[::width], dtype=torch.int32, device=device)
+            self._ensure_np_state()["es_attn_meta"] = self._es_build_attn_meta(
+                bucket, width, bt_B, sl_B, max_seq_len_cap, device, attn_impl)
         with torch.no_grad():
             hidden = self._np_run_forward(
                 model, device, input_ids, positions, attn_meta, total)
-            logits = model.compute_logits(hidden)
-        return logits
+        return hidden
 
     # --------------------------------------------------------- orchestrator --
     def run_es_decode_packed(self, list_of_prompt_ids, sampling_params, es_cfg,
@@ -470,6 +665,20 @@ class WorkerExtension(NPWorkerExtension):
         B = len(list_of_prompt_ids)
         assert len(rollout_ids) == B
         bucket = _select_bucket(B, list(es_cfg.get("b_pack_buckets", [2, 4])))
+        # Kernel selection (opd_profile_plan.md Part III). Defaults = the
+        # shipping path; "shared"/"fold" + "stream" are the rail-aware kernels.
+        attn_impl = str(es_cfg.get("attn_impl", "rows"))
+        lm_impl = str(es_cfg.get("lm_head_impl", "full"))
+        assert attn_impl in ("rows", "shared", "fold", "fold2"), attn_impl
+        assert lm_impl in ("full", "stream"), lm_impl
+        if lm_impl == "stream":
+            try:
+                from vllm.distributed import get_tensor_model_parallel_world_size
+                tp = int(get_tensor_model_parallel_world_size())
+            except Exception:
+                tp = 1
+            if tp > 1:   # lm_head is vocab-sharded under TP; the streaming
+                lm_impl = "full"   # kernel has no gather yet -> gathered full path
 
         padded_prompt_ids = list(list_of_prompt_ids) + [
             list(list_of_prompt_ids[0]) for _ in range(bucket - B)]
@@ -503,15 +712,19 @@ class WorkerExtension(NPWorkerExtension):
         if use_graph:
             if not hasattr(self, "_es_graph_by_bucket"):
                 self._es_graph_by_bucket = {}
-            if bucket not in self._es_graph_by_bucket:
-                rs = self._es_install_state(bucket, n_sample, device)
+            gkey = (bucket, n_sample, attn_impl)
+            if gkey not in self._es_graph_by_bucket:
+                rs = self._es_install_state(bucket, n_sample, device,
+                                            attn_impl=attn_impl)
                 for ln, s in sigma_eff.items():
                     rs["sigma_buf"][ln].fill_(float(s))
                 gs = self._es_capture_step_packed(
                     model, device, bucket, n_sample, states, max_seq_len_cap,
                     rs)
-                self._es_graph_by_bucket[bucket] = gs
-            gs = self._es_graph_by_bucket[bucket]
+                self._es_graph_by_bucket[gkey] = gs
+            gs = self._es_graph_by_bucket[gkey]
+            # This wave's KV pages into the pinned block table (see method).
+            self._es_refresh_kv_pages(gs, states)
             # Reinstall the PINNED objects on st (harmless for the graph, needed
             # if an eager call rebound them) and set this call's sigma.
             st.update({
@@ -525,14 +738,33 @@ class WorkerExtension(NPWorkerExtension):
                 "clean_row_idx": gs["clean_row_idx"],
                 "es_rail_idx": gs["rail_idx"],
                 "es_prompt_idx": gs["prompt_idx"],
+                "es_attn_impl": attn_impl,
+                "es_attn_meta": gs.get("es_attn_meta"),
             })
             for ln, s in sigma_eff.items():
                 gs["sigma_buf"][ln].fill_(float(s))
             rs = gs
         else:
-            rs = self._es_install_state(bucket, n_sample, device)
+            rs = self._es_install_state(bucket, n_sample, device,
+                                        attn_impl=attn_impl)
             for ln, s in sigma_eff.items():
                 rs["sigma_buf"][ln].fill_(float(s))
+
+        # Streaming LM head state (lm_head_kernel.py): the lm_head weight, the
+        # clean-row -> slot index and persistent (m, s) / clean-logit buffers.
+        if lm_impl == "stream":
+            lm_head = model.lm_head
+            V = int(getattr(model.logits_processor, "org_vocab_size",
+                            lm_head.weight.shape[0]))
+            W_lm = lm_head.weight[:V]
+            clean_idx = torch.full((bucket * width,), -1, dtype=torch.int32,
+                                   device=device)
+            clean_idx[rs["clean_row_idx"]] = torch.arange(
+                bucket, dtype=torch.int32, device=device)
+            ws_lm = LMHeadWorkspace(bucket * width, V, bucket, 128, device)
+        force_tokens = es_cfg.get("force_tokens")   # test-only teacher forcing
+        prof_lm = os.environ.get("ES_PROFILE_LMHEAD")
+        lm_ms = 0.0
 
         clean_row_idx = rs["clean_row_idx"]
         payload_buf = torch.zeros(bucket * width, max_tokens, device=device,
@@ -547,18 +779,30 @@ class WorkerExtension(NPWorkerExtension):
                 if not active_idx:
                     break
                 if use_graph:
-                    logits = self._es_replay_step_packed(
+                    hidden = self._es_replay_step_packed(
                         model, states, n_sample, es_cfg, t, slot_rollout_ids,
                         rs)
                 else:
-                    logits = self._es_eager_step_packed(
+                    hidden = self._es_eager_step_packed(
                         model, device, states, n_sample, es_cfg, t,
                         slot_rollout_ids, rs, max_seq_len_cap)
 
-                # Vectorized payload + clean sampling over ALL slots at once.
-                logits_f = logits.float()                       # [R, vocab]
-                lse = torch.logsumexp(logits_f, dim=-1)         # [R]
-                clean_logits = logits_f[clean_row_idx]          # [bucket, vocab]
+                if prof_lm:
+                    ev0 = torch.cuda.Event(enable_timing=True)
+                    ev1 = torch.cuda.Event(enable_timing=True)
+                    ev0.record()
+                # LM head + payload + clean sampling over ALL slots at once.
+                if lm_impl == "stream":
+                    # Never materialises [R, V]: clean rows' logits (fp32) for
+                    # sampling + every row's LSE; the clean token's rail logit
+                    # is a [R, d] gather-dot after sampling.
+                    clean_logits, lse, _ = lm_head_stream(
+                        hidden, W_lm, clean_idx, ws=ws_lm)      # [bucket, V], [R]
+                else:
+                    logits = model.compute_logits(hidden)       # [R, vocab]
+                    logits_f = logits.float()                   # [R, vocab]
+                    lse = torch.logsumexp(logits_f, dim=-1)     # [R]
+                    clean_logits = logits_f[clean_row_idx]      # [bucket, vocab]
                 if temp == 0.0:
                     next_toks = clean_logits.argmax(dim=-1)     # [bucket]
                 else:
@@ -577,9 +821,21 @@ class WorkerExtension(NPWorkerExtension):
                         sp_ = sp_ / sp_.sum(dim=-1, keepdim=True)
                         probs = torch.zeros_like(probs).scatter_(1, si_, sp_)
                     next_toks = torch.multinomial(probs, 1)[:, 0]
+                if force_tokens is not None:   # test-only: pin the clean token
+                    ft = [int(force_tokens[p][t]) if p < B and t < len(force_tokens[p])
+                          else int(next_toks[p]) for p in range(bucket)]
+                    next_toks = torch.tensor(ft, dtype=next_toks.dtype,
+                                             device=next_toks.device)
                 chosen = next_toks.repeat_interleave(width)     # [R]
-                tok_logp = logits_f.gather(1, chosen[:, None])[:, 0] - lse
+                if lm_impl == "stream":
+                    tok_logp = lm_head_gather_logit(hidden, W_lm, chosen) - lse
+                else:
+                    tok_logp = logits_f.gather(1, chosen[:, None])[:, 0] - lse
                 payload_buf[:, t] = tok_logp
+                if prof_lm:
+                    ev1.record()
+                    ev1.synchronize()
+                    lm_ms += ev0.elapsed_time(ev1)
 
                 toks = next_toks.tolist()   # the one host sync per token
                 force_stop = es_cfg.get("force_stop_at")  # test-only: staggered
@@ -594,6 +850,8 @@ class WorkerExtension(NPWorkerExtension):
                         self._np_commit_clean(states[p], tok)
         finally:
             st["mode"] = "off"
+        if prof_lm:
+            self._es_lmhead_ms = lm_ms
 
         payload_cpu = payload_buf.to("cpu")
         payload = []

@@ -416,3 +416,7 @@ Finding: BP-OPD at the paper's LR destroys `Qwen3-1.7B-Base` (six alternative ex
 and falsified), but the identical recipe is stable from `lllyx/Qwen3-1.7B-SFT`. The discriminator is
 initial policy entropy (1.18 vs 0.31), not the paper's overlap ratio. The same split governs
 es_token, so it is a property of the setting rather than the gradient estimator.
+
+## [2026-08-31] ingest | es_token rail-aware kernels (shared-KV attention, streaming LM head) + H100 profile
+
+Executed `results/ZO_OPD/opd_profile_plan.md` Phases 0–6 on 2× H100 NVL: built `rail_attn_kernel.py` (Triton shared-KV + FA3 GQA-fold), `lm_head_kernel.py` (streaming head), `rail_gemm_kernel.py` (fused epilogue, negative), wired them into the es_token decode behind `attn_impl`/`lm_head_impl`, added gates (`check_rail_kernels.py`) and the `scripts/zo_opd/es_profile/` harness. Fixed the stale-KV-page bug across waves. Pages: `results/ZO_OPD/es_profile_results.md` (new), `wiki/es_token_trainer.md` §10, index.

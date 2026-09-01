@@ -1,0 +1,1111 @@
+{
+  "gpu": {
+    "name": "NVIDIA H100 NVL",
+    "sms": 132,
+    "total_mem_gb": 93.1,
+    "cc": "9.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "host": "lambda-scalar",
+    "cuda_visible": "0",
+    "triton": "3.4.0",
+    "vllm": "0.11.0",
+    "nvidia_smi": [
+      "0, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 78228 MiB, 77 %",
+      "1, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 28584 MiB, 65 %",
+      "2, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 85126 MiB, 0 %",
+      "3, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 0 MiB, 0 %",
+      "4, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 48650 MiB, 70 %",
+      "5, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 56434 MiB, 57 %",
+      "6, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 70299 MiB, 89 %",
+      "7, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 63115 MiB, 81 %"
+    ]
+  },
+  "prompt_len": 512,
+  "t_short": 64,
+  "t_long": 512,
+  "repeats": 2,
+  "tp": 1,
+  "points": [
+    {
+      "B": 8,
+      "N": 0,
+      "path": "rows/full",
+      "rows": 8,
+      "kernel_ms": {
+        "rail_op": 0.0,
+        "noise": 0.025596500000006926,
+        "attn_shared": 0.0,
+        "attn": 0.5742900000000553,
+        "lm_head_stream": 0.0,
+        "gemm": 2.0435097499998873,
+        "norm": 0.34983000000008824,
+        "act": 0.45556699999996764,
+        "rope": 0.08301475000001399,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": -0.01646862499994628,
+        "other": 0.0,
+        "total": 3.5153393749999733
+      },
+      "top": [
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_TNT",
+          0.9900834999998986
+        ],
+        [
+          "nvjet_tst_128x64_64x8_1x2_h_bz_TNT",
+          0.6463229999999851
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.45556699999996764
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.41166337500004035
+        ],
+        [
+          "nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT",
+          0.32002087499998405
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.18739787500003446
+        ],
+        [
+          "nvjet_tst_384x8_64x4_2x1_v_bz_TNT",
+          0.17882212500000239
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.1624321250000526
+        ],
+        [
+          "void cutlass::device_kernel<flash::FlashAttnFwdCombine<cute::tuple<cut",
+          0.10764099999998511
+        ],
+        [
+          "flash::prepare_varlen_num_blocks_kernel(int, int, int, int const*, int",
+          0.08699312500002651
+        ],
+        [
+          "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c",
+          0.08301475000001399
+        ],
+        [
+          "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16",
+          0.07558225000000524
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 1,
+      "path": "rows/full",
+      "rows": 16,
+      "kernel_ms": {
+        "rail_op": 0.48611362499988076,
+        "noise": 0.028344374999998763,
+        "attn_shared": 0.0,
+        "attn": 0.9446811249999996,
+        "lm_head_stream": 0.0,
+        "gemm": 2.2200049999999725,
+        "norm": 0.4789564999998829,
+        "act": 0.31791574999995614,
+        "rope": 0.13525824999998542,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.4585345000002138,
+        "other": 0.0,
+        "total": 5.069809124999753
+      },
+      "top": [
+        [
+          "nvjet_tst_64x16_64x16_4x1_v_bz_TNT",
+          0.5688594999999822
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.49740675000006374
+        ],
+        [
+          "_rail_fused",
+          0.48611362499988076
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.3741744999999759
+        ],
+        [
+          "nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT",
+          0.33264774999997665
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.31791574999995614
+        ],
+        [
+          "nvjet_tst_64x8_64x16_1x2_h_bz_TNT",
+          0.26729650000004246
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.25807875000001745
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.23978849999994356
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.23916799999993926
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x2_v_bz_TNT",
+          0.21773812500001988
+        ],
+        [
+          "nvjet_tst_384x16_64x4_2x1_v_bz_TNT",
+          0.18404199999997586
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 4,
+      "path": "rows/full",
+      "rows": 40,
+      "kernel_ms": {
+        "rail_op": 0.47169075000007354,
+        "noise": 0.02796050000000286,
+        "attn_shared": 0.0,
+        "attn": 1.364047124999944,
+        "lm_head_stream": 0.0,
+        "gemm": 2.0978903750000346,
+        "norm": 0.9655832500000864,
+        "act": 0.6323610000000512,
+        "rope": 0.1268480000000212,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.5420611250000946,
+        "other": 0.0,
+        "total": 6.228442125000271
+      },
+      "top": [
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.9391347499999501
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.737135500000029
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.6323610000000512
+        ],
+        [
+          "nvjet_tst_128x40_64x10_4x1_v_bz_TNT",
+          0.5814861250000064
+        ],
+        [
+          "_rail_fused",
+          0.47169075000007354
+        ],
+        [
+          "nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT",
+          0.3316150000000058
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.29805025000000196
+        ],
+        [
+          "nvjet_tst_64x40_64x16_4x1_v_bz_TNT",
+          0.2564863749999786
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.24278087500006357
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.22844775000005224
+        ],
+        [
+          "nvjet_tst_64x24_64x16_4x2_v_bz_TNT",
+          0.2177267500000308
+        ],
+        [
+          "nvjet_tst_384x40_64x3_2x1_v_bz_TNT",
+          0.18426225000000343
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 8,
+      "path": "rows/full",
+      "rows": 72,
+      "kernel_ms": {
+        "rail_op": 0.4788251249999552,
+        "noise": 0.026600250000001324,
+        "attn_shared": 0.0,
+        "attn": 1.7989070000000047,
+        "lm_head_stream": 0.0,
+        "gemm": 2.026726499999965,
+        "norm": 0.4388688749999283,
+        "act": 0.20783362499998537,
+        "rope": 0.11885075000011014,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.6894367500002272,
+        "other": 0.0,
+        "total": 5.786048875000261
+      },
+      "top": [
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          1.4260116249999784
+        ],
+        [
+          "nvjet_tst_128x72_64x8_4x1_v_bz_TNT",
+          0.5870557500000291
+        ],
+        [
+          "_rail_fused",
+          0.4788251249999552
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_splitK_TNT",
+          0.3453588749999907
+        ],
+        [
+          "nvjet_tst_64x40_64x16_1x2_h_bz_TNT",
+          0.27525637499993205
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.23892899999998507
+        ],
+        [
+          "nvjet_tst_64x24_64x16_4x1_v_bz_TNT",
+          0.2349266249999493
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.22331699999985943
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.2155518750000665
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.20783362499998537
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.20264287499999956
+        ],
+        [
+          "nvjet_tst_384x72_64x3_2x1_v_bz_coopA_TNT",
+          0.192770375000011
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 16,
+      "path": "rows/full",
+      "rows": 136,
+      "kernel_ms": {
+        "rail_op": 0.49355862500005787,
+        "noise": 0.026820125000002006,
+        "attn_shared": 0.0,
+        "attn": 2.8569957500000314,
+        "lm_head_stream": 0.0,
+        "gemm": 2.3801739999999225,
+        "norm": 0.8013903750002194,
+        "act": 0.31874962500009096,
+        "rope": 0.41008162500002454,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.9989832500000568,
+        "other": 0.0,
+        "total": 8.286753375000231
+      },
+      "top": [
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          2.465549249999982
+        ],
+        [
+          "nvjet_tst_192x72_64x6_1x2_h_bz_TNT",
+          0.5900337499999879
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.584230500000121
+        ],
+        [
+          "_rail_fused",
+          0.49355862500005787
+        ],
+        [
+          "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c",
+          0.41008162500002454
+        ],
+        [
+          "nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT",
+          0.37507025000005495
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.31874962500009096
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_TNT",
+          0.28888312499992913
+        ],
+        [
+          "nvjet_tst_128x64_64x8_1x2_h_bz_TNT",
+          0.27765862499999217
+        ],
+        [
+          "Memcpy DtoD (Device -> Device)",
+          0.25236375000001937
+        ],
+        [
+          "nvjet_tst_128x136_64x6_2x1_v_bz_TNT",
+          0.24604075000000736
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.2433879999999935
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 0,
+      "path": "shared/stream",
+      "rows": 8,
+      "kernel_ms": {
+        "rail_op": 0.0,
+        "noise": 0.028684249999998433,
+        "attn_shared": 0.6277746250000018,
+        "attn": 0.2382591249999858,
+        "lm_head_stream": 0.19137012499999037,
+        "gemm": 1.9744816249999544,
+        "norm": 0.462693125000079,
+        "act": 0.3051196249999698,
+        "rope": 0.1292891249999627,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.37970437499999055,
+        "other": 0.0,
+        "total": 4.337375999999778
+      },
+      "top": [
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_TNT",
+          1.0324787499999253
+        ],
+        [
+          "_rail_attn_split",
+          0.40531224999999366
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.34926112499999085
+        ],
+        [
+          "nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT",
+          0.3318650000000273
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.3051196249999698
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.23794325000001876
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.23499687500006727
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.22769625000001176
+        ],
+        [
+          "_rail_attn_combine",
+          0.22246237500000823
+        ],
+        [
+          "_lm_head_stream",
+          0.19137012499999037
+        ],
+        [
+          "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c",
+          0.1292891249999627
+        ],
+        [
+          "nvjet_tst_128x64_64x8_1x2_h_bz_TNT",
+          0.1212950000000077
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 1,
+      "path": "shared/stream",
+      "rows": 16,
+      "kernel_ms": {
+        "rail_op": 0.4615803749999202,
+        "noise": 0.027036374999997857,
+        "attn_shared": 0.6002207500000838,
+        "attn": 0.22423199999998045,
+        "lm_head_stream": 0.19323824999999853,
+        "gemm": 1.9453840000000806,
+        "norm": 0.4398246250001241,
+        "act": 0.31490837500001384,
+        "rope": 0.12416099999999275,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.4076032499998794,
+        "other": 0.0,
+        "total": 4.73818899999981
+      },
+      "top": [
+        [
+          "nvjet_tst_64x16_64x16_4x1_v_bz_TNT",
+          0.5618031250000164
+        ],
+        [
+          "_rail_fused",
+          0.4615803749999202
+        ],
+        [
+          "_rail_attn_split",
+          0.38475625000004576
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.3475668750000045
+        ],
+        [
+          "nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT",
+          0.326295375000038
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.31490837500001384
+        ],
+        [
+          "nvjet_tst_64x8_64x16_1x2_h_bz_TNT",
+          0.25976987499999094
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.23694549999988063
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.22096300000003943
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.21886162500008238
+        ],
+        [
+          "_rail_attn_combine",
+          0.21546450000003825
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x2_v_bz_TNT",
+          0.2066787499999263
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 4,
+      "path": "shared/stream",
+      "rows": 40,
+      "kernel_ms": {
+        "rail_op": 0.4712063750001328,
+        "noise": 0.02604387500001031,
+        "attn_shared": 0.6269685000000057,
+        "attn": 0.11255100000003182,
+        "lm_head_stream": 0.20413424999999552,
+        "gemm": 1.2250783749999585,
+        "norm": 0.35015700000000327,
+        "act": 0.14803775000003883,
+        "rope": 0.1014576250000325,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.42139024999974106,
+        "other": 0.0,
+        "total": 3.6870249999998537
+      },
+      "top": [
+        [
+          "nvjet_tst_128x40_64x10_4x1_v_bz_TNT",
+          0.5998518749999712
+        ],
+        [
+          "_rail_fused",
+          0.4712063750001328
+        ],
+        [
+          "_rail_attn_split",
+          0.4008157499999982
+        ],
+        [
+          "nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT",
+          0.3398508750000146
+        ],
+        [
+          "nvjet_tst_64x40_64x16_4x1_v_bz_TNT",
+          0.2568066249999903
+        ],
+        [
+          "_rail_attn_combine",
+          0.2261527500000086
+        ],
+        [
+          "nvjet_tst_64x24_64x16_4x2_v_bz_TNT",
+          0.21617375000000172
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.21356924999994098
+        ],
+        [
+          "_lm_head_stream",
+          0.20413424999999552
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.18422399999994699
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.16593300000005629
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.14803775000003883
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 8,
+      "path": "shared/stream",
+      "rows": 72,
+      "kernel_ms": {
+        "rail_op": 0.4754781250001138,
+        "noise": 0.026876500000005757,
+        "attn_shared": 0.7615168749999357,
+        "attn": 0.2631358750000189,
+        "lm_head_stream": 0.31421949999999926,
+        "gemm": 2.0754428749995766,
+        "norm": 0.4984598750000424,
+        "act": 0.33646224999994007,
+        "rope": 0.13399812499997615,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.5818294999997361,
+        "other": 0.0,
+        "total": 5.467419499999301
+      },
+      "top": [
+        [
+          "nvjet_tst_128x72_64x8_4x1_v_bz_TNT",
+          0.6096259999999787
+        ],
+        [
+          "_rail_attn_split",
+          0.5269488749999076
+        ],
+        [
+          "_rail_fused",
+          0.4754781250001138
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.3483315000000091
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_splitK_TNT",
+          0.3478523749999078
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.33646224999994007
+        ],
+        [
+          "_lm_head_stream",
+          0.31421949999999926
+        ],
+        [
+          "nvjet_tst_64x40_64x16_1x2_h_bz_TNT",
+          0.273675374999937
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.26048300000002744
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.25909524999998473
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.2379768750000129
+        ],
+        [
+          "_rail_attn_combine",
+          0.23456800000002814
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 16,
+      "path": "shared/stream",
+      "rows": 136,
+      "kernel_ms": {
+        "rail_op": 0.49925649999964683,
+        "noise": 0.026080500000001852,
+        "attn_shared": 0.8433422500000161,
+        "attn": 0.283653375000009,
+        "lm_head_stream": 0.44808925000000455,
+        "gemm": 2.9196243749999353,
+        "norm": 0.9693141249999616,
+        "act": 0.22184449999998057,
+        "rope": 0.15781437499997045,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.7500722499999274,
+        "other": 0.0,
+        "total": 7.119091499999255
+      },
+      "top": [
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.6944607499999671
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.6519020000000055
+        ],
+        [
+          "nvjet_tst_192x72_64x6_1x2_h_bz_TNT",
+          0.632571750000039
+        ],
+        [
+          "_rail_attn_split",
+          0.5769625000000235
+        ],
+        [
+          "nvjet_tst_128x64_64x8_1x2_h_bz_TNT",
+          0.5342841249999941
+        ],
+        [
+          "_rail_fused",
+          0.49925649999964683
+        ],
+        [
+          "_lm_head_stream",
+          0.44808925000000455
+        ],
+        [
+          "nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT",
+          0.3764525000000647
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_TNT",
+          0.28533687499981153
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.2748533749999946
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.2747751250001864
+        ],
+        [
+          "_rail_attn_combine",
+          0.26637974999999264
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 0,
+      "path": "fold/stream",
+      "rows": 8,
+      "kernel_ms": {
+        "rail_op": 0.0,
+        "noise": 0.025316500000000818,
+        "attn_shared": 0.0,
+        "attn": 0.5825707499998813,
+        "lm_head_stream": 0.1878785000000025,
+        "gemm": 1.1004512500000039,
+        "norm": 0.24732112499995984,
+        "act": 0.019119499999955103,
+        "rope": 0.07466062499995407,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.37503912499996084,
+        "other": 0.0,
+        "total": 2.612357374999595
+      },
+      "top": [
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_TNT",
+          0.9908349999999237
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.4100294999999751
+        ],
+        [
+          "nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT",
+          0.3188943750000364
+        ],
+        [
+          "_lm_head_stream",
+          0.1878785000000025
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.16189237500000314
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.14735125000003674
+        ],
+        [
+          "Memcpy DtoD (Device -> Device)",
+          0.12543637499998958
+        ],
+        [
+          "void cutlass::device_kernel<flash::FlashAttnFwdCombine<cute::tuple<cut",
+          0.10512987499991334
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.09996987499992271
+        ],
+        [
+          "void vllm::rotary_embedding_kernel<c10::BFloat16, true>(long const*, c",
+          0.07466062499995407
+        ],
+        [
+          "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16",
+          0.06464862500003271
+        ],
+        [
+          "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, ",
+          0.06329712500001734
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 1,
+      "path": "fold/stream",
+      "rows": 16,
+      "kernel_ms": {
+        "rail_op": 0.46945125000012156,
+        "noise": 0.027816375000009427,
+        "attn_shared": 0.0,
+        "attn": 0.9507532499999087,
+        "lm_head_stream": 0.19105812499999958,
+        "gemm": 2.1579071249999915,
+        "norm": 0.5224317500001258,
+        "act": 0.31343637499998567,
+        "rope": 0.14690262499993098,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.6590182499999891,
+        "other": 0.0,
+        "total": 5.438775124999904
+      },
+      "top": [
+        [
+          "nvjet_tst_64x16_64x16_4x1_v_bz_TNT",
+          0.5625732499999578
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.47496287499996565
+        ],
+        [
+          "_rail_fused",
+          0.46945125000012156
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.4362287499999924
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.42929587499994887
+        ],
+        [
+          "nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT",
+          0.3303118749999888
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.31343637499998567
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.27061175000013143
+        ],
+        [
+          "nvjet_tst_64x8_64x16_1x2_h_bz_TNT",
+          0.26329500000000905
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.2518199999999913
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x2_v_bz_TNT",
+          0.21237712500001385
+        ],
+        [
+          "_lm_head_stream",
+          0.19105812499999958
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 4,
+      "path": "fold/stream",
+      "rows": 40,
+      "kernel_ms": {
+        "rail_op": 0.46533350000001106,
+        "noise": 0.02695637500001067,
+        "attn_shared": 0.0,
+        "attn": 0.8501353750000857,
+        "lm_head_stream": 0.20704650000000038,
+        "gemm": 1.864573750000032,
+        "norm": 0.430759375000061,
+        "act": 0.2969189999999666,
+        "rope": 0.12030174999989954,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.6802936250001368,
+        "other": 0.0,
+        "total": 4.942319250000017
+      },
+      "top": [
+        [
+          "nvjet_tst_128x40_64x10_4x1_v_bz_TNT",
+          0.5965952499999735
+        ],
+        [
+          "_rail_fused",
+          0.46533350000001106
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.4576594999999897
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.4301110000000194
+        ],
+        [
+          "nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT",
+          0.3412086250000066
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.2969189999999666
+        ],
+        [
+          "nvjet_tst_64x40_64x16_4x1_v_bz_TNT",
+          0.25682349999999826
+        ],
+        [
+          "nvjet_tst_192x128_64x5_1x2_h_bz_coopB_TNT",
+          0.2550616250000084
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.21734850000010242
+        ],
+        [
+          "nvjet_tst_64x24_64x16_4x2_v_bz_TNT",
+          0.21603087499999324
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.2134108749999603
+        ],
+        [
+          "_lm_head_stream",
+          0.20704650000000038
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 8,
+      "path": "fold/stream",
+      "rows": 72,
+      "kernel_ms": {
+        "rail_op": 0.47038825000022555,
+        "noise": 0.02508025000000089,
+        "attn_shared": 0.0,
+        "attn": 0.7666075000001384,
+        "lm_head_stream": 0.30686199999999736,
+        "gemm": 1.8650173749999621,
+        "norm": 0.4132712500001655,
+        "act": 0.2029149999999862,
+        "rope": 0.11107824999996882,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.7444846249999203,
+        "other": 0.0,
+        "total": 4.9057045000002875
+      },
+      "top": [
+        [
+          "nvjet_tst_128x72_64x8_4x1_v_bz_TNT",
+          0.5946754999999868
+        ],
+        [
+          "_rail_fused",
+          0.47038825000022555
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.4402690000000434
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.42391599999997903
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_splitK_TNT",
+          0.34400412499989796
+        ],
+        [
+          "_lm_head_stream",
+          0.30686199999999736
+        ],
+        [
+          "nvjet_tst_128x64_64x8_1x2_h_bz_TNT",
+          0.28466050000003484
+        ],
+        [
+          "nvjet_tst_64x40_64x16_1x2_h_bz_TNT",
+          0.2725306249999847
+        ],
+        [
+          "nvjet_tst_64x24_64x16_4x1_v_bz_TNT",
+          0.22548625000007083
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.20860512499996975
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.20466612500019216
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.2029149999999862
+        ]
+      ]
+    },
+    {
+      "B": 8,
+      "N": 16,
+      "path": "fold/stream",
+      "rows": 136,
+      "kernel_ms": {
+        "rail_op": 0.49557162500003316,
+        "noise": 0.02644812500002445,
+        "attn_shared": 0.0,
+        "attn": 0.811076250000248,
+        "lm_head_stream": 0.43939987500001737,
+        "gemm": 1.8741865000002402,
+        "norm": 0.46651900000001256,
+        "act": 0.2286062500000361,
+        "rope": 0.12242162500001663,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.9295213749997302,
+        "other": 0.0,
+        "total": 5.393750625000315
+      },
+      "top": [
+        [
+          "nvjet_tst_192x72_64x6_1x2_h_bz_TNT",
+          0.6133122500000356
+        ],
+        [
+          "_rail_fused",
+          0.49557162500003316
+        ],
+        [
+          "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp",
+          0.4483214999999521
+        ],
+        [
+          "_lm_head_stream",
+          0.43939987500001737
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.4383366250000395
+        ],
+        [
+          "nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT",
+          0.38260400000012684
+        ],
+        [
+          "nvjet_tst_64x72_64x12_2x1_v_bz_TNT",
+          0.2872733750000737
+        ],
+        [
+          "Memcpy DtoD (Device -> Device)",
+          0.2547735000001209
+        ],
+        [
+          "void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1",
+          0.24323849999993497
+        ],
+        [
+          "nvjet_tst_64x48_64x15_4x1_v_bz_TNT",
+          0.23456774999992563
+        ],
+        [
+          "void vllm::act_and_mul_kernel<c10::BFloat16, &(c10::BFloat16 vllm::sil",
+          0.2286062500000361
+        ],
+        [
+          "std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,",
+          0.22328050000007815
+        ]
+      ]
+    }
+  ]
+}
