@@ -37,7 +37,12 @@ export SAMPLE_METHOD=${SAMPLE_METHOD:-bernoulli}
 export GRAD_ESTIMATE_SAMPLE=${GRAD_ESTIMATE_SAMPLE:-mean_baseline}
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_iw}
 export TOKEN_AGG=${TOKEN_AGG:-mean}
+# 1.0 = historical decode (no top-p). 0.95 matches BP's rollout and every eval
+# (docs/results/zo_opd.md 12.6); ES_EOS_FROM_GENCFG=true also stops on 151643.
+export ES_TOP_P=${ES_TOP_P:-1.0}
+export ES_EOS_FROM_GENCFG=${ES_EOS_FROM_GENCFG:-false}
 export LR=${LR:-1e-3}
+export FP32_MASTER=${FP32_MASTER:-true}
 export ASSEMBLE_CHUNK=${ASSEMBLE_CHUNK:-1024}
 export USE_CUDA_GRAPH=${USE_CUDA_GRAPH:-true}
 export PACK_WIDTH=${PACK_WIDTH:-4}
@@ -48,10 +53,12 @@ export PERTURB_RULES=${PERTURB_RULES:-'^model\.layers\.\d+\.(self_attn\.(qkv_pro
 export TEACHER_MODEL_PATH=${TEACHER_MODEL_PATH:-Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500}
 export TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0}
 export TEACHER_BATCH_SIZE=${TEACHER_BATCH_SIZE:-16}
+export TEACHER_MAX_MODEL_LEN=${TEACHER_MAX_MODEL_LEN:-null}
 
 # ---- decode ----
 export TEMPERATURE=${TEMPERATURE:-0.0}
 export MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-1024}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-null}
 
 # ---- hardware: single GPU, co-located teacher ----
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-1}
@@ -66,11 +73,13 @@ export ACTOR_MODEL_PATH=${ACTOR_MODEL_PATH:-Qwen/Qwen3-1.7B}
 export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 export TRAIN_DATASET=${TRAIN_DATASET:-datasets/dapo-math-17k.parquet}
 export EVAL_DATASET=${EVAL_DATASET:-datasets/test_data/MATH-500/test.parquet}
+export ENABLE_THINKING=${ENABLE_THINKING:-}   # set to false for non-thinking Qwen3
 export TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:--1}
 export VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-200}
 export NUM_ITERATIONS=${NUM_ITERATIONS:-150}
 export EVAL_INTERVAL=${EVAL_INTERVAL:-25}
 export HELDOUT_PROBE_SIZE=${HELDOUT_PROBE_SIZE:-16}
+export SAVE_FREQ=${SAVE_FREQ:-0}   # 0 = never; >0 writes an HF checkpoint every N steps
 
 # ---- logging ----
 export PROJECT_NAME=${PROJECT_NAME:-opd-qwen-math}
@@ -86,6 +95,7 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.grad_estimate_sample=${GRAD_ESTIMATE_SAMPLE} \
     es_token.reward_weight_mode=${REWARD_WEIGHT_MODE} \
     es_token.token_agg=${TOKEN_AGG} es_token.lr=${LR} \
+    es_token.fp32_master=${FP32_MASTER} \
     es_token.assemble_chunk=${ASSEMBLE_CHUNK} \
     es_token.use_cuda_graph=${USE_CUDA_GRAPH} \
     es_token.pack_width=${PACK_WIDTH} \
@@ -94,7 +104,11 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.teacher_model_path=${TEACHER_MODEL_PATH} \
     es_token.teacher_temperature=${TEACHER_TEMPERATURE} \
     es_token.teacher_batch_size=${TEACHER_BATCH_SIZE} \
+    es_token.teacher_max_model_len=${TEACHER_MAX_MODEL_LEN} \
     es_token.temperature=${TEMPERATURE} es_token.max_tokens=${MAX_RESP_LENGTH} \
+    es_token.top_p=${ES_TOP_P} \
+    es_token.use_generation_config_eos=${ES_EOS_FROM_GENCFG} \
+    es_token.max_prompt_length=${MAX_PROMPT_LENGTH} \
     es_token.num_engines=${NUM_ENGINES} \
     es_token.num_iterations=${NUM_ITERATIONS} \
     es_token.eval_interval=${EVAL_INTERVAL} \
@@ -105,10 +119,12 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.teacher_gpu_memory_utilization=${TEACHER_GPU_MEMORY_UTILIZATION} \
     model.path=${ACTOR_MODEL_PATH} \
     data.task_type=opd_math data.train_files=${TRAIN_DATASET} \
+    ${ENABLE_THINKING:+++data.apply_chat_template_kwargs.enable_thinking=$ENABLE_THINKING} \
     data.val_files=${EVAL_DATASET} \
     data.train_max_samples=${TRAIN_MAX_SAMPLES} \
     data.val_max_samples=${VAL_MAX_SAMPLES} \
     trainer.project_name=${PROJECT_NAME} \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.logger=${ES_LOGGER} trainer.default_local_dir=${SAVE_DIR} \
+    trainer.save_freq=${SAVE_FREQ} \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE}

@@ -398,3 +398,21 @@ gradient-cosine results, and the negative learning result. Corrected in results/
 + summary/wall-clock tables + §1/§4/§6.4/§7.5/§8.3 relabels, wiki/es_token_trainer.md, index.md.
 -> `docs/results/zo_opd.md` §10, raw `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`,
 harness `scripts/zo_opd/es_token_checks/bench_rm_stages.py`
+
+## [2026-08-25] ingest | Paper-aligned OPD: two root-cause bugs, six falsified hypotheses, and the student-init finding
+
+Created [results/opd_paper_align.md](results/opd_paper_align.md); cross-linked and superseded
+[results/zo_opd.md](results/zo_opd.md) §9/§9.5.
+
+Root causes of the long-standing "neither BP-OPD nor es_token learns" result: (1) 1024-token
+truncation from using the *instruct* student with thinking on; (2) bf16 **master** weights
+(`fsdp_workers.py:449` + `MODEL_DTYPE=bfloat16`) discarding 98.6% of an Adam step at `lr=1e-6`.
+Code: `REWARD_MODEL_DTYPE` / `VAL_BEFORE_TRAIN` / `PPO_MAX_TOKEN_LEN_PER_GPU` env knobs in
+`on_policy_distillation.sh`; `es_token.fp32_master`; `es_token.teacher_max_model_len`; greedy
+heldout probe in `es_token/ray_trainer.py`; ES sweep teardown now reaps leaked vLLM engines.
+Launchers under `scripts/zo_opd/paper_align/`.
+
+Finding: BP-OPD at the paper's LR destroys `Qwen3-1.7B-Base` (six alternative explanations tested
+and falsified), but the identical recipe is stable from `lllyx/Qwen3-1.7B-SFT`. The discriminator is
+initial policy entropy (1.18 vs 0.31), not the paper's overlap ratio. The same split governs
+es_token, so it is a property of the setting rather than the gradient estimator.

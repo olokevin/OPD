@@ -17,8 +17,12 @@ es_token:
   grad_estimate_sample: mean_baseline  # mean_baseline | clean_baseline
   reward_weight_mode: student_iw       # student_iw | student_p | none (DEGENERATE)
   iw_clamp: 10.0
+  top_p: 1.0                           # 1.0 = historical (no top-p). 0.95 matches
+                                       # BP's rollout + every eval (zo_opd.md 12.6)
+  use_generation_config_eos: false     # true also stops on 151643 (zo_opd.md 12.6)
   token_agg: sum                   # sum | mean over token records
   lr: 1.0e-3                       # all-layer scale (NP lesson: ~30x below single-layer)
+  fp32_master: true                # fp32 master weights; bf16-only SGD rounds small steps away
   update_clip: null
   assemble_chunk: 1024             # token-records per assembly GEMM chunk
 
@@ -31,6 +35,7 @@ es_token:
   teacher_model_path: null         # required
   teacher_temperature: 1.0
   teacher_batch_size: 16
+  teacher_max_model_len: null      # null = model default; set to prompt+max_tokens
   log_prob_top_k: 1                # sampled-token needs only the actual token
 
   # engine / eval (mirror np_trainer.yaml; consumed by inherited launch/eval)
@@ -38,6 +43,7 @@ es_token:
   num_iterations: 150
   precision: bfloat16
   max_tokens: 1024
+  max_prompt_length: null          # drop prompts longer than this (null = keep all)
   temperature: 0.0
   eval_interval: 25
   eval_batch_size: 256
@@ -57,6 +63,9 @@ model:
 
 data:
   task_type: opd_math
+  # Forwarded to tokenizer.apply_chat_template. Hybrid Qwen3 models need
+  # {enable_thinking: false} or they open a <think> block and overrun max_tokens.
+  apply_chat_template_kwargs: {}
   train_files: datasets/dapo-math-17k.parquet
   val_files: datasets/test_data/MATH-500/test.parquet
   train_max_samples: 200

@@ -30,6 +30,84 @@ from vllm.utils import get_ip, get_open_port
 from verl.utils.tracking import Tracking
 
 
+class TeacherKLScorer:
+    """OPD fitness for sequence-level ES: the reverse KL between a PERTURBED
+    student's own rollout and the teacher.
+
+    Each ES rail generates its own trajectory y ~ pi_n under W + sigma*eps_n, so
+    the perturbation propagates through the whole rollout (unlike es_token, whose
+    rails read the clean row's KV and can only see the detached-history gradient
+    -- docs/results/zo_opd.md 12.4/12.5). The fitness of rail n is
+
+        KL_n = mean_t [ log pi_n(y_t) - log q(y_t) ],   y ~ pi_n
+
+    a single-sample estimate of KL(pi_n || q) that is unbiased exactly because y
+    is SAMPLED from pi_n (so es.temperature must be > 0). ES maximises reward, so
+    the reward returned is -KL.
+
+    log pi_n(y_t) comes free from generation (SamplingParams.logprobs=0); log q
+    needs ONE teacher prefill per rollout, read via prompt_logprobs.
+    """
+
+    def __init__(self, teacher_engine, teacher_temperature=1.0, batch_size=16):
+        self.engine = teacher_engine
+        self.temp = float(teacher_temperature)
+        self.batch = max(1, int(batch_size))
+
+    def logq(self, fulls: List[List[int]], resp_lens: List[int]) -> List[List[float]]:
+        """Teacher logprob of each response token. fulls[i] = prompt+response ids."""
+        sp = SamplingParams(temperature=self.temp, max_tokens=1, prompt_logprobs=1)
+        out: List[List[float]] = [None] * len(fulls)
+        for s0 in range(0, len(fulls), self.batch):
+            idxs = list(range(s0, min(s0 + self.batch, len(fulls))))
+            reqs = [{"prompt_token_ids": list(fulls[i])} for i in idxs]
+            outs = ray.get(self.engine.generate.remote(reqs, sp, use_tqdm=False))
+            for o, i in zip(outs, idxs):
+                T = int(resp_lens[i])
+                if T <= 0:
+                    out[i] = []
+                    continue
+                plp = o.prompt_logprobs[-T:]
+                ids = fulls[i][-T:]
+                out[i] = [plp[t][ids[t]].logprob for t in range(T)]
+        return out
+
+    @staticmethod
+    def score_fixed(engine, fulls: List[List[int]], resp_lens: List[int],
+                    batch: int = 16) -> List[List[float]]:
+        """log pi(y_t) for a FIXED token sequence under whatever weights `engine`
+        currently holds. Teacher-forced via prompt_logprobs, so no generation and
+        no dependence on what this policy would have sampled."""
+        sp = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0)
+        out: List[List[float]] = [None] * len(fulls)
+        for s0 in range(0, len(fulls), batch):
+            idxs = list(range(s0, min(s0 + batch, len(fulls))))
+            reqs = [{"prompt_token_ids": list(fulls[i])} for i in idxs]
+            outs = ray.get(engine.generate.remote(reqs, sp, use_tqdm=False))
+            for o, i in zip(outs, idxs):
+                T = int(resp_lens[i])
+                if T <= 0:
+                    out[i] = []
+                    continue
+                plp = o.prompt_logprobs[-T:]
+                ids = fulls[i][-T:]
+                out[i] = [plp[t][ids[t]].logprob for t in range(T)]
+        return out
+
+    @staticmethod
+    def student_logp(output) -> List[float]:
+        """Per-token logprob of the tokens the perturbed student actually sampled."""
+        comp = output.outputs[0]
+        lps = getattr(comp, "logprobs", None)
+        if not lps:
+            return []
+        vals = []
+        for tok, d in zip(comp.token_ids, lps):
+            lp = d.get(tok)
+            vals.append(float(lp.logprob) if lp is not None else 0.0)
+        return vals
+
+
 @dataclass
 class ESConfig:
     """Configuration for Evolution Strategy training."""
@@ -65,7 +143,14 @@ class ESNcclLLM(LLM):
     """vLLM wrapper for ES training with NCCL support."""
     
     def __init__(self, *args, **kwargs):
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # With the Ray distributed executor, Ray re-derives the worker's device
+        # from the placement group, so we drop CUDA_VISIBLE_DEVICES to avoid a
+        # conflicting pin. With the uni (in-process) executor there is no child
+        # worker -- popping it sends vLLM to physical GPU0 regardless of the
+        # CUDA_VISIBLE_DEVICES the launcher set, so KEEP the pin in that case.
+        # (Same fix and same failure mode as NPNcclLLM.)
+        if os.environ.get("ES_KEEP_CUDA_VISIBLE", "0") != "1":
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         super().__init__(*args, **kwargs)
 
@@ -148,9 +233,13 @@ class RayESTrainer:
         precision = self.es_config.get('precision', 'bfloat16')
         worker_ext = self.es_config.get('worker_extension_cls', 'utils.worker_extn.WorkerExtension')
         
-        # Create placement groups
+        # Create placement groups.
+        # engine_gpu_fraction < 1.0 leaves room in the bundle for a co-located
+        # teacher engine (es.fitness=opd_kl): a student PG that reserves a whole
+        # GPU makes the teacher's own PG unschedulable and pg.ready() hangs.
+        eng_frac = float(self.es_config.get('engine_gpu_fraction', 1.0))
         pgs = [
-            placement_group([{"GPU": 1, "CPU": 0}], lifetime="detached") 
+            placement_group([{"GPU": eng_frac, "CPU": 0}], lifetime="detached")
             for _ in range(num_engines)
         ]
         ray.get([pg.ready() for pg in pgs])
@@ -164,11 +253,16 @@ class RayESTrainer:
             for pg in pgs
         ]
         
+        # vLLM's "ray" executor spawns a RayWorkerWrapper that requests a FULL GPU,
+        # which cannot fit a fractional PG bundle. For tensor_parallel=1 use "uni"
+        # (in-process worker): the engine actor itself owns the GPU slice granted
+        # by its PG, so co-locating student + teacher on one card works.
+        exec_backend = self.es_config.get('distributed_executor_backend', 'ray')
         engines = [
             ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(ESNcclLLM).remote(
                 model=model_path,
                 tensor_parallel_size=1,
-                distributed_executor_backend="ray",
+                distributed_executor_backend=exec_backend,
                 worker_extension_cls=worker_ext,
                 dtype=precision,
                 enable_prefix_caching=False,
@@ -184,6 +278,45 @@ class RayESTrainer:
         self.placement_groups = pgs
         return engines, pgs
     
+    def _launch_teacher_engine(self, model_path: str):
+        """ONE teacher vLLM engine, CO-LOCATED with the student engines.
+
+        gpu_fraction < 1.0 lets its placement-group bundle share a card with a
+        student engine, which is what a single-GPU OPD run needs.
+        """
+        precision = self.es_config.get('teacher_precision', None) or \
+            self.es_config.get('precision', 'bfloat16')
+        worker_ext = self.es_config.get(
+            'worker_extension_cls',
+            'verl.workers.rollout.vllm_rollout.es_worker_extension.WorkerExtension')
+        gpu_frac = float(self.es_config.get('teacher_gpu_fraction', 0.01))
+        pg = placement_group([{"GPU": gpu_frac, "CPU": 0}], lifetime="detached")
+        ray.get(pg.ready())
+        strategy = PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=0,
+        )
+        # Uncapped, the teacher sizes its KV pool (and its profiling activation
+        # peak) for the model's full 32k context -- unaffordable co-located.
+        tmax = self.es_config.get('teacher_max_model_len', None)
+        engine = ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(ESNcclLLM).remote(
+            model=model_path,
+            tensor_parallel_size=1,
+            distributed_executor_backend=self.es_config.get(
+                'distributed_executor_backend', 'ray'),
+            worker_extension_cls=worker_ext,
+            dtype=precision,
+            enable_prefix_caching=False,
+            enforce_eager=False,
+            gpu_memory_utilization=(self.es_config.get('teacher_gpu_memory_utilization')
+                                    or self.es_config.get('gpu_memory_utilization', 0.9)),
+            **({"max_model_len": int(tmax)} if tmax else {}),
+        )
+        self.teacher_engine = engine
+        self.teacher_placement_group = pg
+        return engine
+
     def _init_inter_engine_group(self):
         """Initialize NCCL group for weight synchronization between engines."""
         master_address = get_ip()
@@ -200,6 +333,18 @@ class RayESTrainer:
     
     def _cleanup(self):
         """Clean up Ray resources."""
+        for llm in [getattr(self, "teacher_engine", None)]:
+            if llm is not None:
+                try:
+                    ray.kill(llm)
+                except Exception:
+                    pass
+        tpg = getattr(self, "teacher_placement_group", None)
+        if tpg is not None:
+            try:
+                remove_placement_group(tpg)
+            except Exception:
+                pass
         for llm in self.engines:
             try:
                 ray.kill(llm)
@@ -211,14 +356,70 @@ class RayESTrainer:
             except Exception:
                 pass
     
-    def _evaluate_with_engine(self, engine, prompts, seed: int):
-        """Evaluate prompts using a specific engine."""
+    def _evaluate_with_engine(self, engine, prompts, seed: int, want_logprobs: bool = False):
+        """Evaluate prompts using a specific engine.
+
+        want_logprobs=True adds `logprobs=0`, which makes vLLM return the logprob
+        of the token it actually sampled -- the `log pi_n(y_t)` half of the OPD
+        reverse-KL fitness, for free.
+        """
         sampling_params = SamplingParams(
             temperature=self.es_config.get('temperature', 0.0),
+            top_p=float(self.es_config.get('top_p', 1.0)),
             seed=seed,
-            max_tokens=self.es_config.get('max_tokens', 1024)
+            max_tokens=self.es_config.get('max_tokens', 1024),
+            **({"logprobs": 0} if want_logprobs else {})
         )
         return engine.generate.remote(prompts, sampling_params, use_tqdm=False)
+
+    def _opd_metrics(self, outputs, task_datas, with_reward: bool = False) -> Dict[str, Any]:
+        """OPD fitness: reward = -KL(pi_n || q), averaged over the batch.
+
+        The task reward is still computed alongside, purely as a diagnostic --
+        it is NOT what drives the ES update in this mode.
+        """
+        fulls, lens, stu = [], [], []
+        for o in outputs:
+            resp = list(o.outputs[0].token_ids)
+            lp = TeacherKLScorer.student_logp(o)
+            n = min(len(resp), len(lp))
+            fulls.append(list(o.prompt_token_ids) + resp[:n])
+            lens.append(n)
+            stu.append(lp[:n])
+        logqs = self.kl_scorer.logq(fulls, lens)
+
+        # Aggregation over the response is NOT a free choice: ES compares rails, so any
+        # length-dependent term in the fitness becomes selection pressure.
+        #   "mean" divides by length, so a rail can lower its score by appending easy,
+        #   low-KL filler that dilutes the high-KL reasoning tokens. Measured: response
+        #   length +21 tok/iter (t=+14.9), corr(length, KL) = -0.88, MATH-500 74.8 -> 68.2.
+        #   "sum" is the true sequence-level reverse KL (the log-ratio of the whole
+        #   trajectory, EOS included), so padding costs what it is worth and stopping
+        #   early is rewarded only when the teacher agrees. Averaged over prompts it
+        #   estimates E_x[KL(pi(.|x) || q(.|x))].
+        agg = self.es_config.get('opd_kl_agg', 'sum')
+        kls = []
+        for sp_, lq in zip(stu, logqs):
+            if not sp_ or not lq:
+                continue
+            m = min(len(sp_), len(lq))
+            d = [sp_[t] - lq[t] for t in range(m)]
+            kls.append(float(np.sum(d) if agg == 'sum' else np.mean(d)))
+        kl = float(np.mean(kls)) if kls else 0.0
+
+        # The task reward is a DIAGNOSTIC here, not the fitness, and its sympy
+        # grader costs ~50 ms/prompt -- at N=30 rails x 32 prompts that is ~48 s
+        # an iteration. Grade only when asked (default: only the first rail, via
+        # `with_reward`), and report zeros otherwise.
+        if with_reward:
+            base = self._compute_metrics(outputs, task_datas)
+        else:
+            base = {"rewards": [], "avg_reward": 0.0, "avg_format": 0.0,
+                    "avg_answer": 0.0, "accuracy": float("nan")}
+        base["kl"] = kl
+        base["avg_reward"] = -kl          # ES maximises reward: fitness = -KL
+        base["resp_len"] = float(np.mean(lens)) if lens else 0.0
+        return base
     
     def _compute_metrics(self, outputs, task_datas) -> Dict[str, Any]:
         """Compute metrics from model outputs."""
@@ -338,6 +539,21 @@ class RayESTrainer:
         print("Initializing inter-engine NCCL group...")
         self._init_inter_engine_group()
         self._init_es_state()
+        if self.es_config.get('fitness', 'reward') == 'opd_kl':
+            tpath = self.es_config.get('teacher_model_path', None)
+            if not tpath:
+                raise ValueError("es.fitness=opd_kl requires es.teacher_model_path")
+            print(f"Launching teacher engine ({tpath}) for OPD reverse-KL fitness...")
+            self._launch_teacher_engine(tpath)
+            self.kl_scorer = TeacherKLScorer(
+                self.teacher_engine,
+                self.es_config.get('teacher_temperature', 1.0),
+                int(self.es_config.get('teacher_batch_size', 16)))
+            if float(self.es_config.get('temperature', 0.0)) <= 0.0:
+                raise ValueError(
+                    "es.fitness=opd_kl needs SAMPLED rollouts (es.temperature > 0): "
+                    "mean_t[log pi_n(y_t) - log q(y_t)] estimates KL(pi_n||q) only "
+                    "when y ~ pi_n. Set es.temperature=1.0.")
         print("Workers initialized successfully.")
 
     def _init_es_state(self):
@@ -448,6 +664,9 @@ class RayESTrainer:
         else:
             print(f"Training batch: fixed set of {len(self.train_data)} problems")
         
+        opd = self.es_config.get('fitness', 'reward') == 'opd_kl'
+        fixed_traj = opd and bool(self.es_config.get('opd_fixed_traj', True))
+
         # ES hyperparameters
         sigma = self.es_config.sigma
         alpha = self.es_config.alpha
@@ -486,9 +705,80 @@ class RayESTrainer:
             seeds = loop_rng.integers(0, 2**30, size=population_size, dtype=np.int64).tolist()
             
             seeds_perf: Dict[int, Dict[str, Any]] = {}
-            
+
+            # ---- FIXED-TRAJECTORY OPD fitness ------------------------------------
+            # Both length-sensitive aggregations are gameable (zo_opd.md 13.5/13.6):
+            # `mean` rewards padding, `sum` rewards truncation, because the per-token
+            # log-ratio is positive so total KL tracks length. Remove length from the
+            # comparison entirely: generate ONE rollout per prompt from the CLEAN
+            # policy, then teacher-force that same sequence through every rail. All
+            # rails then score the identical tokens, so no length strategy can win,
+            # and the perturbation still acts through the whole sequence.
+            # Bonus: 1 generation + N prefills instead of N generations, and log q is
+            # computed ONCE per iteration instead of once per rail.
+            if opd and fixed_traj:
+                gen_seed = global_seed + iteration
+                cl = ray.get(self._evaluate_with_engine(
+                    self.engines[0], prompts, seed=gen_seed))
+                fulls, lens = [], []
+                for o in cl:
+                    resp = list(o.outputs[0].token_ids)
+                    fulls.append(list(o.prompt_token_ids) + resp)
+                    lens.append(len(resp))
+                logqs = self.kl_scorer.logq(fulls, lens)
+                clean_len = float(np.mean(lens)) if lens else 0.0
+                del cl
+
+                for b in range(0, len(seeds), num_engines):
+                    batch_seeds = seeds[b:b + num_engines]
+                    ray.get([self.engines[i].collective_rpc.remote(
+                        "perturb_self_weights", args=(int(sd), sigma, False))
+                        for i, sd in enumerate(batch_seeds)])
+                    scored = [TeacherKLScorer.score_fixed(
+                        self.engines[i], fulls, lens,
+                        int(self.es_config.get('teacher_batch_size', 16)))
+                        for i, _ in enumerate(batch_seeds)]
+                    ray.get([self.engines[i].collective_rpc.remote(
+                        "restore_self_weights", args=(int(sd), sigma))
+                        for i, sd in enumerate(batch_seeds)])
+                    for i, sd in enumerate(batch_seeds):
+                        # Teacher-probability-weighted student log-likelihood.
+                        #
+                        # NOT sum_t[log pi_n - log q]: on a trajectory sampled from
+                        # pi_0 rather than pi_n that scalar has expectation
+                        #   KL(pi_0||q) - KL(pi_0||pi_n),
+                        # whose first term is constant across rails, so minimising it
+                        # MAXIMISES KL(pi_0||pi_n) -- it selects the rails furthest
+                        # from the current policy. Measured: the score fell monotonically
+                        # with sigma (306 -> 224 -> -133 -> -5551 -> -17643), i.e. a
+                        # bigger perturbation always won (zo_opd.md 13.7).
+                        #
+                        # Reverse KL needs samples from pi_n, which a fixed trajectory
+                        # cannot supply. The forward/distillation form IS well defined on
+                        # another policy's samples: weight each token by the teacher's
+                        # probability of it and push up the student's log-prob there.
+                        # This is the repo's reward_weight_mode=teacher_p, it is bounded
+                        # (weights in [0,1]), and perturbation can only lower it.
+                        tot, ntok = [], 0
+                        for lp, lq in zip(scored[i], logqs):
+                            if not lp or not lq:
+                                continue
+                            m = min(len(lp), len(lq))
+                            tot.append(float(np.sum(
+                                [np.exp(lq[t]) * lp[t] for t in range(m)])))
+                            ntok += m
+                        fit = float(np.mean(tot)) if tot else 0.0
+                        seeds_perf[int(sd)] = {
+                            "avg_reward": fit, "kl": -fit,
+                            "kl_per_tok": -fit / max(1.0, ntok / max(1, len(tot))),
+                            "resp_len": clean_len, "accuracy": float("nan"),
+                            "avg_format": 0.0, "avg_answer": 0.0, "rewards": [],
+                        }
+                    gc.collect(); torch.cuda.empty_cache()
+
             # Static batching: process seeds in batches of num_engines
-            for b in range(0, len(seeds), num_engines):
+            for b in (range(0, len(seeds), num_engines)
+                      if not (opd and fixed_traj) else []):
                 batch_seeds = seeds[b:b + num_engines]
                 
                 # 1) Perturb weights on each engine
@@ -503,7 +793,8 @@ class RayESTrainer:
                 # 2) Generate completions
                 gen_seed = global_seed + iteration
                 handles = [
-                    self._evaluate_with_engine(self.engines[eng_idx], prompts, seed=gen_seed)
+                    self._evaluate_with_engine(self.engines[eng_idx], prompts,
+                                               seed=gen_seed, want_logprobs=opd)
                     for eng_idx, _ in enumerate(batch_seeds)
                 ]
                 outputs_per_engine = ray.get(handles)
@@ -517,9 +808,12 @@ class RayESTrainer:
                     for eng_idx, seed in enumerate(batch_seeds)
                 ])
                 
-                # 4) Compute rewards
+                # 4) Compute rewards (OPD reverse-KL, or the task reward)
                 for eng_idx, seed in enumerate(batch_seeds):
-                    metrics = self._compute_metrics(outputs_per_engine[eng_idx], train_batch)
+                    metrics = (self._opd_metrics(outputs_per_engine[eng_idx], train_batch,
+                                                 with_reward=(b == 0 and eng_idx == 0))
+                               if opd else
+                               self._compute_metrics(outputs_per_engine[eng_idx], train_batch))
                     seeds_perf[int(seed)] = metrics
                 
                 # Clean up GPU memory after each batch
@@ -537,7 +831,8 @@ class RayESTrainer:
             # Aggregate format and answer rewards
             all_avg_formats = [v.get("avg_format", 0.0) for v in seeds_perf.values()]
             all_avg_answers = [v.get("avg_answer", 0.0) for v in seeds_perf.values()]
-            all_accuracies = [v.get("accuracy", 0.0) for v in seeds_perf.values()]
+            all_accuracies = [v.get("accuracy", 0.0) for v in seeds_perf.values()
+                              if not np.isnan(v.get("accuracy", 0.0))]
             mean_format = float(np.mean(all_avg_formats)) if all_avg_formats else 0.0
             mean_answer = float(np.mean(all_avg_answers)) if all_avg_answers else 0.0
             mean_accuracy = float(np.mean(all_accuracies)) if all_accuracies else 0.0
@@ -585,6 +880,18 @@ class RayESTrainer:
                 "train/iteration_time": iter_time,
                 "training/global_step": step,
             }
+            if opd:
+                _kls = [v["kl"] for v in seeds_perf.values() if "kl" in v]
+                if _kls:
+                    train_metrics["train/kl_mean"] = float(np.mean(_kls))
+                    train_metrics["train/kl_min"] = float(np.min(_kls))
+                    train_metrics["train/kl_spread"] = float(np.std(_kls))
+                _rl = [v["resp_len"] for v in seeds_perf.values() if "resp_len" in v]
+                if _rl:
+                    train_metrics["train/resp_len"] = float(np.mean(_rl))
+                _pt = [v["kl_per_tok"] for v in seeds_perf.values() if "kl_per_tok" in v]
+                if _pt:
+                    train_metrics["train/kl_per_tok"] = float(np.mean(_pt))
             train_metrics.update(extra_metrics)
             
             logger.log(data=train_metrics, step=step)

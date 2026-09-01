@@ -178,6 +178,7 @@ class RayNPTrainer:
         # the OPD top-k set (np.log_prob_top_k, default 256), so raise the cap.
         top_k = int(self.np_config.get("log_prob_top_k", 256))
         exec_backend = self.np_config.get("distributed_executor_backend", "ray")
+        teacher_max_len = self.np_config.get("teacher_max_model_len", None)
         engine = ray.remote(num_cpus=0, num_gpus=0, scheduling_strategy=strategy)(NPNcclLLM).remote(
             model=model_path,
             tensor_parallel_size=1,
@@ -187,6 +188,11 @@ class RayNPTrainer:
             gpu_memory_utilization=(self.np_config.get("teacher_gpu_memory_utilization")
                                     or self.np_config.get("gpu_memory_utilization", 0.9)),
             max_logprobs=max(20, top_k),
+            # The teacher only ever scores prompt + max_tokens; left uncapped it
+            # sizes its KV pool (and its profiling activation peak) for the
+            # model's full 32k context, which is what it cannot afford when it
+            # is co-located with the student engine on one card.
+            **({"max_model_len": int(teacher_max_len)} if teacher_max_len else {}),
         )
         self.teacher_engine = engine
         self.teacher_placement_group = pg

@@ -30,6 +30,19 @@ its BP baseline learns on this setup. Prerequisites before judging
 es_token as a method: fix truncation, then get a probe that can resolve the effect, then sweep LR
 between 1e-4 and 1e-3 (§9.5).
 
+> **[2026-08-24/25] The §9 negative result is explained and superseded by
+> [opd_paper_align.md](opd_paper_align.md).** The "neither method learns" verdict was measuring two
+> setup bugs, not the algorithms: (1) every rollout hit the 1024-token cap because the student was
+> the *instruct* `Qwen3-1.7B` with thinking enabled — the paper's `Qwen3-1.7B-Base` stops on its own
+> in 95% of rollouts at 3072; and (2) `opd_math_ref.sh` set `MODEL_DTYPE=bfloat16`, which makes the
+> optimizer's **master** weights bf16, so an Adam-sized step at `lr=1e-6` changed only **1.35%** of
+> weights per step. (**Corrected 2026-08-25**: that attenuates rather than freezes — the NERSC
+> reference run learns with bf16 at `lr=1e-6` — so truncation was the real blocker.) es_token had the same attenuation
+> (`weight.add_(dw.to(bf16))` on vLLM's bf16 weights; ~0.57 ulp at `lr=1e-4`), now fixed by
+> `es_token.fp32_master`. With both fixed, the decisive variable turned out to be the **student
+> initialisation**, not the LR: from `Qwen3-1.7B-SFT` the es_token probe *falls* 24% where it
+> *triples* from the base student.
+
 ## Wall-clock: every es_token variant vs BP-OPD
 
 One full OPD step, identical config throughout — batch 64 × 1024 tokens, N=8 rails, all 112 decoder
@@ -693,6 +706,12 @@ over 138 steps at LR 1e-6). *Neither* method moved, which points at the setup ra
 algorithm — see the truncation item below.
 
 ### 9.5 Still open
+
+> **Answered [2026-08-25] in [opd_paper_align.md](opd_paper_align.md).** The bracket was an
+> artefact: the bf16 master weights meant the *applied* step at 1e-4 was ~half of the nominal one,
+> and every rollout was truncated. On the fixed setup with `Qwen3-1.7B-SFT`, `lr=1e-5` moves the
+> heldout probe 3.435 → 2.603 over 20 steps. The item below about "both runs cap responses at 1024
+> tokens" was the correct diagnosis and is now closed.
 
 - **Whether es_token can learn** is still unanswered — the bracket is too wide to conclude no
   working step size exists between 1e-4 and 1e-3.

@@ -86,6 +86,7 @@ export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-"student_p"} # "student_p" or "t
 export USE_KL=${USE_KL:-False} # TODO: True / False (default False)
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False} # TODO: True / False (default False)
 export MODEL_DTYPE=${MODEL_DTYPE:-fp32} # actor/ref/critic fsdp_config.model_dtype: fp32 or bfloat16
+export REWARD_MODEL_DTYPE=${REWARD_MODEL_DTYPE:-$MODEL_DTYPE} # teacher is inference-only; bf16 is enough
 export IS_PLOT=${IS_PLOT:-True} # TODO: True / False (default False)
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean" / "seq-mean-token-sum-norm" (default "token-mean")
 
@@ -167,10 +168,14 @@ export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 export VAL_N=${VAL_N:-16}
 # Validation generation: default to SimpleRL-Zoo eval setting (temp 1.0, top_p 0.95).
 export VAL_TEMPERATURE=${VAL_TEMPERATURE:-1.0}
+# False + VAL_N=1 gives a GREEDY validation pass, which is what the ZO/ES trainers
+# run; keeping it True preserves the sampled n>1 protocol.
+export VAL_DO_SAMPLE=${VAL_DO_SAMPLE:-True}
 export VAL_TOP_P=${VAL_TOP_P:-0.95}
 export SAVE_FREQ=${SAVE_FREQ:-20}
 export TEST_FREQ=${TEST_FREQ:-20}
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+export VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
 export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}
 # CKPT_PATH is overridable: set a fixed CKPT_PATH in the env to get a stable
 # checkpoint dir across relaunches (required for resume_mode=auto). Unset -> the
@@ -205,7 +210,7 @@ if [ "$LR_SCHEDULER" = "cosine" ]; then
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03"
 fi
 
-PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))
+PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_RESP_LENGTH) : 32768))}
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
@@ -394,7 +399,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
     actor_rollout_ref.rollout.n=$N_RESPONSES \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=$VAL_DO_SAMPLE \
     ++actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
     actor_rollout_ref.rollout.val_kwargs.n=$VAL_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=$VAL_TEMPERATURE \
@@ -408,11 +413,11 @@ python3 -m verl.trainer.main_ppo \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=$REWARD_PARAM_OFFLOAD \
-    ++reward_model.model.dtype=$MODEL_DTYPE \
+    ++reward_model.model.dtype=$REWARD_MODEL_DTYPE \
     reward_model.micro_batch_size_per_gpu=$REWARD_MICRO_BATCH_SIZE_PER_GPU \
     custom_reward_function.path="verl/verl/utils/reward_score/ttrl_math/__init__.py" \
     custom_reward_function.name=reward_func \
-    trainer.val_before_train=False \
+    trainer.val_before_train=$VAL_BEFORE_TRAIN \
     trainer.log_val_generations=2 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \

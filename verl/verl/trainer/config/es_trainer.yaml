@@ -19,6 +19,29 @@ es:
   # Generation settings
   max_tokens: 1024
   temperature: 0.0  # Use greedy decoding by default
+  top_p: 1.0        # 0.95 matches BP-OPD's rollout and every eval
+
+  # ---- OPD fitness: reverse KL between the PERTURBED rollout and the teacher ---
+  # reward : task reward (math accuracy) -- the original ES-at-scale objective
+  # opd_kl : fitness = -mean_t[log pi_n(y_t) - log q(y_t)], y ~ pi_n. Needs a
+  #          teacher engine and es.temperature > 0 (the estimate is unbiased only
+  #          when the rollout is SAMPLED from the perturbed policy).
+  fitness: reward
+  teacher_model_path: null
+  teacher_temperature: 1.0
+  teacher_batch_size: 16
+  teacher_precision: null                 # null -> es.precision
+  teacher_gpu_memory_utilization: null    # null -> es.gpu_memory_utilization
+  teacher_gpu_fraction: 0.01              # <1.0 => teacher shares a card with a student engine
+  teacher_max_model_len: null             # cap the teacher's KV pool (co-located runs must)
+  # sum = per-sequence total log-ratio (the true reverse KL; length-neutral under ES
+  # selection). mean = per-token average, which ES length-hacks -- see zo_opd.md 13.5.
+  opd_kl_agg: sum
+  # true = score every rail on ONE clean rollout per prompt (teacher-forced), so the
+  # token sequence is identical across rails and no length strategy can score better.
+  # false = each rail generates its own rollout (an on-policy reverse-KL estimate, but
+  # length-gameable in both aggregations -- see zo_opd.md 13.5/13.6).
+  opd_fixed_traj: true
   
   # Evaluation settings
   eval_interval: 25  # Evaluate every N iterations (0 to disable)
@@ -32,6 +55,12 @@ es:
   
   # vLLM settings
   gpu_memory_utilization: 0.9
+  # <1.0 leaves bundle room for a co-located teacher (es.fitness=opd_kl)
+  engine_gpu_fraction: 1.0
+  # "ray" spawns a RayWorkerWrapper that demands a FULL GPU and so cannot share a
+  # card; "uni" (tensor_parallel=1 only) keeps the worker in-process. Co-located
+  # student+teacher runs must use "uni".
+  distributed_executor_backend: ray
   worker_extension_cls: "verl.workers.rollout.vllm_rollout.es_worker_extension.WorkerExtension"
   
   # Maximum vLLM context (null -> model default). Qwen2.5-Math-7B is 4096.

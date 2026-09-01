@@ -110,6 +110,67 @@ class RayESTokenTrainer(RayNPTrainer):
             self.es.get("teacher_batch_size", 16))
         print("Workers initialized successfully.")
 
+    # ---------------------------------------------------------- checkpoint ---
+    def _save_hf_checkpoint(self, step: int, base_dir: str, keep_last: int = 2):
+        """Write a plain HF checkpoint of the CURRENT perturbed weights.
+
+        The es trainer keeps the model inside the vLLM engine, whose decoder
+        linears are FUSED (`qkv_proj`, `gate_up_proj`) while HF stores them split
+        (`q_proj`/`k_proj`/`v_proj`, `gate_proj`/`up_proj`). So: pull the perturbed
+        tensors off the engine, split them back, drop them into a CPU copy of the
+        base model, and `save_pretrained`. Everything the trainer never perturbs
+        (embeddings, norms, lm_head) comes from that base copy unchanged.
+        """
+        import shutil
+        from transformers import AutoModelForCausalLM
+
+        if getattr(self, "_ckpt_model", None) is None:
+            self._ckpt_model = AutoModelForCausalLM.from_pretrained(
+                self.config.model.path, torch_dtype=torch.bfloat16, device_map="cpu")
+            self._ckpt_model.eval()
+        model = self._ckpt_model
+        cfg = model.config
+        n_q = cfg.num_attention_heads * getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+        n_kv = cfg.num_key_value_heads * getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+        inter = cfg.intermediate_size
+
+        weights = ray.get(self.engines[0].collective_rpc.remote("es_export_weights"))[0]
+        sd = dict(model.state_dict())
+        missing = []
+        for ln, t in weights.items():
+            if ln.endswith("self_attn.qkv_proj"):
+                base = ln[: -len("qkv_proj")]
+                q, k, v = torch.split(t, [n_q, n_kv, n_kv], dim=0)
+                parts = {base + "q_proj.weight": q, base + "k_proj.weight": k,
+                         base + "v_proj.weight": v}
+            elif ln.endswith("mlp.gate_up_proj"):
+                base = ln[: -len("gate_up_proj")]
+                g, u = torch.split(t, [inter, inter], dim=0)
+                parts = {base + "gate_proj.weight": g, base + "up_proj.weight": u}
+            else:
+                parts = {ln + ".weight": t}
+            for k2, v2 in parts.items():
+                if k2 in sd:
+                    sd[k2].copy_(v2.to(sd[k2].dtype))
+                else:
+                    missing.append(k2)
+        if missing:
+            print(f"[es ckpt] WARNING {len(missing)} unmatched keys, first: {missing[:3]}")
+
+        out = os.path.join(base_dir, f"step_{step}")
+        os.makedirs(out, exist_ok=True)
+        model.save_pretrained(out, safe_serialization=True)
+        self.tokenizer.save_pretrained(out)
+        print(f"[es ckpt] saved step {step} -> {out}")
+
+        # keep only the newest `keep_last` step_* dirs (disk is tight)
+        steps = sorted(
+            (int(d.split("_")[1]) for d in os.listdir(base_dir)
+             if d.startswith("step_") and d.split("_")[1].isdigit()))
+        for old in steps[:-keep_last]:
+            shutil.rmtree(os.path.join(base_dir, f"step_{old}"), ignore_errors=True)
+        return out
+
     # --------------------------------------------------------------- probe ---
     def _heldout_clean_loss(self, heldout_pids, sp, es_cfg):
         """Mean clean sampled-token loss (log p0(y_t) - log q(y_t)) on FIXED
@@ -167,6 +228,24 @@ class RayESTokenTrainer(RayNPTrainer):
             prompts = [d.get("prompt", d.get("context"))
                        for d in self.train_data]
 
+        # Drop overlong prompts, exactly as BP does via data.filter_overlong_prompts.
+        # Two things break without this, both only on the rare long prompt:
+        #   * the teacher engine is capped at teacher_max_model_len and refuses a
+        #     prompt+response longer than it ("decoder prompt ... is longer than
+        #     the maximum model length"), and
+        #   * the packed decode reserves (longest prompt + max_tokens) of scratch
+        #     KV per slot, so one long prompt in a wave can exceed the pool.
+        # On DAPO-Math-17k this drops 9 of 17,917 rows (0.05%).
+        max_pl = cfg.get("max_prompt_length", None)
+        if max_pl:
+            max_pl = int(max_pl)
+            _len = lambda p: len(p["prompt_token_ids"] if isinstance(p, dict) else p)
+            kept = [p for p in prompts if _len(p) <= max_pl]
+            if len(kept) != len(prompts):
+                print(f"[es data] dropped {len(prompts) - len(kept)}/{len(prompts)} "
+                      f"prompts longer than {max_pl} tokens")
+            prompts = kept
+
         n_heldout = int(cfg.get("heldout_probe_size", 16))
         heldout = prompts[-n_heldout:] if len(prompts) > 2 * n_heldout else []
         if heldout:
@@ -178,9 +257,16 @@ class RayESTokenTrainer(RayNPTrainer):
                           or cfg.num_iterations)
         eval_interval = (self.config.trainer.get("test_freq", None)
                          or cfg.get("eval_interval", 25))
+        save_freq = int(self.config.trainer.get("save_freq", 0) or 0)
 
         sp = SamplingParams(temperature=cfg.get("temperature", 0.0),
                             max_tokens=int(cfg.max_tokens))
+        # The probe must rank learning rates, so it has to be quieter than the
+        # effect it is measuring. Scoring SAMPLED rollouts at T=1.0 gives it a
+        # +-8% floor (results/zo_opd.md 9.1) that swamps everything short of
+        # divergence; a GREEDY clean trajectory on the same fixed prompts is
+        # deterministic, so run-to-run spread reflects the weights alone.
+        probe_sp = SamplingParams(temperature=0.0, max_tokens=int(cfg.max_tokens))
         es_cfg = dict(
             n_sample=int(cfg.n_sample),
             max_tokens=int(cfg.max_tokens),
@@ -190,7 +276,34 @@ class RayESTokenTrainer(RayNPTrainer):
             sample_method=cfg.sample_method,
             b_pack_buckets=list(cfg.get("b_pack_buckets", [2, 4])),
             token_agg=cfg.get("token_agg", "sum"),
+            fp32_master=bool(cfg.get("fp32_master", True)),
+            # Default 1.0 reproduces the pre-2026-08-28 decode exactly; set to
+            # 0.95 to match BP's rollout and every eval (results/zo_opd.md 12.6).
+            top_p=float(cfg.get("top_p", 1.0)),
         )
+        # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
+        # falls back to config.json's single eos_token_id and misses 151643
+        # (<|endoftext|>, declared only in generation_config.json). Opt-in so the
+        # LR sweep keeps the old rollout-length semantics.
+        if cfg.get("use_generation_config_eos", False):
+            eos = set()
+            for src in (getattr(self.tokenizer, "eos_token_id", None),):
+                if isinstance(src, int):
+                    eos.add(src)
+            try:
+                from transformers import GenerationConfig
+                gc_ = GenerationConfig.from_pretrained(self.config.model.path)
+                e = gc_.eos_token_id
+                eos |= set(e) if isinstance(e, (list, tuple)) else {e}
+            except Exception as _e:
+                print(f"[es] generation_config eos lookup failed: {_e}")
+            eos = {int(x) for x in eos if x is not None}
+            if eos:
+                sp.stop_token_ids = sorted(eos)
+                sp._all_stop_token_ids = set(eos)
+                probe_sp.stop_token_ids = sorted(eos)
+                probe_sp._all_stop_token_ids = set(eos)
+                print(f"[es] stop_token_ids = {sorted(eos)}")
         batch_size = int(cfg.get("batch_size", 1))
         pack_width = int(cfg.get("pack_width", 4))
         n_rails = int(cfg.n_sample)
@@ -272,11 +385,13 @@ class RayESTokenTrainer(RayNPTrainer):
                     w_before[ln] = ray.get(
                         self.engines[0].collective_rpc.remote(
                             "layer_weight_norm", args=(ln,)))[0]
-            dws = ray.get(self.engines[0].collective_rpc.remote(
+            _res = ray.get(self.engines[0].collective_rpc.remote(
                 "es_assemble_and_apply",
                 args=(rec_rids, rec_t, scales, es_cfg, float(cfg.lr),
                       cfg.get("update_clip"),
                       int(cfg.get("assemble_chunk", 1024)))))[0]
+            dws = _res["norms"]
+            foots, dwcos = _res["footprint"], _res["dw_cos_prev"]
             for ln in self.matched:
                 ray.get([
                     e.collective_rpc.remote("broadcast_layer_weights",
@@ -310,6 +425,15 @@ class RayESTokenTrainer(RayNPTrainer):
                 "train/dW_norm_mean": float(np.mean(list(dws.values()))),
                 "training/global_step": step,
             }
+            # The two numbers that decide whether the run can learn at all.
+            # footprint: per-step RMS(lr*dW)/RMS(W). The ES arms in this repo
+            #   that learn sit at 1.6e-2..5e-2; the 200-step flat run sat at
+            #   1.4e-4 (docs/results/zo_opd.md 12).
+            # dw_cos_prev: coherent fraction of the estimate. ~0 = random walk.
+            if foots:
+                metrics["train/update_footprint"] = float(np.mean(list(foots.values())))
+            if dwcos:
+                metrics["train/dW_cos_prev_mean"] = float(np.mean(list(dwcos.values())))
             if w_deltas:
                 metrics["train/weight_delta_mean"] = float(
                     np.mean(list(w_deltas.values())))
@@ -317,12 +441,20 @@ class RayESTokenTrainer(RayNPTrainer):
                     1.0 if all(w_sync_ok.values()) else 0.0)
             logger.log(data=metrics, step=step)
             progress.set_postfix({
-                "dW": f"{metrics['train/dW_norm_max']:.3e}",
+                "fp": f"{metrics.get('train/update_footprint', float('nan')):.2e}",
+                "cos": f"{metrics.get('train/dW_cos_prev_mean', float('nan')):+.4f}",
                 "L_clean": f"{metrics['train/L_clean_mean']:.3f}",
                 "dec": f"{decode_s:.1f}s",
                 "tch": f"{teacher_s:.1f}s",
                 "asm": f"{assemble_s:.1f}s",
             }, refresh=False)
+
+            if save_freq and (step > 0 and step % save_freq == 0
+                              or step == num_iterations - 1):
+                try:
+                    self._save_hf_checkpoint(step, logging_dir)
+                except Exception as e:
+                    print(f"[es ckpt] save failed at step {step}: {e}")
 
             if eval_interval and (step % eval_interval == 0
                                   or step == num_iterations - 1):
@@ -330,7 +462,7 @@ class RayESTokenTrainer(RayNPTrainer):
                     self.engines[0], self.eval_data, step, logger)
                 if eval_metrics:
                     logger.log(data=eval_metrics, step=step)
-                hk = self._heldout_clean_loss(heldout_pids, sp, es_cfg)
+                hk = self._heldout_clean_loss(heldout_pids, probe_sp, es_cfg)
                 if hk is not None:
                     logger.log(data={"eval/heldout_clean_loss": hk}, step=step)
                     print(f"[Probe @ step {step}] heldout_clean_loss={hk:.4f} "

@@ -539,6 +539,7 @@ class WorkerExtension(NPWorkerExtension):
                                   dtype=torch.float32)
         clean_tokens = [[] for _ in range(B)]
         temp = float(getattr(sampling_params, "temperature", 0.0) or 0.0)
+        top_p = float(es_cfg.get("top_p", 1.0) or 1.0)
 
         try:
             for t in range(max_tokens):
@@ -562,6 +563,19 @@ class WorkerExtension(NPWorkerExtension):
                     next_toks = clean_logits.argmax(dim=-1)     # [bucket]
                 else:
                     probs = torch.softmax(clean_logits / temp, dim=-1)
+                    # top-p. Default 1.0 keeps the historical behaviour (pure
+                    # multinomial over the full 151 k vocab). BP's rollout and
+                    # every eval use 0.95, and at step 0 -- identical weights --
+                    # that gap alone is 1397 training tokens vs 837 at eval
+                    # (docs/results/zo_opd.md 12.6). Set es_token.top_p=0.95 to
+                    # estimate the gradient on the distribution we score.
+                    if top_p < 1.0:
+                        sp_, si_ = torch.sort(probs, dim=-1, descending=True)
+                        cum = sp_.cumsum(dim=-1)
+                        drop = cum - sp_ > top_p
+                        sp_ = sp_.masked_fill(drop, 0.0)
+                        sp_ = sp_ / sp_.sum(dim=-1, keepdim=True)
+                        probs = torch.zeros_like(probs).scatter_(1, si_, sp_)
                     next_toks = torch.multinomial(probs, 1)[:, 0]
                 chosen = next_toks.repeat_interleave(width)     # [R]
                 tok_logp = logits_f.gather(1, chosen[:, None])[:, 0] - lse
@@ -588,6 +602,25 @@ class WorkerExtension(NPWorkerExtension):
             block = payload_cpu[p * width:(p + 1) * width, :T_p]  # [1+N, T_p]
             payload.append(block.t().contiguous())                # [T_p, 1+N]
         return {"clean_tokens": clean_tokens, "payload": payload}
+
+    # -------------------------------------------------------------- export ---
+    def es_export_weights(self):
+        """Return {vllm_layer_name: cpu fp32 tensor} for every perturbed layer.
+
+        Prefers the fp32 master (the authoritative accumulator) and falls back to
+        the live bf16 weight when fp32_master is off. Used by the trainer to write
+        an HF checkpoint; the fused vLLM layouts (qkv_proj, gate_up_proj) are split
+        back into their HF counterparts on the driver side.
+        """
+        out = {}
+        master = getattr(self, "es_master", None) or {}
+        with torch.no_grad():
+            for ln in self.np_modules:
+                t = master.get(ln)          # already on host when fp32_master is on
+                if t is None:
+                    t = self.np_modules[ln].wrapped.weight
+                out[ln] = t.detach().to("cpu", torch.float32).clone()
+        return out
 
     # ------------------------------------------------------------ assemble ---
     def es_assemble_and_apply(self, rollout_ids, t_idx, scales, es_cfg, lr,
@@ -624,6 +657,9 @@ class WorkerExtension(NPWorkerExtension):
 
         acc = {ln: torch.zeros(d_out, d_in, dtype=torch.float32, device=device)
                for ln, (_, d_out, _, d_in) in self.es_layout.items()}
+        # NOTE: this dict is ~5.65 GB (every perturbed layer, fp32) and is the
+        # single largest transient on the card; `acc[ln] = None` in the apply
+        # loop below releases it layer by layer.
 
         noise_chunk = torch.empty(min(int(chunk), M), self.es_d_total,
                                   dtype=dtype, device=device)
@@ -650,7 +686,27 @@ class WorkerExtension(NPWorkerExtension):
                 assemble_chunk(sc, u, v, S, R, acc[ln])
 
         sigma_eff = self._es_sigma_eff(es_cfg)
+        # vLLM holds the weights in bf16, whose ulp near |W|~0.02 is ~6e-5. A
+        # step smaller than half an ulp rounds straight back to the old value,
+        # so an in-place bf16 SGD step silently drops most of the update at the
+        # LRs that do not diverge (measured: ~1.4% of elements move at an
+        # Adam-sized 1e-6). Accumulate into an fp32 master and round once.
+        fp32_master = bool(es_cfg.get("fp32_master", True))
+        if fp32_master and getattr(self, "es_master", None) is None:
+            self.es_master = {}
         norms = {}
+        # Update-quality diagnostics (docs/results/zo_opd.md 12.4). Two numbers
+        # decide whether a run can learn, and neither was logged before:
+        #   footprint = RMS(lr*dW)/RMS(W) -- the per-step relative weight motion.
+        #     Every ES arm in this repo that learns runs at 1.6e-2..5e-2
+        #     (results/ES/es_results.md 10.4, 11.3); es_token ran at 1.4e-4.
+        #   dw_cos_prev = cos(dW_t, dW_{t-1}) on a fixed coordinate sketch.
+        #     The estimator is unbiased but nearly all noise, so this reads the
+        #     COHERENT fraction: ~0 means the update is a random walk.
+        if not hasattr(self, "_es_prev_sketch"):
+            self._es_prev_sketch = {}
+        SK = 100_000
+        foots, coss = {}, {}
         with torch.no_grad():
             for ln, dw in acc.items():
                 denom = (float(n_rails) * float(sigma_eff[ln])
@@ -659,8 +715,34 @@ class WorkerExtension(NPWorkerExtension):
                 if update_clip is not None:
                     dw.clamp_(-float(update_clip), float(update_clip))
                 weight = self.np_modules[ln].wrapped.weight
-                weight.add_(dw.to(weight.dtype), alpha=-float(lr))
+                if fp32_master:
+                    # Held on the HOST. An fp32 copy of the 1.41 B perturbed
+                    # params is 5.65 GB, which does not fit alongside the student
+                    # engine, the co-located teacher and this accumulator on one
+                    # 93 GB card. The round trip is ~11 GB of PCIe per step
+                    # against a ~150 s step, i.e. under 1%.
+                    master = self.es_master.get(ln)
+                    if master is None:
+                        master = weight.detach().float().cpu().clone()
+                        self.es_master[ln] = master
+                    master.add_(dw.to("cpu"), alpha=-float(lr))
+                    weight.copy_(master.to(weight.device, weight.dtype))
+                else:
+                    weight.add_(dw.to(weight.dtype), alpha=-float(lr))
                 norms[ln] = float(dw.norm().item())
+                w_rms = float(weight.float().pow(2).mean().sqrt().item())
+                if w_rms > 0:
+                    foots[ln] = (float(lr) * norms[ln]
+                                 / (dw.numel() ** 0.5) / w_rms)
+                flat = dw.view(-1)
+                stride = max(1, flat.numel() // SK)
+                sk = flat[::stride][:SK].clone()
+                prev = self._es_prev_sketch.get(ln)
+                if prev is not None and prev.numel() == sk.numel():
+                    d = sk.norm() * prev.norm()
+                    if float(d) > 0:
+                        coss[ln] = float((sk @ prev) / d)
+                self._es_prev_sketch[ln] = sk
                 acc[ln] = None  # free as we go
         torch.cuda.synchronize()
-        return norms
+        return {"norms": norms, "footprint": foots, "dw_cos_prev": coss}
