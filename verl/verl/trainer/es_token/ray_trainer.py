@@ -280,6 +280,9 @@ class RayESTokenTrainer(RayNPTrainer):
             # Default 1.0 reproduces the pre-2026-08-28 decode exactly; set to
             # 0.95 to match BP's rollout and every eval (results/zo_opd.md 12.6).
             top_p=float(cfg.get("top_p", 1.0)),
+            # rail-aware kernels (es_profile_results.md): rows = shipping path
+            attn_impl=str(cfg.get("attn_impl", "rows")),
+            lm_head_impl=str(cfg.get("lm_head_impl", "full")),
         )
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643

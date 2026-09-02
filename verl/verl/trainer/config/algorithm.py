@@ -358,3 +358,11 @@ class AlgoConfig(BaseConfig):
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None
+    # Forward-only ES actor update (replaces the BP update when enabled; see ppo/es_update.py)
+    es_update: bool = False
+    es_sigma: float = 1e-3        # per-element Gaussian probe scale (absolute)
+    es_alpha: float = 5e-4        # step size; zscore => per-coordinate motion ~ alpha / sqrt(n_pairs)
+    es_n_rails: int = 32          # forward evaluations per step (antithetic pairs = n_rails // 2)
+    es_normalize: str = "zscore"  # "zscore" (OpenAI-ES) | "raw" (alpha * unbiased gradient estimate)
+    es_antithetic: bool = True    # False = plain random sampling, mean baseline (1 eval/rail)
+    es_seed: int = 1234

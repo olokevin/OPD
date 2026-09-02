@@ -98,6 +98,8 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.fp32_master=${FP32_MASTER} \
     es_token.assemble_chunk=${ASSEMBLE_CHUNK} \
     es_token.use_cuda_graph=${USE_CUDA_GRAPH} \
+    es_token.attn_impl=${ATTN_IMPL:-rows} \
+    es_token.lm_head_impl=${LM_HEAD_IMPL:-full} \
     es_token.pack_width=${PACK_WIDTH} \
     "es_token.b_pack_buckets=${B_PACK_BUCKETS}" \
     'es_token.perturb_rules=["'"${PERTURB_RULES}"'"]' \
