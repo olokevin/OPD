@@ -420,3 +420,7 @@ es_token, so it is a property of the setting rather than the gradient estimator.
 ## [2026-08-31] ingest | es_token rail-aware kernels (shared-KV attention, streaming LM head) + H100 profile
 
 Executed `results/ZO_OPD/opd_profile_plan.md` Phases 0–6 on 2× H100 NVL: built `rail_attn_kernel.py` (Triton shared-KV + FA3 GQA-fold), `lm_head_kernel.py` (streaming head), `rail_gemm_kernel.py` (fused epilogue, negative), wired them into the es_token decode behind `attn_impl`/`lm_head_impl`, added gates (`check_rail_kernels.py`) and the `scripts/zo_opd/es_profile/` harness. Fixed the stale-KV-page bug across waves. Pages: `results/ZO_OPD/es_profile_results.md` (new), `wiki/es_token_trainer.md` §10, index.
+
+## [2026-09-01] result | B=1 rail sweep: fold carries 48 rails within 10% (128 within 25%) of N=1 latency
+
+Fine-N single-batch decode sweep to N=384 on idle GPUs (`es_profile_results.md` §5.1, fig `figs/es_profile_b1_railsweep.png`): the FA3 GQA-fold path nearly reaches the ideal ridge (~160 rows); the Triton shared kernel under-fills the GPU at B=1 (right tool only for B≥4); 54.3k rail evals/s at R=385.

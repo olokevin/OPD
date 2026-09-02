@@ -243,6 +243,43 @@ Fixed rails-on cost (N=1 − N=0) and **N_free relative to N=1** at 5/10/25 % �
 ![heatmap L=8192](figs/es_profile_heatmap_L8192.png)
 
 
+
+### 5.1 Single-batch rail sweep (B=1, fine N grid to 384) — 2026-09-01, GPUs idle
+
+The purest headroom test: one sequence, prompt 512, N ∈ {0…384}, min-of-2 slopes over 64→384
+token-steps. Both GPUs were **idle** this time (the co-tenant jobs had finished), so these curves are
+clean; the B=1 rows of §5 (taken under 65–78 % co-tenant load) read ~0.3–0.7 ms higher.
+
+ms/token-step (stock vLLM B=1 = 2.83):
+
+| path | R=1 | R=9 | R=17 | R=33 | R=49 | R=65 | R=129 | R=193 | R=257 | R=385 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| rows/full (shipping) | 2.58 | 3.53 | 3.70 | 3.83 | 4.48 | 4.90 | 6.63 | 8.77 | 10.84 | 15.37 |
+| shared/stream (Triton) | 3.08 | 3.87 | 3.99 | 4.94 | 5.17 | 5.60 | 6.32 | 7.28 | 8.02 | 9.88 |
+| **fold/stream (FA3 GQA)** | 2.83 | 3.66 | 3.67 | 3.79 | 3.84 | 4.02 | **4.44** | 4.99 | 5.56 | **7.07** |
+
+![B=1 rail sweep](figs/es_profile_b1_railsweep.png)
+
+Reads:
+
+1. **The single-slot headroom claim holds almost to the ideal ridge — on the fold path.** Relative to
+   N=1 (the fixed rails-on step is +0.5–0.7 ms on every path), fold carries **N=16 within 5 %, N=48
+   within 10 %, N=128 within 25 %** — against the ideal linear ridge of ~160 rows. The shipping path
+   exits at N=4 / 4 / 32. At R=385 fold still runs at only 2.5× its N=0 latency.
+2. **Probe throughput**: at R=385 fold delivers **54.3 k rail evaluations/s** on one sequence (rows:
+   25.0 k, shared: 38.9 k) — 36 % of the "rails literally free" bound (149 k), and 58 % of it at R=129.
+   In §5-of-plan terms: one slot converts idle compute into ~29 k probes/s at ≤ +57 % latency.
+3. **The Triton `shared` kernel is the wrong tool at B=1** (as §9.5 predicted): its grid is one program
+   per (kv-head, split) and the query tile pads R·g up to 128 rows, so it under-fills the GPU and
+   loses to plain FA rows until R ≳ 130; KV re-reads cost nothing at B=1 (the whole 2 MB KV sits in
+   L2), which is also why the shipping path itself is fine to R≈33. `fold` (stock FA3 GQA packing) is
+   simply the right kernel at this batch size.
+4. **N=0 launch tax of the new paths**: rows 2.58 vs fold 2.83 vs shared 3.08 ms — the streaming head
+   (+~0.2 ms of extra small launches) and the shared/fold wrappers cost real latency at B=1. For clean
+   decode alone, `rows/full` remains the fastest; the new paths pay off from N ≳ 8–16.
+
+Raw data `results/phase5_b1_railsweep.json`; plot `plot_b1_railsweep.py`.
+
 ## 6. Correctness gates (`check_rail_kernels.py`, GPU 1, Qwen3-1.7B, 4 prompts × 64 tokens, N=8, σ=0.01)
 
 | Gate | Result |
