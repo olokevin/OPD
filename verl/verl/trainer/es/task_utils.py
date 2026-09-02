@@ -51,14 +51,21 @@ def _format_messages_for_base_model(messages: list, tokenizer) -> str:
     return "".join(text_parts)
 
 
-def _apply_chat_template_or_format(messages: list, tokenizer, add_generation_prompt: bool = True) -> str:
+def _apply_chat_template_or_format(messages: list, tokenizer, add_generation_prompt: bool = True,
+                                   template_kwargs: Dict[str, Any] = None) -> str:
     """Apply chat template if available, otherwise format for base model.
-    
+
     Args:
         messages: List of message dicts with 'role' and 'content'
         tokenizer: The tokenizer to use
         add_generation_prompt: Whether to add generation prompt (only used for instruct models)
-    
+        template_kwargs: Extra kwargs forwarded to `apply_chat_template` -- notably
+            `enable_thinking=False`, which the hybrid Qwen3 template needs in order to
+            emit the `<think>\n\n</think>` prefix instead of letting the model open a
+            reasoning block of its own. Without it a non-thinking run silently becomes a
+            thinking run and every rollout blows past the token budget. Mirrors
+            `data.apply_chat_template_kwargs` on the BP/verl side.
+
     Returns:
         Formatted string ready for tokenization
     """
@@ -66,7 +73,8 @@ def _apply_chat_template_or_format(messages: list, tokenizer, add_generation_pro
         return tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=add_generation_prompt,
-            tokenize=False
+            tokenize=False,
+            **(template_kwargs or {})
         )
     else:
         return _format_messages_for_base_model(messages, tokenizer)
@@ -217,6 +225,7 @@ MATH_RESPONSE_PROMPT = ""
 def create_math_prompt_processor(
     system_message: str = None,
     user_template: str = None,
+    template_kwargs: Dict[str, Any] = None,
 ) -> Callable:
     """Create a prompt processor for MATH task."""
     sys_msg = system_message or MATH_SYSTEM_MESSAGE
@@ -242,7 +251,8 @@ def create_math_prompt_processor(
             if not isinstance(messages[0], dict):
                 # Numpy array of dicts
                 messages = [dict(m) for m in messages]
-            formatted = _apply_chat_template_or_format(messages, tokenizer)
+            formatted = _apply_chat_template_or_format(
+                messages, tokenizer, template_kwargs=template_kwargs)
         else:
             # Simple format: {"problem": "...", "answer": "..."}
             problem = task_data.get("problem", task_data.get("question", ""))
@@ -1077,6 +1087,7 @@ def get_task_components(task_type: str, config: Dict[str, Any] = None) -> tuple:
         prompt_processor = create_math_prompt_processor(
             system_message=system_message if not is_countdown_template else None,
             user_template=user_template if is_math_template else None,
+            template_kwargs=config.get("apply_chat_template_kwargs") or {},
         )
         reward_fn = create_opd_math_reward_fn()
 

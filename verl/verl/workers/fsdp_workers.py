@@ -133,6 +133,26 @@ def get_vl_model_vision_tower(vl_model_instance):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Forward-only ES update (algorithm.es_update): seeded Gaussian weight noise that is
+# regenerated on demand and never stored.  Works on whatever `parameters()` yields
+# (FSDP1 flat params or FSDP2 DTensors): each rank perturbs ITS OWN shard with noise
+# keyed by (seed, param index, rank, chunk), which is a valid global N(0, I) draw and
+# is bit-reproducible between perturb and apply on that rank.
+def _es_local_flat(p):
+    local = p.to_local() if hasattr(p, "to_local") else p.data
+    return local.view(-1)
+
+
+def _es_noise_chunks(flat, seed, pidx, rank, chunk=1 << 28):
+    n = flat.numel()
+    for ci, start in enumerate(range(0, n, chunk)):
+        gen = torch.Generator(device=flat.device)
+        gen.manual_seed((int(seed) * 1000003 + pidx * 7919 + rank * 104729 + ci) & 0x7FFFFFFFFFFF)
+        m = min(chunk, n - start)
+        yield start, torch.randn(m, dtype=flat.dtype, device=flat.device, generator=gen)
+
+
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -969,6 +989,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_config=checkpoint_contents,
             )
+
+    # ---- forward-only ES update (see verl/trainer/ppo/es_update.py) ----
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def es_perturb_weights(self, seed: int, scale: float):
+        """W += scale * eps(seed) on every actor parameter (in place, fp32 master)."""
+        assert self._is_actor
+        assert not self._is_offload_param, "algorithm.es_update needs actor.fsdp_config.param_offload=False"
+        rank = torch.distributed.get_rank()
+        with torch.no_grad():
+            for pidx, p in enumerate(self.actor_module_fsdp.parameters()):
+                flat = _es_local_flat(p)
+                for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
+                    flat[start:start + noise.numel()].add_(noise, alpha=float(scale))
+        get_torch_device().synchronize()
+        return True
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def es_apply_update(self, seeds, coeffs):
+        """W += sum_i coeffs[i] * eps(seeds[i]).  Returns {rms_w} for footprint metrics."""
+        assert self._is_actor
+        assert not self._is_offload_param, "algorithm.es_update needs actor.fsdp_config.param_offload=False"
+        rank = torch.distributed.get_rank()
+        sq, n = 0.0, 0
+        with torch.no_grad():
+            for pidx, p in enumerate(self.actor_module_fsdp.parameters()):
+                flat = _es_local_flat(p)
+                for seed, c in zip(seeds, coeffs):
+                    for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
+                        flat[start:start + noise.numel()].add_(noise, alpha=float(c))
+                sq += float((flat.double() ** 2).sum().item()); n += flat.numel()
+        get_torch_device().synchronize()
+        return {"rms_w": (sq / max(n, 1)) ** 0.5}
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")

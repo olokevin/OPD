@@ -217,6 +217,15 @@ algorithm:
   # Weight for GRPO outcome advantage in hybrid estimator
   grpo_outcome_weight: 1.0
 
+  # Forward-only ES actor update (replaces the BP actor update when True)
+  es_update: False
+  es_sigma: 1.0e-3
+  es_alpha: 5.0e-4
+  es_n_rails: 32
+  es_normalize: zscore
+  es_antithetic: True
+  es_seed: 1234
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 

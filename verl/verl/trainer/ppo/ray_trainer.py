@@ -676,6 +676,28 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        # Mirror the headline validation numbers into the `eval/` section so BP runs
+        # overlay with the ZO/ES trainers in wandb, which log `eval/accuracy` from
+        # their own loops (np/ray_trainer.py, es/ray_trainer.py). Those report a
+        # PERCENTAGE while `val-core` is a 0-1 fraction, so scale by 100 -- without
+        # that the curves land in one section but 100x apart.
+        # Purely additive: every val-core / val-aux key is left untouched.
+        _per_ds = {}
+        for _k, _v in list(metric_dict.items()):
+            if not _k.startswith("val-core/"):
+                continue
+            try:  # val-core/{data_source}/{var}/{metric}; data_source may contain "/"
+                _ds, _var, _metric = _k[len("val-core/"):].rsplit("/", 2)
+            except ValueError:
+                continue
+            if _var in ("acc", "reward") and _metric.startswith("mean"):
+                _per_ds[_ds] = float(_v) * 100.0
+        for _ds, _v in _per_ds.items():
+            metric_dict[f"eval/{_ds}"] = _v
+        if _per_ds:
+            # Single comparable scalar, matching the ZO/ES trainers' `eval/accuracy`.
+            metric_dict["eval/accuracy"] = float(np.mean(list(_per_ds.values())))
+
         return metric_dict
 
     def init_workers(self):
@@ -2253,12 +2275,19 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
-                            batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                        if self.config.algorithm.get("es_update", False):
+                            # forward-only ES update on the same rollout / advantages
+                            from verl.trainer.ppo.es_update import es_update_actor
+
+                            with marked_timer("update_actor", timing_raw, color="red"):
+                                metrics.update(es_update_actor(self, batch))
+                        else:
+                            # update actor
+                            with marked_timer("update_actor", timing_raw, color="red"):
+                                batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                                actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                            metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

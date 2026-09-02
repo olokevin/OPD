@@ -203,3 +203,50 @@ One OPD step (64 × 1024, N=8): **83.80 → 42.67 s**, decode 68.44 → 25.40 s.
 **Cumulative over §7–§9: 147.54 → 42.67 s (3.46×), decode 129.59 → 25.40 s (5.10×), and the ratio vs
 BP-OPD goes 2.39× → 0.69× **against BP's cold step-1**. That is NOT a trainer-vs-trainer result: BP's steady-state step is 25.11 s (its 61.86 s step-1 carries ~25 s of one-time teacher warm-up), so the honest ratio is **ES 37.17 / BP 25.11 = 1.48×** — es_token is still slower. See [results/zo_opd.md §10](../results/zo_opd.md).** Assembly (13.2 s, 31%) is the next
 lever, not decode.
+
+## 10. Rail-aware kernels + the free-rail frontier (2026-08-31)
+
+The decode still paid two O(rails) costs the efficiency plan
+([results/ZO_OPD/opd_profile_plan.md](../results/ZO_OPD/opd_profile_plan.md) §9/§18) says a rail
+design must not pay: every rail row was its own FlashAttention request (the slot's KV pages re-read
+once per rail: 5–25× the attention time at R=32), and `compute_logits` materialised `[rows, V]` logits
+twice. Both are replaced behind flags, measured on 2× H100 NVL, and gated; full record in
+[results/ZO_OPD/es_profile_results.md](../results/ZO_OPD/es_profile_results.md).
+
+| Knob (`es_cfg`) | Values | What it selects |
+|---|---|---|
+| `attn_impl` | `rows` (default) · `shared` · `fold` · `fold2` | rows = shipping; **shared** = Triton split-KV kernel that loads each KV tile once for all `(1+N)·g` rail queries (`trainer/es_token/rail_attn_kernel.py`); **fold** = rails folded into the head axis so stock FA3's GQA packing does the same (fold2 = FA2) |
+| `lm_head_impl` | `full` (default) · `stream` | **stream** = Triton streaming head: clean-row logits + all-row LSE in one pass, never `[rows, V]` (`trainer/es_token/lm_head_kernel.py`); falls back to `full` under TP |
+
+Wiring: `ESRailAttention` wraps every vLLM `Attention` (transparent when `rows`/off), writes the clean
+rows' K/V with vLLM's own cache op and runs the rail kernel on `[bucket, 1+N, H, D]` views of the packed
+rows — no change to the packed row layout, noise, signs or assembly. Graphs are cached per
+`(bucket, n_sample, attn_impl)`; `es_reset_graphs` drops them.
+
+**Measured (Phase 2/4 microbenchmarks, plan §23/§25).** Attention `T(B,R)/T(B,1)` at L=2048, B=64:
+rows 4.8× / 19.0× at R=8 / 32 → **fold 1.06× / 1.34×, shared 0.98× / 1.21×**; the same holds from
+L=512 to 32K. Streaming LM head: 1.4–1.5× faster than the shipping path at ≥256 rows, equal below,
+|Δlogp| 1e-5 vs fp32 (shipping: 4e-3). Linear rails (Phase 1): the flattened cuBLAS GEMM is flat to
+~128–192 rows (ridge 161 FLOP/B measured); the fused-epilogue Triton GEMM is a measured negative.
+
+**Gates (`scripts/zo_opd/es_token_checks/check_rail_kernels.py`).** graphed ≡ eager bit-for-bit on the
+new paths; per-layer kernel vs FA3 ≤ 1 bf16 ulp on real decode data (`ES_ATTN_CHECK=1`); σ=0 greedy
+identical to stock except at exact bf16 ties (the fp32 head resolves them); per-rail logp deviations
+are bf16 chaos — the tiling yardstick (same kernel, BLOCK_N 32 vs 64) moves them as much as FA does.
+
+**Bug fixed on the way.** Since the 2026-08-23 budget-sized KV, each wave's page ids depend on its
+longest prompt, but the captured graph's block table was never refreshed → later waves read the
+previous wave's pages. `_es_refresh_kv_pages` now copies the wave's ids into the pinned table before
+every decode (gate G4; `ES_NO_KV_REFRESH=1` = old behaviour).
+
+**Free-rail frontier `N_free(B, L)` (Phase 5, full decoder, contexts 40/512/2 K/8 K).** Rails-on
+costs a fixed +0.45–0.6 ms (+11–18 %) on every path — the 112 rail-op launches (0.47 ms flat in N by
+the Phase 3 profile) — so the plan's literal `N_free(5 %)` is 0. Relative to N=1 the new kernels make
+rails near-free up to the cuBLAS ridge `B(1+N) ≈ 130`: at B=8, N_free(10 %) = 4–8 (was 1), at B=4 8,
+at B=1 16. At the shipping point B=8, N=8 the clean-token overhead falls from +44 / +163 / +252 %
+(short / 2 K / 8 K context) to **+24 / +42 / +30 %**; at N=32 the new path is 1.35–5.6× faster.
+B=64 (`pack_width=64`) is past the ridge already at N=1, so for a 64-prompt batch the rails are
+cheaper per probe as **8 waves of B=8, N=8** than one wave of B=64. DP2 reproduces the single-GPU
+curve (median +0 %). Heat maps in `results/ZO_OPD/figs/`; per-kernel audit and next steps in the
+results page §8–§9 (fuse the rail op into its consumer kernels; graph-capture the LM head + payload;
+rows-tiled RMSNorm).

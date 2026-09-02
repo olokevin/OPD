@@ -1,0 +1,52 @@
+{
+  "gpu": {
+    "name": "NVIDIA H100 NVL",
+    "sms": 132,
+    "total_mem_gb": 93.1,
+    "cc": "9.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "host": "lambda-scalar",
+    "cuda_visible": "0,1",
+    "triton": "3.4.0",
+    "vllm": "0.11.0",
+    "nvidia_smi": [
+      "0, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 48662 MiB, 79 %",
+      "1, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 48164 MiB, 67 %",
+      "2, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 85126 MiB, 0 %",
+      "3, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 0 MiB, 0 %",
+      "4, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 51848 MiB, 73 %",
+      "5, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 45734 MiB, 71 %",
+      "6, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 70299 MiB, 85 %",
+      "7, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 62061 MiB, 70 %"
+    ]
+  },
+  "prompt_len": 512,
+  "t_short": 64,
+  "t_long": 512,
+  "repeats": 2,
+  "tp": 2,
+  "points": [
+    {
+      "B": 4,
+      "N": 0,
+      "path": "stock",
+      "ms_per_token_step": 5.52343696472235,
+      "clean_tok_per_s": 724.1867745658378
+    },
+    {
+      "B": 8,
+      "N": 0,
+      "path": "stock",
+      "ms_per_token_step": 4.409430793852413,
+      "clean_tok_per_s": 1814.2931307944611
+    },
+    {
+      "B": 16,
+      "N": 0,
+      "path": "stock",
+      "ms_per_token_step": 4.770266540747668,
+      "clean_tok_per_s": 3354.1102710567275
+    }
+  ]
+}
