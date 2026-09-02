@@ -2222,7 +2222,23 @@ best *plateau* and the best *transient* are at different α.
 | 1 | **2.2e-3** | 0.13 / 0.30 | **63.76 ± 1.31** | 68.4 @ 80 | 0.0230 |
 | 1 | 1.3e-1 | 7.8 / 17.9 | **DEAD** | 51.6 @ 0 | **0.0000** |
 
-**Two results.**
+**α sweep at the winning σ=1.5385e-2** (added after the σ ladder above, which had α *tied*
+to σ throughout and so never tested α independently):
+
+| α/σ | α | **plateau (≥40)** | best @ step | `reward_std` |
+|---|---|---|---|---|
+| 0.144 | 2.2206e-3 | 68.56 ± 1.02 | 71.0 @ 70 | 0.0552 |
+| 0.289 | 4.4412e-3 | 70.04 ± 0.48 | 71.2 @ 80 | 0.0454 |
+| **0.500** | **7.6925e-3** | **70.68 ± 0.60** | **72.2 @ 40** | 0.0482 |
+| 1.000 | 1.5385e-2 | 22.16 ± 10.76 | 68.2 @ 10 → **1.0 @ 80** | 0.0327 |
+
+**`lora`'s α optimum is one rung higher than `dense`'s and `fura`'s.** Both of those peak at
+α/σ = 0.289 and lose ground at 0.5 (`dense` 72.68 → 71.07, `fura` 73.17 → 66.63); `lora`
+r=44 is **flat over [0.289, 0.5]** (+0.64 ± 0.77, ns) and only then falls off a cliff — and
+the cliff is far steeper, a collapse to 1.0 where `dense` merely sags to 69.84. Take α/σ =
+0.5: same plateau within noise, but it peaks at step 40 instead of still climbing at 80.
+
+**Two results from the σ ladder.**
 
 1. **Rank 44 is unimodal in σ with the peak at 1.5385e-2**, and 70.04 beats §15.5's
    67.95 **at 1/5 the compute** (2.8 vs 14.7 GPU-h) — still rising at 80.

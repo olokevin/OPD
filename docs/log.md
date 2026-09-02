@@ -966,6 +966,13 @@ Session 2026-08-31/09-01 block (kernels, free-rail frontier incl. the B=1 sweep,
 - All ds15b wandb runs moved to project `es_opd_JustRL_1p5b` (future runs default there).
 - Launching: es-token-decode with the rail-aware kernels (GPU 7) and a reward-only ES-RL baseline (GPU 6).
 
+## [2026-09-02] ingest | es-token-decode and ES-RL follow-ups: standard-ruler ranking closes the thread
+
+- MATH-500 n=2@T=0.6/7168 at comparable steps: base 0.751 < es-rl 0.769 < es-token-decode 0.803 <
+  es-prefill 0.829 < BP 0.846. es-token-decode measured at 12.1 s/seq (kernels on) vs es-prefill 5.6
+  and BP 1.7. ES-RL's greedy climb (66.6->74.4) was greedy-repetition unsticking. Pages updated:
+  es_rails_formulation.md §7.2, zo_opd_short.md.
+
 ## [2026-09-02] ingest | ES §18: SGD-mask ES — gradient-found coordinate mask is learnable but ≈6 pp under dense; SGD-GRPO 72.4 in 5 steps
 
 Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO steps on the ES 64-problem batch (`scripts/es/run_sgd_mask.sh`), diffed the bf16 dumps into coordinate masks (`build_sgd_mask.py`: 0.0038% moved by >1e-5, 0.16% moved at all), added `PERTURB_MODE=sgdmask`, probed σ (both masks in band at 1e-3, dead at 3e-2), ran N=10/80 it on GPU 0: 66.36 ± 0.61 (thr 1e-5, 200,789 coefs) and 67.40 ± 0.47 ‡ (thr 0, 11.5 M). Filed as `results/ES/es_results.md` §18 + short page rows/takeaway 7, figure `figs/n10_sgdmask.png`, mask stats `results/ES/sgdmask/*.json`. `pick_sigma.py` gained an in-band guard (its fit extrapolated below a measured hit on the flat profile).
@@ -976,3 +983,18 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   vs best@80 0.769), overtaking es-token-decode and closing to 2 pp of es-prefill, teacher-free, at
   ~15 GPU-h; still rising at the end. Length channel still large (mean 3145 tok). Final ranking in
   es_rails_formulation.md §7.2.
+
+## [2026-09-02] ingest | zo_opd_short: rail algorithm boxes + efficiency profile (step time vs N)
+
+- Pseudocode for es-prefill / es-token-decode / es-decode / es-token-prefill added to zo_opd_short.md.
+- es-prefill efficiency measured from the ds15b run logs (no separate profile needed): step(N) ~
+  85 s + N x 7.4-8.8 s at 64 seqs x ~6k tok; N=8/32/128 = 143/322/1215 s vs BP 329 s (256 seqs,
+  1.29 s/seq). es-token-decode summary pulled from es_profile_results.md; both tables in
+  zo_opd_short.md, es_rails_formulation.md §7.2 switched to medians.
+
+## [2026-09-02] ingest | es-prefill N-profile at BP's batch; equal-wall-clock run launched at N=2
+
+- Profiled step(N) at 256 seqs/step, non-antithetic: 260 + 32*N s (rail cost proportional to batch
+  tokens). Time parity with BP (329 s) => N=2. Launched ds15b_es-prefill_b256_N2_sig1e-3_a4.4e-4
+  (plain sampling, mean baseline; alpha keeps the 0.58%/step footprint). es_update gained
+  `algorithm.es_antithetic=False` (one eval per rail).

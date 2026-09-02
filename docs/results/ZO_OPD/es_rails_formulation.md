@@ -483,6 +483,75 @@ toward a higher, later peak (~step 400); its steps ≥ 61 use the RMS-normalised
 differs from the first 60 by ≤ 8 % in step size. Note `es/cum_footprint` restarts from 0 on
 resume — add the 1.9 % accumulated before. Eval decompositions: `scripts/zo_opd/ds15b/eval_decomp.py`.)*
 
+## 7.2 Follow-up runs (launched 2026-09-01, wandb `es_opd_JustRL_1p5b`)
+
+| run | GPU | config | calibration notes |
+|---|---|---|---|
+| **es-token-decode** | 7 | `es_token` trainer with the rail-aware kernels (`attn_impl=shared`, `lm_head_impl=stream`), 64 prompts × n=1, pack_width 8, N=32, σ=1e-3 (probe 1.9 %), lr **4e-3** | lr set by `train/update_footprint`: 3e-4 gave 2.1e-4/step (15× under the es-prefill band) → restarted at 4e-3 → footprint 2.5–2.8e-3/step ✓. **Warm step 773 s = decode 498 + teacher 13 + assemble 262** (`dW_cos_prev` 2e-4 ≈ 0, as the old diagnosis predicts) |
+| **es-rl** (reward-only baseline, no teacher) | 6 | `es` trainer, dense, N=10, greedy rollouts, batch 64 resampled, 7168 tok, α=2.89e-4 | on DAPO the binary reward is nearly floored for this student (train acc 6–8 %, matching BP's `true_reward` ≈ 3 %); σ=1e-3 gave `reward_std` 0.019–0.026 — under the ES-math working band (0.035–0.055) — → restarted at **σ=2e-3**. Base greedy MATH-500 @7168 = 66.6 % (the greedy ruler reads lower than n=2 @T=0.6's 75.1 %) |
+
+**Training-efficiency comparison at matched settings** (64-seq objective, N = 32 where applicable,
+7168-token responses, same GPU class):
+
+| method | s/step (median over the run) | seqs/step | **s per sequence-evaluation** | note |
+|---|---:|---:|---:|---|
+| BP | 329 | 256 | **1.29** | gen 126 / teacher 79 / log-prob 34 / update 124 |
+| es-prefill N=8 | 143 | 64 | 2.2 | rails 59 s |
+| es-prefill N=32 | 322 | 64 | **5.0** | rails 239 s (7.5 s/rail) |
+| es-prefill N=128 | 1215 | 64 | 19.0 | rails 1125 s |
+| es-token-decode N=32 (shared-KV + streaming-head kernels) | 746 | 64 | **11.7** | decode 496 / assembly 238 |
+
+Full N-scaling tables (64-seq and 256-seq batches) and the algorithm boxes:
+[zo_opd_short.md](zo_opd_short.md). At BP's own 256-seq batch the profiled law is
+`step(N) ≈ 260 + 32·N s`, so time-parity with BP allows only **N ≈ 2** — the equal-cost ES gets
+one or two probes per step (run `ds15b_es-prefill_b256_N2_*`, non-antithetic, launched
+2026-09-02).
+
+Even with the rail-aware kernels, the per-token decode machinery costs **2.2× es-prefill per
+sequence** for the same N and the same (actually weaker: detached-history) information — the §4
+cost ordering, now measured end-to-end on identical settings.
+
+**Standard-ruler check (n = 2 @ T = 0.6, 7168 tokens), es-token-decode step 60:** MATH-500
+**0.803** (base 0.751; es-prefill @60: A 0.815 / C 0.829; BP @60: 0.846), AIME24 0.167, mean length
+3333, 15 % capped. The per-token decode estimator lands at the bottom of the es-prefill plateau at
+the same step count — the same "shorten" effect, nothing more — while costing 2.2× per sequence.
+With that, **es-token-decode is dominated on both axes measured here: information (≤ es-prefill)
+and cost (2.2×)**, kernels included.
+
+**…and ES-RL best@80 on the same ruler:** MATH-500 **0.769** (+1.8 pp over base, ≈ 1σ), AIME24
+0.183, length 3454. The +7.8 pp greedy climb collapses on the sampled ruler — most of it was
+greedy-repetition unsticking, which sampling at T = 0.6 already provides. **Consolidated
+standard-ruler ranking at comparable step counts** (MATH-500, n = 2 @ T = 0.6, 7168 tokens):
+
+| | base | es-rl best@80 | es-token-decode @60 | es-rl **best@150** | es-prefill C @60 | BP @60 |
+|---|---:|---:|---:|---:|---:|---:|
+| MATH-500 | 0.751 | 0.769 | 0.803 | **0.808** | 0.829 | **0.846** |
+| AIME24 | 0.150 | 0.183 | 0.167 | 0.200 | — | 0.267 (@60) |
+
+Every forward-only arm sits strictly between base and BP, ordered by signal quality — with one
+correction to the first reading: **the reward-only ES kept converting in its second half.** Its
+greedy curve ran 66.6 → 74.4 @80 → 76.6 @150 (still rising at the end), and the sampled ruler
+followed: best@80 0.769 → best@150 **0.808** (+5.7 pp over base) at 150 iterations ≈ 15 GPU-h,
+teacher-free. Mean response length 3145 (the shortest of all arms) and 14 % capped, so the length
+channel is again a large part of it — but at 150 iterations the reward-only arm has caught the
+per-token decode probe and sits 2 pp under es-prefill. Consistent with the ES-math thread: on the
+*accuracy* landscape, reward-fitness ES works and was not yet done at 150 iterations; on the *KL*
+landscape nothing forward-only approaches BP.
+
+**Interim curves (greedy MATH-500 @7168, base = 66.6 on this ruler; 2026-09-02 03:30):**
+
+| run | evals | train side |
+|---|---|---|
+| es-token-decode (N=32, lr 4e-3, kernels on) | @0 70.6 → @20 71.0 → @40 **72.6** | L_clean 0.26 → 0.22; `dW_cos_prev` ≈ 0 throughout; 12.1 s/seq |
+| es-rl (dense N=10, σ 2e-3, no teacher) | @10 69.0 → @30 67.6 → @50 69.2 → @60 72.6 → @80 **74.4** | train accuracy 7 % → 26 %, reward_std 0.03–0.07; ~6 min/iter, eval time shrinking (115 → 99 s → shortening) |
+
+The **reward-fitness ES is climbing for real** — the same low-rank accuracy landscape the ES-math
+study exploits — while the KL-probing es-token-decode shows the familiar one-jump-then-creep. The
+greedy ruler is generous to any perturbation on this model (+4 pp after a single random-walk
+update), so the standing plan is the standard-ruler offline eval (n = 2 @ T = 0.6 + the
+length/truncation decomposition) on the final checkpoints; `es_coef_best.pt` (full bf16 weights,
+saved on each new best) guarantees the es-rl side is evaluable.
+
 ## 8. Next steps / where rails could still pay
 
 1. **Read `r_eff` first.** If `r_eff/N ≫ 1` at any affordable N, forward-only full-parameter OPD is

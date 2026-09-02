@@ -81,7 +81,7 @@ Ranked by plateau = mean over steps ≥ 40; per-eval SE 2.24 pp.
 | 2 | `dense` | 1e-3 / **2.89e-4** | 51.6 | **72.68 ± 0.43** | 73.2 @ 50 | **80** | **2.8** | 100% |
 | 3 | **`fura_zoact` r=1** | 5e-2 / 1.44e-2 | 53.2 | **71.36 ± 0.64** | 73.0 @ 70 | **80** | **2.8** | **0.011%** |
 | 4 | `iso` | 5e-2 / 2.5e-2 | 51.6 | 71.05 ± 0.38 | 73.2 @ 50 | 150 | 5.6 | 1.85% |
-| 5 | `lora r=44` | 1.54e-2 / 4.44e-3 | 51.6 | 70.04 ± 0.48 ‡ | 71.2 @ 80 | 80 | 2.8 | 1.28% |
+| 5 | `lora r=44` | 1.54e-2 / **7.69e-3** | 51.6 | 70.68 ± 0.60 | 72.2 @ 40 | 80 | 2.8 | 1.28% |
 | 6 | `zoact r=1` | 1e-3 / 2.89e-4 | 51.6 | 67.68 ± 0.72 ‡ | 70.0 @ 80 | 80 | 2.8 | 0.018% |
 | 7 | **`sgdmask thr=0`** | 1e-3 / 2.89e-4 | 51.6 | 67.40 ± 0.47 ‡ | 68.8 @ 80 | 80 | 3.1 | 0.15% |
 | 8 | **`sgdmask thr=1e-5`** | 1e-3 / 2.89e-4 | 51.6 | 66.36 ± 0.61 | 68.6 @ 60 | 80 | 3.1 | **0.0026%** |
@@ -124,6 +124,11 @@ Both are unimodal with a one-sided failure, and both are cheap at N=10 (2.8 GPU-
 | **2.89e-4** | **1.00×** | **72.68 ± 0.43** | | **1.5385e-2** | **70.04 ± 0.48** |
 | 5e-4 | 1.73× | 71.07 ± 0.42 | | 3e-2 | 68.28 ± 0.43 |
 | 1e-3 | 3.46× | 69.84 ± 0.84 | | 1.3e-1 | **dead** |
+
+`lora r=44` also got a proper **α** sweep at its winning σ (its σ ladder had α tied to σ):
+α/σ = 0.144 / 0.289 / **0.5** / 1.0 → 68.56 / 70.04 / **70.68** / **22.16 (collapse)**.
+Its optimum is **one rung higher** than `dense`'s and `fura`'s (both 0.289), flat over
+[0.289, 0.5], with a far steeper cliff beyond.
 
 **`dense` reproduces §16.4's α/√N rule exactly** — so the rule is not `fura`-specific, and
 [§16.3](es_results.md#163-reading)'s "N=10 costs `dense` −0.49 pp (ns)" was also the 1.73×

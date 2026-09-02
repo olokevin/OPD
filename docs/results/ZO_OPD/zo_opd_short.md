@@ -54,9 +54,95 @@ shortens (KL → ~0.19) and pays quality for it.
 6. Cost at parity settings: BP 433 s/step (256 seqs) vs es-prefill N=32 ~360 s/step (64 seqs);
    one prefill rail = 8.7 s per 420 k tokens (~145 TFLOP/s).
 
-**Now running (2026-09-01):** es-token-decode with the new rail-aware kernels
-([es_profile_results.md](es_profile_results.md)) on the same setting (GPU 7) for the
-efficiency/learning comparison, and a reward-only **ES-RL baseline** (dense, no teacher, GPU 6).
+**Follow-ups (2026-09-02, wandb `es_opd_JustRL_1p5b`):** es-token-decode with the rail-aware
+kernels and a reward-only ES-RL baseline, both on the same setting. Standard-ruler ranking — base
+0.751 · es-token-decode@60 0.803 · **es-rl@150 0.808 (teacher-free!)** · es-prefill@60 0.829 ·
+**BP@60 0.846**. es-token-decode is dominated on both axes (≤ es-prefill information at 2.2× the
+cost per sequence, 12.1 vs 5.6 s/seq, kernels on). The reward-only ES kept converting to the end
+(greedy 66.6 → 76.6; sampled 0.769 @80 → 0.808 @150, still rising) — the accuracy landscape is
+ES-friendly even where the KL landscape is not; its responses are also the shortest (3145), so the
+length channel carries much of it. Details: [es_rails_formulation.md](es_rails_formulation.md) §7.2.
+
+## The four rail algorithms (naming of es_rails_formulation.md §1.5)
+
+Common to all: rollout `y ~ π_W` on DAPO prompts; teacher log-probs `log q`; frozen per-token
+advantage `A_t = log q(y_t) − log π_W(y_t)` (k1); Gaussian noise `ε(s)` regenerated from integer
+seeds — only `(seed, fitness)` scalars ever cross workers.
+
+**es-prefill** (implemented: `algorithm.es_update` in the PPO trainer — the recommended rail):
+
+```
+1  y ~ π_W                                  # ONE clean rollout (stock vLLM)
+2  A_t = log q(y_t) − log π_W(y_t)          # one teacher forward, frozen
+3  for i = 1..N/2:                          # antithetic pairs
+4      for sign in {+, −}:
+5          W ± σ·ε(s_i) in place (fp32 master)
+6          F± = Σ_t m_t A_t Δlog π(y_t) / Σ m_t     # ONE teacher-forced prefill
+7          restore W
+8      d_i = (F₊ − F₋)/2                    # = σ⟨g, ε_i⟩ + O(σ³)
+9  W += (α / (N/2)) Σ_i (d_i / RMS(d)) · ε(s_i)     # z-scored ES step, motion α/√(N/2)
+```
+
+**es-token-decode** (implemented: `es_token` trainer + rail-aware kernels; ruled out):
+
+```
+per decode token t, rail n = 1..N (rails ride the CLEAN rollout's KV, never commit):
+    at every linear:  y ← y + σ((r_n⊙v_t)ᵀx)·(s_n⊙u_t)      # fresh rank-1 ΔW per token
+    l_{n,t} = (π_n(ŷ_t)/π_0(ŷ_t)) · (log π_n(ŷ_t) − log q(ŷ_t))   # sampled-token IW-KL
+update:  δW = 1/(Nσ) Σ_{t,n} (l_{n,t} − mean_m l_{m,t}) · (s_n⊙u_t)(r_n⊙v_t)ᵀ ;  W −= lr·δW
+```
+
+Detached-history estimate; fresh-per-token noise multiplies *targets* not probes, so the
+information is N scalars per step, same as es-prefill (zo_opd.md §12.5).
+
+**es-decode** (not implemented; offline control `es_seq_audit.py` only): line 5's held `ε(s_n)`
+per rail, but evaluated by decode rails on the clean KV instead of a prefill — the same estimator
+as es-prefill, measured with the detached-history error at ~3× the cost per token-evaluation.
+No reason to build it.
+
+**es-token-prefill** (not implemented; analysed in es_rails_formulation.md §4): fresh per-position
+`ΔW_t` *inside a prefill* via the rank-1 rail op as a per-position output adjustment
+(`y_t += σ(v_tᵀx_t)u_t`). Unlike decode rails the perturbation at `t` propagates to positions > t,
+so the per-rail scalar is unbiased for the **full** gradient — but it is still N scalars per step:
+no probe gain over es-prefill, only the machinery. Build only if the detached-history error of
+es-decode ever matters.
+
+## Efficiency: step time vs N, and where it goes
+
+Medians over the full ds15b runs (warm steps; 64 seqs/step at 64 × ~6 k tokens for ES, 256 for BP;
+one H100 NVL, student+teacher co-located). es-prefill scales as
+**`step(N) ≈ 85 s + N × 7.4–8.8 s`** — gen/teacher/log-prob are flat, one rail = one prefill of the
+batch (≈ 400 k tokens at ~145 TFLOP/s), the ES apply is O(0.1 s):
+
+| arm | gen | teacher | log-prob | rails / update | **step** | **s per sequence** |
+|---|---:|---:|---:|---:|---:|---:|
+| es-prefill N=8 | 53 | 22 | 9 | 59 (7.4 s/rail) + 0.1 | **143** | 2.2 |
+| es-prefill N=32 | 54 | 22 | 9 | 239 (7.5) + 0.2 | **322** | 5.0 |
+| es-prefill N=128 | 55 | 23 | 10 | 1125 (8.8) + 0.9 | **1215** | 19.0 |
+| BP (256 seqs) | 126 | 79 | 34 | 124 (fwd+bwd+Adam) | **329** | **1.29** |
+| es-token-decode N=32 (kernels on) | 496 (decode) | 12 | — | 238 (assembly) | **746** | 11.7 |
+
+**256-seq batch (BP's own batch), non-antithetic, profiled 2026-09-02** (`profile_es_prefill_N.sh`,
+2 warm steps per point): `step(N) ≈ 260 s + N × 32 s` — the rail cost is exactly proportional to
+batch tokens (32 s vs 7.5 s at 64 seqs), the fixed part is BP's own gen+teacher+log-prob:
+
+| N (256 seqs) | 2 | 4 | 8 | 16 | BP |
+|---|---:|---:|---:|---:|---:|
+| step (s) | **325** | 383 | 513 | 759 | **329** |
+
+So at BP's batch, the equal-wall-clock rail budget is **N ≈ 2** — the whole ES information budget
+at time parity with BP is one or two probes per step. (Training run at this point:
+`ds15b_es-prefill_b256_N2_sig1e-3_a4.4e-4`, plain sampling, mean baseline.)
+
+Reads: (1) at equal wall-clock per step (N=32 ≈ BP), BP processes 4× the sequences — es-prefill
+is ~4× BP per sequence-evaluation and rails are the whole marginal cost; (2) N=8 is near-free
+(rails ≈ gen); (3) es-token-decode is 2.3× es-prefill at the same N *with* the 2026-08-31
+rail-aware kernels — its decode still pays ~0.02 ms/rail-row-token and its per-token assembly
+238 s/step. Kernel-level profile ([es_profile_results.md](es_profile_results.md)): the shared-KV
+attention cuts rail KV traffic from 5–25× to 1.1–1.7× of clean decode and the streaming LM head
+never materialises `[rows, V]` (1.4–1.5×, fp32-accurate); free-rail frontier N_free(10 %) = 4–8 at
+B=8 up to the cuBLAS ridge `B(1+N) ≈ 130` — decode rails are cheap only below that ridge, i.e. at
+batch sizes where generation itself under-uses the GPU.
 
 ---
 
