@@ -808,6 +808,79 @@ Trainer: `verl/verl/trainer/np/` (custom n_sample-wide perturbed vLLM decode); d
 
 ---
 
+## Session 2026-08-31/09-01 — rail-aware kernels: shared-KV attention + streaming LM head, and the measured free-rail frontier
+
+Executes the systems test plan ([ZO_OPD/opd_profile_plan.md](ZO_OPD/opd_profile_plan.md)) Phases 0–6 on 2× H100 NVL; **full record with every table,
+heat map and gate: [ZO_OPD/es_profile_results.md](ZO_OPD/es_profile_results.md)** — this block is the collected summary. Code on branch
+`feat/es-token-trainer` (commits `baf335c`, `3e30358`): kernels `verl/trainer/es_token/{rail_attn_kernel, lm_head_kernel}.py`, harness `scripts/zo_opd/es_profile/`, gate `scripts/zo_opd/es_token_checks/check_rail_kernels.py`.
+
+### The two O(rails) costs the decode still paid, and their replacements
+
+The 2026-08-22 fused rail kernel removed the *launch-count* tax, but two per-rail *memory* costs
+remained, exactly the plan's §18/§9 gaps:
+
+1. **Attention** ran every rail row as its own FlashAttention request, so the slot's KV pages were
+   re-read once per rail. Measured (Phase 2, L=2048, B=64): `T(R)/T(1)` = 4.8× / 19.0× at R=8 / 32.
+   Two rail-aware replacements behind `es_cfg["attn_impl"]`, both reading each KV page once per slot:
+   `shared` (custom Triton split-KV kernel; rails × GQA-group as one query tile) and `fold` (rails
+   folded into the head axis in (kv-head, rail, group) order so stock FA3's GQA packing does the
+   reuse). Result: **0.98× / 1.21× (shared), 1.06× / 1.34× (fold)** — rails ~free in attention from
+   L=512 to 32K.
+2. **The LM head** materialised `[rows, 151936]` logits in bf16 *and* an fp32 copy every token.
+   `lm_head_impl="stream"` (Triton): clean-row logits + all-row LSE in one pass, never `[rows, V]`;
+   **1.4–1.5× faster at ≥256 rows** and 400× more accurate (|Δlogp| 1e-5 vs 4e-3 — the old path's
+   bf16 logit rounding).
+
+A third candidate was a **measured negative**: a Triton GEMM with the rank-1 rail fused into the
+epilogue is 1.4–5× *slower* than cuBLAS + the separate rail op (`rail_gemm_kernel.py`, kept for the
+record). The rail op's true cost is one latency-bound launch per layer (~3–5 µs), not bandwidth.
+
+### The free-rail frontier (Phase 5, full decoder)
+
+- **Rails-on is a fixed +0.45–0.6 ms** (+11–18 % at B ≤ 16) on every path — the 112 rail-op launches,
+  flat in N (Phase 3 profile: `_rail_fused` 0.47 ms at N=1 and at N=16). Under the plan's literal
+  definition this makes `N_free(5 %) = 0` everywhere; the marginal frontier is read **relative to N=1**.
+- Relative to N=1 the new kernels are near-free up to the **measured cuBLAS ridge `B(1+N) ≈ 130 rows`**
+  (Phase 0/1: ridge 161 FLOP/B, GEMM latency flat to ~128–192 rows): N_free(10 %) = **4–8 at B=8**
+  (shipping: 1), 8 at B=4, 16+ at B=1.
+- Shipping operating point **B=8, N=8**: clean-token overhead **+44 / +163 / +252 %** (ctx short / 2 K /
+  8 K) → **+24 / +42 / +30 %**. At N=32 the new path is 1.35–5.6× faster, growing with context.
+- **`pack_width=64` (the production single-wave setting) is past the ridge at N=1**: N=8 costs
+  +96–161 % even with the new kernels. A 64-prompt batch is cheaper per probe as **8 waves of B=8,
+  N=8** — the plan's §30 "moderate local batch + rail dimension" conclusion, confirmed.
+- **B=1 fine-N sweep to N=384 (idle GPUs, 2026-09-01)**: relative to N=1, `fold` carries **16 / 48 /
+  128 rails within 5 / 10 / 25 %** — nearly the ideal ~160-row ridge (shipping: 4 / 4 / 32) — and
+  delivers 54.3 k rail evals/s at R=385 (36 % of the rails-literally-free bound). The Triton `shared`
+  kernel under-fills the GPU at B=1 (one program per kv-head × split): use `fold` at B=1, `shared`
+  from B≥4. Fig `ZO_OPD/figs/es_profile_b1_railsweep.png`.
+- **DP2 ≡ solo** (24 points, median +0 %); **TP2 works** (capture inside vLLM's `graph_capture()` +
+  NCCL all-reduce) at a fixed ~1.3 ms/step collective cost that rails amortise — but DP2 × B_local=4
+  beats TP2 × B=8 by 1.2–1.4×: TP does not enlarge the per-GPU rail budget.
+
+### Correctness, and a bug found on the way
+
+All gates pass (`check_rail_kernels.py`): graphed ≡ eager **bit-for-bit** on the new paths; per-layer
+kernel vs FA3 ≤ 1 bf16 ulp on real decode data (`ES_ATTN_CHECK=1`); σ=0 greedy identical to stock
+except at **exact bf16 ties** (gap 0.000 nats — the fp32 streaming head resolves ties the bf16 logits
+cannot); per-rail logp deviations up to 1.7 nats are **bf16 chaos, not kernel error** — proven with a
+tiling yardstick (the shared kernel vs *itself* at BLOCK_N 32 vs 64 deviates by 2.19; FA2-vs-FA3 and
+bucket-4-vs-8 are bit-identical here and useless as yardsticks).
+
+**Stale-KV-page bug (pre-existing, fixed):** since the 2026-08-23 budget-sized reservation each wave's
+page ids depend on *that wave's* longest prompt, but the cached graph's block table was built once at
+capture — any later wave with a different longest prompt read the previous wave's pages.
+`_es_refresh_kv_pages` now copies the wave's ids into the pinned table before every decode
+(`ES_NO_KV_REFRESH=1` restores the old behaviour); gate G4 covers it. Training runs since 08-23 were
+one wave per step but reused the graph *across steps*, so step ≥ 2 decodes were affected.
+
+### What is next (in measured order)
+
+Fuse the rail op into its consumer kernels (`silu_and_mul`, `fused_add_rms_norm`, RoPE) to delete the
+fixed +0.47 ms; graph-capture the LM head + payload path (0.4–1.0 ms of eager per-token work); a
+rows-tiled RMSNorm (0.35 → 0.9 ms at 136 rows — now larger than attention on the new path); then
+re-run `bench_es_token_vs_bp.sh` with `attn_impl=fold, lm_head_impl=stream` at 8×B=8 waves. None of
+this changes the estimator: the systems claim now holds, the learning question ([ZO_OPD/es_rails_formulation.md](ZO_OPD/es_rails_formulation.md)) stays open.
+
 ## Session 2026-06-02 — gradient scaling, LR search, and a self-amplifying divergence
 
 ### 1. NP estimate vs the true BP gradient (offline, `grad_check.py`)

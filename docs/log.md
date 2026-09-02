@@ -424,3 +424,7 @@ Executed `results/ZO_OPD/opd_profile_plan.md` Phases 0–6 on 2× H100 NVL: buil
 ## [2026-09-01] result | B=1 rail sweep: fold carries 48 rails within 10% (128 within 25%) of N=1 latency
 
 Fine-N single-batch decode sweep to N=384 on idle GPUs (`es_profile_results.md` §5.1, fig `figs/es_profile_b1_railsweep.png`): the FA3 GQA-fold path nearly reaches the ideal ridge (~160 rows); the Triton shared kernel under-fills the GPU at B=1 (right tool only for B≥4); 54.3k rail evals/s at R=385.
+
+## [2026-09-01] ingest | rail-kernel profile collected into zo_opd.md as a session block
+
+Session 2026-08-31/09-01 block (kernels, free-rail frontier incl. the B=1 sweep, gates, stale-KV-page bug, DP2/TP2) appended before the 06-02 block; summary + pointer to es_profile_results.md (+ es_rails_formulation.md copied to the branch for link integrity).
