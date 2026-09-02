@@ -75,6 +75,12 @@ def run_mode(mode, cfg, dev, sigma=1e-3, alpha=5e-4, N=8):
     for n, p in model.named_parameters():
         d = rel(pert[n], p.data)
         ok &= check(f"{mode}: perturbation is visible ({n.split('.')[-2]})", d > 1e-4, f"rel dW={d:.2e}")
+        if mode == "sgdmask":
+            st = w._es[n]
+            off = torch.ones(p.numel(), dtype=torch.bool, device=p.device)
+            off[st["idx"]] = False
+            same = torch.equal(pert[n].view(-1)[off], w0[n].view(-1)[off])
+            ok &= check(f"{mode}: off-mask entries untouched ({n.split('.')[-2]})", same, "")
         ok &= check(f"{mode}: restore is exact ({n.split('.')[-2]})",
                     torch.equal(p.data, w0[n]) or mode == "fura", "")
     del base
@@ -131,6 +137,14 @@ def main():
         }
     cpath = "/tmp/es_fake_calib.pt"
     torch.save(calib, cpath)
+    # fake SGD mask: a random 1% of the entries of each weight, as flat int64 indices
+    g = torch.Generator().manual_seed(7)
+    mask = {"layers": {
+        "model.layers.0.self_attn.qkv_proj.weight": torch.randperm(192 * 144, generator=g)[: 192 * 144 // 100].sort().values,
+        "model.layers.0.mlp.down_proj.weight": torch.randperm(144 * 256, generator=g)[: 144 * 256 // 100].sort().values,
+    }}
+    mpath = "/tmp/es_fake_sgdmask.pt"
+    torch.save(mask, mpath)
 
     allok = True
     for mode, cfg in [
@@ -138,6 +152,7 @@ def main():
         ("zoact", {"calib_path": cpath, "rank": 1}),
         ("insparse", {"calib_path": cpath, "density": 0.1}),
         ("fura", {}),
+        ("sgdmask", {"mask_path": mpath}),
     ]:
         print(f"\n=== mode: {mode} ===")
         allok &= run_mode(mode, cfg, dev)

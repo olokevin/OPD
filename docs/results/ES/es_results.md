@@ -2251,3 +2251,239 @@ Against `zoact r=1`'s 70.50 the honest gap is now **≤6.7 pp and shrinking** �
 * Hybrid gate: `scripts/es/test_zoact_hybrid_es.py`.
 * Mode kernels: `_es_write` / `init_es_state` in
   `verl/verl/workers/rollout/vllm_rollout/es_worker_extension.py`.
+
+## 18. SGD-mask ES — perturb only where plain SGD moves the weights
+
+> *"Do We Need Adam?"* (arXiv:2602.07729) trains RLVR with **vanilla SGD** (lr 1e-1, no
+> momentum, bf16) and finds it matches AdamW while touching **< 0.02 % of the parameters**
+> (`|θ₁−θ₀| > 1e-5` on bf16 weights; §5, Table 4). That is a *data-driven, coordinate-sparse*
+> subspace, found by the gradient rather than by activation statistics — the natural
+> control for `insparse` (top activation channels) and `zoact`/`fura_zoact` (calibrated
+> directions). This section runs the paper's recipe for **10 steps** on the ES thread's own
+> task, takes the set of entries SGD moved as a mask, and runs `PERTURB_MODE=sgdmask` at
+> N=10 on GPU 0. Started 2026-09-01.
+
+### 18.1 Why the SGD update is sparse, and what the mask is
+
+With bf16 parameters the update `−η·g` is only *applied* when it exceeds half a ULP of the
+weight it lands on (≈6e-5 at |w|=0.02, the median). SGD with η=0.1 needs `|g| > ~6e-4` for
+that; AdamW's per-coordinate normalisation lifts every coordinate to ≈η regardless of |g|,
+which is why AdamW touches ~10 % and SGD ~0.01 % (the paper's §7). The mask is therefore
+**"large-gradient-relative-to-weight-ULP" entries**: big |g| or small |w|. It is a property
+of the (task, model, precision) triple, not of the optimiser's trajectory — which is what
+makes it usable as an ES subspace.
+
+### 18.2 Setup
+
+| stage | knob | value | note |
+|---|---|---|---|
+| SGD-GRPO | model / data | Qwen2.5-Math-7B, the **same 64 MATH lvl 3–5 problems** as every ES arm (`head(64)` of the ES parquet, Qwen-Math template) | `datasets/es_math/math_lv3to5_qwenmath_train_b64.parquet` |
+| | optimiser | `torch.optim.SGD`, lr **0.1**, momentum 0, weight decay 0, clip 1.0 | the paper's setting (App. A.1/B) |
+| | precision | **bf16 module params** (`fsdp_config.model_dtype=bfloat16`) | the sparsity *is* bf16 rounding, so SGD must write bf16 weights — unlike §13's fp32 master |
+| | rollout | GRPO, n=8, T=1.0, 1536 response tokens, batch = mini-batch = 64 → **1 optimiser step per batch**, 10 steps | ES train budget; KL off, IS-correction off |
+| | eval | greedy MATH-500 at 3000 tokens, verl's `ttrl_math` grader, steps 0/5/10 | comparable to the ES evals (base reads 52.4 here vs 51.6 with the OatZero grader) |
+| | hardware | 1 × H100 NVL (GPU 0), `save_contents=[hf_model]` | /data had 87 GB free; one bf16 dump is 15 GB |
+| mask | rule | `|W₁₀ − W₀| > 1e-5` entrywise on bf16 weights, 2-D linear weights only | paper threshold; embed/lm_head/norm/bias reported, not perturbed (structured-mode convention) |
+| | layout | q/k/v and gate/up concatenated along dim 0 into vLLM's `qkv_proj` / `gate_up_proj`; flat int64 indices | `scripts/es/build_sgd_mask.py` |
+| ES | mode | `sgdmask`: `W[idx] = W₀[idx] + C`, `C` fp32, everything else frozen bit-exactly | `es_worker_extension.py` |
+| | N / iters / batch | 10 / 80 / fixed 64 | the §17 protocol |
+| | σ | by `train/reward_std` probe, target 0.050 (§17.1), α = σ/2·√(10/30) | `probe_reward_std.sh` + `pick_sigma.py` |
+
+Scripts: `scripts/es/run_sgd_mask.sh` (SGD run), `build_sgd_mask.py` (mask + stats JSON),
+`chain_sgdmask.sh` (wait → masks → probe → pick → ES). Unit gate: `test_es_perturb_modes.py`
+now includes `sgdmask` (init exact, off-mask entries bit-identical after a perturbation,
+restore exact, update = α/N·Σzε) — all PASS.
+
+### 18.3 The SGD run and its mask
+
+**SGD-GRPO, 10 steps, 40 min wall-clock on one GPU** (≈190 s/step after the first; three
+greedy MATH-500 evals included).
+
+| step | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| train score (T=1, n=8) | – | 0.32 | 0.56 | 0.55 | 0.55 | 0.61 | 0.60 | 0.59 | 0.59 | 0.60 | 0.61 |
+| grad norm (clip 1.0) | – | 0.66 | 0.18 | 0.16 | 0.15 | 0.15 | 0.33 | 0.35 | 0.15 | 0.13 | 0.13 |
+| entropy | – | 0.45 | 0.22 | 0.21 | 0.20 | 0.17 | 0.18 | 0.20 | 0.19 | 0.20 | 0.18 |
+| **greedy MATH-500** | **52.4** | | | | | **72.4** | | | | | **72.2** |
+
+The first step does almost everything (grad norm 0.66 at lr 0.1, entropy halves, train score
++24 pp); by step 5 the model sits at **72.4 greedy** — the same band every ES arm plateaus in
+after 40–150 iterations (§16–17). That is the §13 zeroth-vs-first-order gap again, now on the
+exact ES protocol and metric: **5 SGD steps ≈ 17 min vs 2.8–15 GPU-h for ES.**
+
+**The mask** (`|W₁₀ − W₀| > 1e-5`, bf16):
+
+| | step 5 | step 10 |
+|---|---|---|
+| entries moved by >1e-5 (all params) | 173,547 = **0.0023 %** | 288,036 = **0.0038 %** |
+| entries with *any* bf16 change | 10.3 M = 0.135 % | 12.1 M = 0.159 % |
+| **ES mask** (2-D linear weights only) | 112,355 over 85 weights = 0.0015 % | **200,789 over 97 of 112 fused weights = 0.0026 %** |
+| overlap step 5 → 10 | 82 % of the step-5 entries persist (Jaccard 0.42) | |
+
+The paper reports 0.01–0.06 % after 270 steps (Table 4); ten steps give 0.004 %, and the
+threshold matters — 12 M entries changed by *less* than 1e-5, i.e. weights so small that one
+bf16 ULP is below the cut (the `thr=0` arm of §18.5).
+
+Where it lives (step 10):
+
+| module | density | touched rows | touched cols | reading |
+|---|---|---|---|---|
+| `v_proj` | **0.117 %** | 82 % of rows | 3.3 % of cols | the densest weight by 30× — value projections in almost every head |
+| `k_proj` | 0.039 % | 15 % | 11 % | |
+| `lm_head` | 0.013 % (71,746) | | | excluded from the ES mask by convention |
+| `o_proj` | 0.0046 % | 3.2 % | **0.29 %** | column-concentrated: a few *input channels* |
+| `down_proj` | 0.0019 % | 14.7 % | **0.12 %** (639 of 530k) | same — the input-channel picture `insparse` assumes |
+| `up_proj` / `gate_proj` | 0.0023 / 0.0009 % | 5.2 / 1.5 % | 3.5 / 3.8 % | |
+| `q_proj` | 0.0016 % | | | |
+| per layer | L0 0.013 %, L1 0.009 %, L27 0.011 %, middle ≈0.001 % | | | first two and last layers ≈10× the rest |
+
+Two facts pin down *why* these entries and not others. The median changed weight has
+**|w| = 1.8e-3 against 1.6e-2 for the model** (9× smaller), and the median change is
+**exactly 2⁻¹⁶ = 1.53e-5 — one bf16 ULP at |w| ∈ [2e-3, 4e-3)**. So the mask is mostly "the
+smallest weights that still clear the paper's threshold, flipped by one ULP": the update
+sparsity is the bf16 mechanism the paper's §7 describes, filtered by a threshold that happens
+to sit one ULP above the model's small-weight tail. Its structure is nevertheless not random —
+`down_proj`/`o_proj` hits are packed into <0.3 % of their input columns (the activation-outlier
+channels), while `v_proj`/`k_proj` hits are spread over most rows.
+
+Stats: `docs/results/ES/sgdmask/sgd_mask_qwen2p5_math_7b_st{5,10}.json`; masks (gitignored)
+`datasets/es_math/sgd_mask_qwen2p5_math_7b_st{5,10}.pt`; step-10 bf16 weights kept at
+`/data/yequan/bp/BP-q2p5-7b/sgd-dense_math-lv3to5-b64_lr0.1_n8_bf16_st10/global_step_10/actor/huggingface` (15 GB).
+
+### 18.4 σ for a 200k-coordinate subspace: the probe hits the band at the paper's σ, then falls off a cliff
+
+`probe_reward_std.sh` (N=10, 3 iterations per point, log `logs/es/probe_sgdmask_gpu0.log`):
+
+| σ | `train/reward_std` (3 iters) | mean | eval @ 3 | reading |
+|---|---|---|---|---|
+| **1e-3** | 0.048 / 0.056 / 0.051 | **0.051** | 54.8 | in the 0.040–0.055 band |
+| 3e-3 | 0.089 / 0.054 / 0.057 | 0.067 | 56.0 | above |
+| 1e-2 | 0.035 / 0.099 / 0.072 | 0.069 | 54.8 | erratic |
+| 3e-2 … 1.0 | 0.0 / 0.0 / 0.0 | 0 | 51.6 | **dead** — every member 0/64 from iteration 1 |
+
+Three things are new relative to every other mode on this page.
+
+1. **Perturbing 0.0026 % of the weights at σ=1e-3 gives the same reward spread as perturbing
+   100 % of them at σ=1e-3** (`dense`: 0.053, §17.1). Weight-space footprint is
+   `σ·√200,789 ≈ 0.45` against `dense`'s `σ·√7.6e9 ≈ 87` — a **190× smaller footprint for the
+   same functional spread**. This is the strongest instance yet of §17.1's point that footprint
+   does not set σ; *which* coordinates are hit does. (Why these coordinates bite so hard: they
+   are small weights — median |w| 1.8e-3 — so σ=1e-3 is a ~50 % relative kick, and they sit in
+   `v_proj` and in the outlier input channels of `down_proj`/`o_proj`.)
+2. **The response is flat, then binary.** From 1e-3 to 1e-2 `reward_std` barely moves
+   (0.051 → 0.069, log-log slope ≈0.13, vs ≈1 for the power-law modes); at 3e-2 the model is
+   destroyed outright. That is the signature of a few *load-bearing* coordinates: past the
+   point where the ±σ kick exceeds the weights themselves, one sign of every member's noise
+   breaks the model and both signs stop producing `\boxed{}` at all.
+3. **`pick_sigma.py` would extrapolate to 5.9e-4** — the log-log fit, built for power-law
+   profiles, walks *below* the measured in-band point when the slope is ~0. The rule of §17.1
+   is the band itself, and σ=1e-3 measured 0.051, so the arm was launched by hand at
+   **σ=1e-3, α = σ/2·√(10/30) = 2.887e-4**, the motion-matched N=10 step. The picker needs a
+   "prefer a measured in-band point over extrapolation" guard before it is trusted on
+   flat profiles.
+
+### 18.5 Result — the SGD-moved coordinates are learnable, and ~6 pp short of `dense`
+
+N=10, 80 iterations, fixed 64 batch, greedy MATH-500; 133 s/iteration, **3.1 GPU-h per arm**.
+Log `logs/es/sgdmask_es_gpu0.log`; wandb `ES-q2p5-7b`.
+
+| step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | **plateau (≥40)** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `sgdmask thr=1e-5` (200,789 coefs, 0.0026 %) | 51.6 | 58.0 | 62.8 | 63.2 | 65.2 | 66.0 | **68.6** | 66.6 | 65.4 | **66.36 ± 0.61** |
+| `sgdmask thr=0` (11,474,522 coefs, 0.15 %) | 51.6 | 58.0 | 63.8 | 65.8 | 67.2 | 66.0 | 67.0 | 68.0 | **68.8** | **67.40 ± 0.47** ‡ |
+
+‡ still rising at 80. `train/reward_std` had fallen to 0.023–0.025 by iteration 80 on both
+(train reward 0.72 on the fixed batch).
+
+Against the N=10 leaderboard (§17, same protocol):
+
+| arm | trainable | plateau (≥40) | Δ vs base |
+|---|---|---|---|
+| `dense` | 100 % | 72.68 ± 0.43 | +21.1 |
+| `fura_zoact r=1` | 0.011 % | 71.36 ± 0.64 | +18.2 † |
+| `lora r=44` | 1.28 % | 70.68 ± 0.60 | +19.1 |
+| `zoact r=1` | 0.018 % | 67.68 ± 0.72 ‡ | +16.1 |
+| **`sgdmask thr=0`** | **0.15 %** | **67.40 ± 0.47 ‡** | **+15.8** |
+| **`sgdmask thr=1e-5`** | **0.0026 %** | **66.36 ± 0.61** | **+14.8** |
+| `lora r=1` | 0.029 % | 63.76 ± 1.31 ‡ | +12.2 |
+
+† from its own 53.2 base. Per-eval SE 2.24 pp.
+
+![N=10 curves: SGD-mask arms against the leaderboard](figs/n10_sgdmask.png)
+
+**Reading.**
+
+1. **It learns — +15 pp from 0.0026 % of the weights**, tracking `zoact r=1`/`lora r=1`
+   through step 40 (58.0 at 10, 65.2 at 40) — but it **plateaus ≈6 pp under `dense` and
+   ≈5 pp under `fura_zoact`**, which has 4× the coefficients and lands in the `dense` tie.
+   "Where SGD moves first" is a usable ES subspace, not a privileged one.
+2. **Widening the mask 57× (threshold 0) buys +1 pp and a slope, not a different answer.**
+   `thr=0` is 67.40 and still rising at 80, i.e. `zoact r=1`'s curve at 8× its coefficient
+   count. So the paper's 1e-5 cut is *not* what is holding the 200k arm back; both masks
+   are drawn from the same population — the small-|w| tail (§18.3: median |w| 1.8e-3 for
+   `thr=1e-5`, **3.8e-5** for `thr=0`, against 1.6e-2 model-wide).
+3. **The subspace has the capacity; the zeroth-order search is what is slow.** The SGD
+   model at step 10 *is* a point of the `thr=0` subspace by construction — every one of its
+   12.1 M changed entries is in the mask (11.47 M of them in the linear weights) — and it
+   scores **72.2 greedy**. ES confined to the same coordinates reaches 67.4 in 80 iterations
+   (3.1 GPU-h) and is still climbing; SGD got there in 5 steps (0.28 GPU-h). This is the
+   §13 zeroth-vs-first-order gap on the ES thread's own metric for the first time:
+   **≈10× fewer GPU-hours for +0.3 pp** (SGD 72.4 @ step 5 vs `dense` ES 72.68 @ 2.8 GPU-h).
+4. **σ is set by the coordinates, not the count.** Both masks, 57× apart in size, land
+   in the `reward_std` band at the *same* σ=1e-3 (§18.4, and the `thr=0` probe: 0.026 @ 1e-4,
+   0.028 @ 3e-4, **0.044 @ 1e-3**, 0.069 @ 3e-3, dead @ 3e-2) — because in both the entries
+   hit are small weights for which σ=1e-3 is a ≥50 % relative kick. Footprint ‖σε‖_F differs
+   by 7.6× between them and by 190× against `dense`; none of that shows in `reward_std`.
+
+### 18.6 What the paper's sparsity is, seen from here
+
+The "SGD updates < 0.02 % of the parameters" headline reproduces (0.0038 % after 10 steps,
+99.996 % sparse) and its mechanism is exactly the paper's §7 conjecture, now measured: the
+entries that register are the ones whose bf16 ULP is smaller than `η·g`. That makes the
+mask **a precision artefact with structure** — ~1-ULP flips of the weights in [2e-3, 4e-3)
+(`thr=1e-5`), or of the tiniest 0.15 % of the weights (`thr=0`, median |w| 3.8e-5, spread
+uniformly over all rows/columns/layers). Two consequences for this thread:
+
+* As an ES *subspace* it is worth about what its size predicts on this page's
+  coefficient-count axis (between `lora r=1` and `zoact r=1`), and less than the calibrated
+  low-rank frames at the same or smaller size. The activation-outlier column structure it
+  does have (`down_proj`/`o_proj` hits in < 0.3 % of input channels, §18.3) is what
+  `insparse` already targets on purpose, and `insparse d=1 %` sits in the `dense` tie.
+* As evidence for "RL lives in a low-dimensional subspace" it is weaker than it reads: the
+  bf16 model's *visible* change is 0.16 % of entries, but the fp32 update that produced it
+  was dense, and ES cannot recover SGD's result from the visible coordinates in 3 GPU-h.
+  The right control — not run — is SGD with an fp32 master on the same 10 steps, ranking
+  entries by |ΔW| at a *fixed* density, which separates "where the gradient is large" from
+  "where bf16 happens to round".
+
+### 18.7 Takeaways
+
+1. **A 10-step bf16 SGD-GRPO run gives a 0.0026 %-of-the-model coordinate mask; ES on it
+   gains +14.8 pp** (66.36 plateau) — learnable, ranked with the small-count arms, ≈6 pp under
+   `dense`. The threshold-0 mask (0.15 %) reaches 67.40 and is still rising.
+2. **SGD-GRPO on the ES protocol: 72.4 greedy MATH-500 in 5 steps / 17 min / 0.28 GPU-h**,
+   vs 2.8 GPU-h for the best ES arm — the cleanest BP-vs-ES number on this page.
+3. **The update sparsity is bf16 rounding of a dense update**, concentrated in the
+   small-weight tail (median |w| 9× to 400× below the model's). Perturbing exactly those
+   coordinates does not recover full-space ES.
+4. **Footprint is now 190× decoupled from `reward_std`** (§17.1 extended): 200k small
+   coordinates at σ=1e-3 spread rewards like 7.6 B coordinates at σ=1e-3.
+5. `pick_sigma.py` now prefers a measured in-band point to its log-log extrapolation — the
+   flat-then-cliff profile of a coordinate mask sent the fit *below* the measured hit.
+
+### 18.8 Reference
+
+* SGD run: `scripts/es/run_sgd_mask.sh` → wandb `BP-q2p5-7b`
+  `sgd-dense_math-lv3to5-b64_lr0.1_n8_bf16_st10`; log `logs/es/sgdmask_sgd_gpu0.log`;
+  step-10 bf16 HF weights at
+  `/data/yequan/bp/BP-q2p5-7b/sgd-dense_math-lv3to5-b64_lr0.1_n8_bf16_st10/global_step_10/actor/huggingface`
+  (15 GB — delete when the masks are no longer needed; the step-5 dump was removed).
+* Masks: `scripts/es/build_sgd_mask.py` → `datasets/es_math/sgd_mask_qwen2p5_math_7b_st{5,10,10_nz}.pt`
+  (gitignored) + stats JSON copied to `docs/results/ES/sgdmask/`.
+* ES mode: `sgdmask` in `es_worker_extension.py` (`init_es_state` / `_es_write`),
+  `es.mask_path`, `MASK_PATH` in `run_es_math.sh`; gate `scripts/es/test_es_perturb_modes.py`.
+* Chains: `scripts/es/chain_sgdmask.sh` (thr 1e-5; its automatic σ pick was overridden by hand,
+  §18.4), `scripts/es/chain_sgdmask_nz.sh` (thr 0, automatic pick with the new guard → 1e-3).
+  Probe logs `logs/es/probe_sgdmask{,_nz}_gpu0.log`; ES logs `logs/es/sgdmask_es_gpu0.log`,
+  `logs/es/sgdmask_nz_chain_gpu0.log`; figure `figs/n10_sgdmask.png` via
+  `collect_es_curves.py` + `plot_es_curves.py`.

@@ -1,8 +1,8 @@
 # ES on math reasoning — short version
 
 > Forward-only Evolution Strategies fine-tuning of **Qwen2.5-Math-7B** on **MATH lvl 3–5**,
-> scored greedy on **MATH-500**. Ten perturbation subspaces, all at ≤1.9% of the weights,
-> compared at population **N=30** and **N=10**.
+> scored greedy on **MATH-500**. Eleven perturbation subspaces, all at ≤1.9% of the weights,
+> compared at population **N=30** and **N=10**; plus a 10-step **SGD-GRPO** reference on the same protocol.
 > Full write-up with derivations, gates and failure logs: [es_results.md](es_results.md).
 > wandb `ES-q2p5-7b` · code `verl/verl/trainer/es/`, `scripts/es/`
 
@@ -37,6 +37,7 @@ Every additive mode writes `W = W_base + P(C)`; ES perturbs and updates the coef
 | `lora r=1` | Same, minimal rank — the designed control against `zoact r=1` (random+trained vs calibrated+frozen projection). | 2,222,080 | 0.029% |
 | `fura_zoact r=1` | **New.** Compose the two calibrated frames: `fura`'s frozen block-SVD output frame `A_j` *and* `zoact`'s calibrated input direction, `ΔW[:,blk_j] = A_j C_j V_j`. Both sides frozen; only `C_j` trains. | **831,488** | **0.011%** |
 | `lora_zoact r=1/44` | **New.** `lora` exactly — both factors ES-trained — but `A` is *initialised* to the top-r calibrated directions instead of a random Gaussian. Isolates *informed* from *frozen*. | 2,222,080 / 97,771,520 | 0.029% / 1.28% |
+| `sgdmask thr=1e-5 / 0` | **New.** A *coordinate* mask found by the gradient: run the *"Do We Need Adam?"* recipe (bf16 SGD-GRPO, lr 0.1, no momentum, arXiv:2602.07729) for **10 steps** on the same 64 problems and perturb only the entries it moved by >1e-5 (the paper's rule) or at all; every other entry is frozen bit-exactly. | 200,789 / 11,474,522 | 0.0026% / 0.15% |
 
 † Not coefficient counts: the ISO perturbation is a group action, so this is the
 **dimension of the manifold ES searches per step**.
@@ -82,7 +83,10 @@ Ranked by plateau = mean over steps ≥ 40; per-eval SE 2.24 pp.
 | 4 | `iso` | 5e-2 / 2.5e-2 | 51.6 | 71.05 ± 0.38 | 73.2 @ 50 | 150 | 5.6 | 1.85% |
 | 5 | `lora r=44` | 1.54e-2 / 4.44e-3 | 51.6 | 70.04 ± 0.48 ‡ | 71.2 @ 80 | 80 | 2.8 | 1.28% |
 | 6 | `zoact r=1` | 1e-3 / 2.89e-4 | 51.6 | 67.68 ± 0.72 ‡ | 70.0 @ 80 | 80 | 2.8 | 0.018% |
-| 7 | `lora r=1` | 2.2e-3 / 6.35e-3 | 51.6 | 63.76 ± 1.31 ‡ | 68.4 @ 80 | 80 | 2.8 | 0.029% |
+| 7 | **`sgdmask thr=0`** | 1e-3 / 2.89e-4 | 51.6 | 67.40 ± 0.47 ‡ | 68.8 @ 80 | 80 | 3.1 | 0.15% |
+| 8 | **`sgdmask thr=1e-5`** | 1e-3 / 2.89e-4 | 51.6 | 66.36 ± 0.61 | 68.6 @ 60 | 80 | 3.1 | **0.0026%** |
+| 9 | `lora r=1` | 2.2e-3 / 6.35e-3 | 51.6 | 63.76 ± 1.31 ‡ | 68.4 @ 80 | 80 | 2.8 | 0.029% |
+| – | *SGD-GRPO (BP), 5 steps* | lr 0.1 | 52.4 | **72.4** (72.2 @ 10) | | 5 | **0.28** | 100% |
 
 ‡ still rising at the last eval — these are lower bounds, not plateaus.
 `fura`/`fura_zoact` start from 53.2 (bf16 BTT reconstruction); read their deltas against that.
@@ -97,6 +101,18 @@ over. All arms cost 121 s/iteration, so iteration count *is* wall-clock here.
 **`fura_zoact` is the efficiency headline:** it matches the 150-iteration `zoact r=1` result
 from [§7](es_results.md#7-results) (70.50) and beats `lora r=44` — from **0.011% of the
 weights, 118× fewer coefficients than `lora r=44` and 40% fewer than `zoact r=1`**.
+
+**The SGD-mask arms** ([§18](es_results.md#18-sgd-mask-es--perturb-only-where-plain-sgd-moves-the-weights))
+ask whether the coordinates a *gradient* picks beat the ones activations pick. Ten bf16 SGD
+steps move 0.0038% of the weights (the paper's "<0.02%"); ES on those 200k coordinates gains
++14.8 pp — learnable, ranked with `zoact r=1`, **≈6 pp under `dense`** — and widening to every
+changed entry (0.15%) adds +1 pp and a slope. The mask is bf16 rounding with structure: median
+|w| of a moved entry is 1.8e-3 (`thr=1e-5`) or 3.8e-5 (`thr=0`) against 1.6e-2 model-wide, and
+both masks hit the `reward_std` band at the same σ=1e-3 as `dense` — **190× less footprint,
+same spread**. The SGD run itself is the BP reference this page lacked: **72.4 greedy in 5
+steps / 0.28 GPU-h**, 10× cheaper than the best ES arm for +0.3 pp.
+
+![N=10 curves: SGD-mask arms against the leaderboard](figs/n10_sgdmask.png)
 
 ### The step-size searches behind it
 
@@ -158,6 +174,11 @@ top-r captures most of it, so the same σ is far too large. Re-tuning by `reward
 6. **The 64-problem fixed batch is the ceiling**, not the method: after step ~40 every arm
    is flat within ±1.5 pp. With the official **resampled** batch, dense ES plateaus in ~10
    iterations and the σ optimum is **2e-3–4e-3** (best 74.4 @ 15), not the paper's 1e-3.
+7. **A gradient-found coordinate mask is not a privileged subspace.** ES on the 0.0026% of
+   entries a 10-step bf16 SGD run moved reaches 66.4 (+14.8), ≈6 pp under `dense`, even though
+   the SGD model itself (72.2) lives in that subspace — the sparsity is bf16 rounding of a dense
+   update, and the zeroth-order search, not the subspace, is the bottleneck
+   ([§18](es_results.md#18-sgd-mask-es--perturb-only-where-plain-sgd-moves-the-weights)).
 
 ## Open items
 
@@ -171,6 +192,9 @@ top-r captures most of it, so the same σ is far too large. Re-tuning by `reward
 * `zoact r=1`'s `reward_std` at N=10 is 0.032, *below* the healthy band, so it is itself
   under-tuned; σ between 1e-3 and the 1.2e-2 that overshot (std 0.112) is unexplored.
 * `lora_zoact` at both ranks needs its own σ/α (see the failure table); re-tuning in flight.
+* `sgdmask thr=0` is still rising at 80 — extend to 150. The missing control is an **fp32-master
+  SGD** mask ranked by |ΔW| at fixed density, which separates "large gradient" from "small
+  bf16 ULP" ([§18.6](es_results.md#186-what-the-papers-sparsity-is-seen-from-here)).
 * A second benchmark axis (AIME24, AMC23, Minerva, OlympiadBench) — six arms sit within
   ±1 pp on MATH-500.
 * The BP (GRPO) leg is half-finished and scored on a **different metric** (mean@4 at T=1.0,
@@ -192,3 +216,4 @@ top-r captures most of it, so the same σ is far too large. Re-tuning by `reward
 | LoRA-ES | §15 |
 | Population size N=10 vs N=30 | §16 |
 | **What sets σ; the two calibrated hybrids; α/σ searches** | **§17** |
+| **SGD-mask ES; the bf16 SGD-GRPO reference run; what the paper's sparsity is** | **§18** |

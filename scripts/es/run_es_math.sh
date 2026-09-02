@@ -16,6 +16,8 @@
 #   lora             LoRA adapter, both factors ES-trained (random A, zero B)
 #   fura_zoact       fura's output frame + zoact's calibrated input directions
 #   lora_zoact       lora, but A initialised to the calibrated directions
+#   sgdmask          only the weight entries a short bf16 SGD-GRPO run moved
+#                    (MASK_PATH from scripts/es/build_sgd_mask.py)
 #
 # Usage:  DEVICE=1 PERTURB_MODE=dense bash scripts/es/run_es_math.sh
 
@@ -78,6 +80,7 @@ ISO_BLOCK_SIZE=${ISO_BLOCK_SIZE:-128}   # skew-generator block size; cost is O(b
 ISO_PERM=${ISO_PERM:-true}              # re-draw the block basis every seed
 LORA_RANK=${LORA_RANK:-1}               # rank 44 == fura's trainable coefficient count
 LORA_SCALE=${LORA_SCALE:-1.0}
+MASK_PATH=${MASK_PATH:-${REPO}/datasets/es_math/sgd_mask_qwen2p5_math_7b_st10.pt}   # sgdmask
 
 # ---------------- hardware / model / data ----------------
 NUM_ENGINES=${NUM_ENGINES:-1}
@@ -108,6 +111,7 @@ case "$PERTURB_MODE" in
   lora)     TAG="lora-r${LORA_RANK}" ;;
   fura_zoact) TAG="furazoact-r${SUBSPACE_RANK}" ;;
   lora_zoact) TAG="lorazoact-r${LORA_RANK}" ;;
+  sgdmask)  TAG="sgdmask-$(basename "${MASK_PATH%.pt}" | sed 's/^sgd_mask_//')" ;;
   iso)      TAG="iso-fixedspec-b${ISO_BLOCK_SIZE}" ;;
   isobtt)   TAG="isobtt-fixedspec-smallcore" ;;
   *)        TAG="$PERTURB_MODE" ;;
@@ -130,6 +134,7 @@ esac
 python3 -m verl.trainer.main_es \
     es.perturb_mode="${PERTURB_MODE}" \
     es.calib_path="${CALIB_ARG}" \
+    es.mask_path="${MASK_PATH}" \
     es.subspace_rank=${SUBSPACE_RANK} \
     es.insparse_density=${INSPARSE_DENSITY} \
     es.iso_block_size=${ISO_BLOCK_SIZE} \
@@ -152,7 +157,7 @@ python3 -m verl.trainer.main_es \
     es.forget_tasks="${_FORGET_ARG}" \
     es.forget_limit=${FORGET_LIMIT} \
     es.eval_before_train=true \
-    es.save_best_coef=true \
+    es.save_best_coef=${SAVE_BEST_COEF:-true} \
     es.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} \
     es.global_seed=${GLOBAL_SEED} \
     es.verbose=false \

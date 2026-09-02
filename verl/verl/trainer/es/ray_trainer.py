@@ -390,6 +390,7 @@ class RayESTrainer:
             'iso_perm': self.es_config.get('iso_perm', True),
             'lora_rank': self.es_config.get('lora_rank', 1),
             'lora_scale': self.es_config.get('lora_scale', 1.0),
+            'mask_path': self.es_config.get('mask_path', None),
         }
         print(f"Installing ES perturbation mode '{mode}' with cfg={cfg} ...")
         infos = ray.get([

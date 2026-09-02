@@ -399,6 +399,9 @@ class WorkerExtension:
 #                                              restricted to block j's columns.  Both
 #                                              sides frozen; only C_j (b x r) is trained,
 #                                              so the cost is in_f * r per layer.
+#   sgdmask     P(C)[idx] = C                  coordinate-sparse: only the entries a short
+#                                              bf16 SGD-GRPO run moved (arXiv:2602.07729)
+#                                              are free; everything else is frozen exactly.
 #   lora_zoact  P(C) = s * B @ A                identical to `lora` -- both factors trained
 #                                              -- except A is *initialised* to the top-r
 #                                              calibrated directions instead of a random
@@ -584,6 +587,10 @@ class StructuredESMixin:
         if mode in ("zoact", "insparse", "fura_zoact", "lora_zoact"):
             blob = torch.load(cfg["calib_path"], map_location="cpu", weights_only=False)
             calib = blob["layers"]
+        masks = None
+        if mode == "sgdmask":
+            # scripts/es/build_sgd_mask.py: {vllm_param_name: int64 flat indices}
+            masks = torch.load(cfg["mask_path"], map_location="cpu", weights_only=False)["layers"]
 
         hf_cfg = None
         for holder in ("vllm_config", "model_config"):
@@ -633,6 +640,23 @@ class StructuredESMixin:
                 }
                 n_coef += out_f * k
                 n_base += out_f * k
+
+            elif mode == "sgdmask":
+                # Coordinate-sparse: perturb exactly the entries a short SGD run moved
+                # (arXiv:2602.07729 -- plain SGD in bf16 touches <0.02% of the weights).
+                idx = masks.get(name)
+                if idx is None or idx.numel() == 0:
+                    continue
+                idx = idx.to(p.device, torch.int64)
+                assert p.data.is_contiguous(), name
+                self._es[name] = {
+                    "kind": "sgdmask",
+                    "idx": idx,
+                    "base_vals": p.data.view(-1)[idx].detach().clone(),
+                    "coef": torch.zeros(idx.numel(), dtype=torch.float32, device=p.device),
+                }
+                n_coef += idx.numel()
+                n_base += idx.numel()
 
             elif mode == "iso":
                 st = self._iso_init(name, p, cfg, hf_cfg, lid)
@@ -983,6 +1007,10 @@ class StructuredESMixin:
         if kind == "insparse":
             c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)
             p.data[:, st["idx"]] = (c + st["base_cols"]).to(p.dtype)
+            return
+        if kind == "sgdmask":
+            c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)
+            p.data.view(-1)[st["idx"]] = (c + st["base_vals"]).to(p.dtype)
             return
         if kind == "lora":
             c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)

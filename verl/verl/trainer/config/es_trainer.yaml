@@ -72,8 +72,12 @@ es:
   #            top-`lora_rank` calibrated directions instead of a random Gaussian.  Same
   #            coefficient count and the same footprint per unit sigma as `lora`, so it is
   #            the matched control for "does the projection have to be informed?".
+  # sgdmask  : coordinate-sparse -- perturb exactly the weight entries that a short bf16
+  #            SGD-GRPO run moved ("Do We Need Adam?", arXiv:2602.07729: plain SGD touches
+  #            <0.02% of the parameters).  Mask from scripts/es/build_sgd_mask.py.
   perturb_mode: "off"
   calib_path: null          # .pt produced by scripts/es/calibrate_activations.py
+  mask_path: null           # .pt produced by scripts/es/build_sgd_mask.py (sgdmask)
   subspace_rank: 1          # r for zoact / fura_zoact
   insparse_density: 0.01    # fraction of input channels kept for insparse
   fura_swap_blocks: false   # swap (n_blocks, block_size) from the closest-factor default

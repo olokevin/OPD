@@ -965,3 +965,14 @@ Session 2026-08-31/09-01 block (kernels, free-rail frontier incl. the B=1 sweep,
 - One-page summary of the es-prefill vs BP comparison + 6 takeaways added to `results/ZO_OPD/zo_opd_short.md`.
 - All ds15b wandb runs moved to project `es_opd_JustRL_1p5b` (future runs default there).
 - Launching: es-token-decode with the rail-aware kernels (GPU 7) and a reward-only ES-RL baseline (GPU 6).
+
+## [2026-09-02] ingest | ES §18: SGD-mask ES — gradient-found coordinate mask is learnable but ≈6 pp under dense; SGD-GRPO 72.4 in 5 steps
+
+Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO steps on the ES 64-problem batch (`scripts/es/run_sgd_mask.sh`), diffed the bf16 dumps into coordinate masks (`build_sgd_mask.py`: 0.0038% moved by >1e-5, 0.16% moved at all), added `PERTURB_MODE=sgdmask`, probed σ (both masks in band at 1e-3, dead at 3e-2), ran N=10/80 it on GPU 0: 66.36 ± 0.61 (thr 1e-5, 200,789 coefs) and 67.40 ± 0.47 ‡ (thr 0, 11.5 M). Filed as `results/ES/es_results.md` §18 + short page rows/takeaway 7, figure `figs/n10_sgdmask.png`, mask stats `results/ES/sgdmask/*.json`. `pick_sigma.py` gained an in-band guard (its fit extrapolated below a measured hit on the flat profile).
+
+## [2026-09-02] ingest | ES-RL endpoint: teacher-free reward ES reaches 0.808 sampled at 150 iters
+
+- Correction to the earlier reading: es-rl kept converting (greedy 76.6 @150; sampled best@150 0.808
+  vs best@80 0.769), overtaking es-token-decode and closing to 2 pp of es-prefill, teacher-free, at
+  ~15 GPU-h; still rising at the end. Length channel still large (mean 3145 tok). Final ranking in
+  es_rails_formulation.md §7.2.

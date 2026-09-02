@@ -37,6 +37,17 @@ if len(pts) < 2:
 # never recommend at or above the smallest sigma that killed the model
 ceil_ = min(dead) / 2 if dead else float("inf")
 
+# A measured point already inside the working band (section 17.1: 0.040-0.055, i.e. within
+# [0.8, 1.1] x target) beats any extrapolation.  The log-log fit below assumes a power law;
+# on a flat profile (sgdmask: 0.051 -> 0.069 over a decade of sigma, then dead) it walks
+# *below* the in-band point, which is exactly the wrong direction for a step-size search.
+inband = [(s, v) for s, v in pts if 0.8 * a.target <= v <= 1.1 * a.target and s < ceil_]
+if inband:
+    s_star = min(inband, key=lambda p: abs(math.log(p[1] / a.target)))[0]
+    print(f"# measured in-band point sigma={s_star:g}; using it instead of the fit", file=sys.stderr)
+    print(f"{s_star:.6g} {min(s_star * 2, ceil_):.6g}")
+    sys.exit(0)
+
 # least-squares line through (log sigma, log std); reward_std saturates at large sigma, so
 # fit only the points below 1.5x target where the power law still holds, if there are two.
 usable = [p for p in pts if p[1] <= 1.5 * a.target] or pts
