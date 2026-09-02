@@ -64,9 +64,17 @@ es:
   #            W_j = A_j R_j with A_j = U_j diag(S_j) frozen and R_j in O(b) trained,
   #            so each block's spectrum is fixed and the trainable state is ~1.3% of
   #            the model instead of a full fp32 master.
+  # fura_zoact : fura's frozen block-SVD output frame with the input side pinned to the
+  #            calibrated activation directions -- dW[:, blk_j] = A_j C_j V_j.  Both sides
+  #            frozen, only C_j (b x r) trained, so `in_features * subspace_rank` coeffs
+  #            per layer (831,488 at r=1 on Qwen2.5-Math-7B).
+  # lora_zoact : `lora` exactly -- both factors ES-trained -- but A is *initialised* to the
+  #            top-`lora_rank` calibrated directions instead of a random Gaussian.  Same
+  #            coefficient count and the same footprint per unit sigma as `lora`, so it is
+  #            the matched control for "does the projection have to be informed?".
   perturb_mode: "off"
   calib_path: null          # .pt produced by scripts/es/calibrate_activations.py
-  subspace_rank: 1          # r for zoact
+  subspace_rank: 1          # r for zoact / fura_zoact
   insparse_density: 0.01    # fraction of input channels kept for insparse
   fura_swap_blocks: false   # swap (n_blocks, block_size) from the closest-factor default
   iso_block_size: 128       # block size of the skew generator (cost is O(b * |W|))

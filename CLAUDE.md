@@ -246,6 +246,10 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+### 5. Be concise, easy-language when writing the doc
+
+When composing the doc, always only expose the key analysis and implementation/fix guidelines, with results (prefer a table) and key reads, next steps. Details go to a separate reference section at the end of the doc, and in the body text only point to them for future reference. Use easy and clean languages.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes

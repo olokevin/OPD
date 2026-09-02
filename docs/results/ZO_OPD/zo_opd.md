@@ -6,8 +6,8 @@ Per decode token a **fresh rank-1 weight perturbation** `ΔW_l = σ_l (s_n⊙u_t
 packed forward. Loss = importance-weighted sampled-token KL to the teacher; gradient assembled by chunked
 GEMMs from seed-regenerated noise. Trainer `verl/verl/trainer/es_token/`, driver
 `scripts/zo_opd/opd_es_token.sh`, branch `feat/es-token-trainer`.
-Design: [../plans/es_token_trainer.md](../plans/es_token_trainer.md) · subsystem page:
-[../wiki/es_token_trainer.md](../wiki/es_token_trainer.md).
+Design: [../plans/es_token_trainer.md](../../plans/es_token_trainer.md) · subsystem page:
+[../wiki/es_token_trainer.md](../../wiki/es_token_trainer.md).
 
 ## Session summary
 
@@ -962,7 +962,7 @@ Checkpoints: BP `global_step_279` (merged to HF via `verl/scripts/legacy_model_m
 > were falsified. The estimator is correctly implemented, correctly checkpointed, unbiased,
 > and run inside its linear regime — but its per-step *update footprint* is 1.4e-4 of the
 > weight scale, where **every ES arm in this repo that learns runs at 1.6e-2 – 5e-2**
-> ([ES §10.4](ES/es_results.md), [§11.3](ES/es_results.md)). Section 1's "cos ≈ 0.20 at
+> ([ES §10.4](../ES/es_results.md), [§11.3](../ES/es_results.md)). Section 1's "cos ≈ 0.20 at
 > training scale" is also wrong, and the correction is the reason the update is ~99.9% noise.
 > New harness: `scripts/zo_opd/es_token_checks/es_grad_audit.py`.
 
@@ -1068,7 +1068,7 @@ probes. §1's extrapolation ("at 64×1024×8 the bound predicts cos ≈ 0.20") n
 The estimator is unbiased, so `E[ΔL] = −lr·‖G‖²` regardless of how noisy the direction is; the
 noise only enters at second order through curvature. That is why the sequence-level `es` trainer
 learns at *comparable* per-step cosine: `dense` (full 7.6 B parameters, N=30) gains +20 pp on
-MATH-500. What separates the arms there is **scale**, and [ES §11.3](ES/es_results.md) is explicit
+MATH-500. What separates the arms there is **scale**, and [ES §11.3](../ES/es_results.md) is explicit
 that moving FuRA from −12.25 pp to +0.82 pp was a scale change, not a direction change.
 
 There are **two different footprints** and es_token is mis-set on both, in opposite directions.
@@ -1085,7 +1085,7 @@ shape-independent: a rank-1 Rademacher perturbation has ‖ΔW‖_F = σ·√(d_
 ‖W‖_F = RMS(W)·√(d_out·d_in), so the ratio is just σ/RMS(W). The update number is the one that
 decides whether anything accumulates, and it is the one the LR sweep moves.
 
-(The `es` "footprints" quoted in [ES §6](ES/es_results.md) and [§15.5](ES/es_results.md) —
+(The `es` "footprints" quoted in [ES §6](../ES/es_results.md) and [§15.5](../ES/es_results.md) —
 1.6e-2, 3.25e-3, 3.84e-4 — are **probe** footprints, not update footprints; they are not
 comparable to es_token's per-step motion and are not used as the reference here.)
 
@@ -1290,13 +1290,13 @@ Three things fall out.
    completely separate implementation.
 2. **There is a cliff between 3e-3 and 6e-3.** At 6e-3 the population is destroyed (KL 17× the
    reference, spread 7.44, response length collapsing) — this is the σ that would have been
-   picked by extrapolating "bigger σ is a regulariser" from [ES §11.3](ES/es_results.md).
+   picked by extrapolating "bigger σ is a regulariser" from [ES §11.3](../ES/es_results.md).
 3. **The mean KL rise grows super-quadratically past 2e-3** (rise 0.028 → 0.103 → 0.358 for
    σ 1→2→3e-3, vs 4×/2.25× for a pure `½σ²·tr(F)` curvature term), i.e. σ=3e-3 sits at the
    edge of the linear regime, not inside it.
 
 **Chosen: σ = 3.0e-3, α = σ/2 = 1.5e-3.** It footprint-matches the `dense`/`iso` arms that gain
-+20 pp ([ES §6](ES/es_results.md): probe footprint 5.0e-2; ours 4.9e-2) and reproduces their
++20 pp ([ES §6](../ES/es_results.md): probe footprint 5.0e-2; ours 4.9e-2) and reproduces their
 per-iteration motion (`α/√N`/RMS(W) = 1.5e-3/√30/0.0615 = **4.5e-3** vs their **4.6e-3**), with a
 measured 2× margin to the cliff. **σ=2e-3 / α=1e-3 is the documented fallback** if the KL curve
 stalls or destabilises — it keeps the population at 1.36× the reference instead of 2.26×.
@@ -1382,14 +1382,14 @@ with the weights. First three iterations:
 σ=2e-3 is non-monotone with a ±0.08 swing on a 0.40 mean — that swing *is* the batch noise floor,
 and it is the same order as any plausible per-iteration learning signal. (Resampling is correct for
 the *update* — every rail shares the batch within an iteration, so the z-scores stay comparable and
-it prevents the fixed-batch overfitting [ES §11.1](ES/es_results.md) measured — it just makes the
+it prevents the fixed-batch overfitting [ES §11.1](../ES/es_results.md) measured — it just makes the
 metric useless as progress.) **The honest ruler is `eval/accuracy`**: MATH-500 greedy on a fixed
 500-prompt set every 10 iterations, deterministic given the weights, σ ≈ 2 pp. Both arms read 73.2
 there before training, matching the 73.60 ± 1.97 base reference measured through a separate harness.
 
 New metrics: `train/kl_mean`, `train/kl_min`, `train/kl_spread`, `train/resp_len`.
 `kl_spread` is the ES signal strength — at 0.0879 it is ~4× the `reward_std` ≈ 0.023 the math-
-accuracy fitness gives in [ES §15.5](ES/es_results.md), which is the point of a dense objective.
+accuracy fitness gives in [ES §15.5](../ES/es_results.md), which is the point of a dense objective.
 
 ### 13.5 The first ES-OPD run length-hacked its own fitness — and the fix
 
@@ -1437,6 +1437,49 @@ still the metric to watch** — a significant negative slope would mean the pena
 Raw records: `logs/esseq/meanagg_sig{3e-3,2e-3}.log`. Relaunched at the same two σ with
 `opd_kl_agg=sum` → `logs/esseq/sumagg_sig{3e-3,2e-3}.log`.
 
+### 13.6 `sum` has the mirror bug — and why *any* length-sensitive aggregation is gameable
+
+The `opd_kl_agg=sum` rerun was killed at iteration 14/10. It failed the opposite way:
+
+| aggregation | length slope | t | length | per-token KL |
+|---|---:|---:|---:|---:|
+| `mean` σ=3e-3 | **+20.8**/iter | +14.9 | 893 → 1438 (+61 %) | — |
+| `sum` σ=3e-3 | **−60.1**/iter | −12.8 | 893 → **197** (−78 %) | 0.490 → 0.447 |
+| `sum` σ=2e-3 | **−30.9**/iter | −5.8 | 1069 → 754 (−29 %) | 0.357 → **0.452** |
+
+**Root cause.** The per-token log-ratio is *positive* on average — it is the base per-token KL,
+≈0.29 — so the sequence total is ≈ `0.29 × length`. Minimising the sum therefore minimises length,
+and the single EOS log-ratio (a few nats) cannot offset saving hundreds of tokens at 0.29 each.
+§13.5's claim that scoring EOS makes `sum` self-correcting was **wrong on magnitudes**: EOS *is*
+scored (verified in vLLM), it is simply far too small to matter.
+
+The last column is the proof that the fitness gain was entirely length, not distillation: σ=3e-3's
+**total** KL fell 5× (438 → 88) while its **per-token** KL barely moved (0.490 → 0.447), and
+σ=2e-3's per-token KL actually got **worse** (0.357 → 0.452) while its total fell.
+
+**The general statement.** Under ES the fitness *compares rollouts the policy itself produced*, so
+length is a decision variable. `mean` divides by it (pad to win), `sum` multiplies by it (truncate
+to win); there is no scalar reweighting of a per-token quantity that is neutral, because the policy
+controls the number of terms. BP-OPD is immune only because it differentiates a *fixed* rollout.
+
+**Fix — take length out of the comparison (`es.opd_fixed_traj`, default true).** Generate ONE
+rollout per prompt from the **clean** policy, then teacher-force that same token sequence through
+every rail (`TeacherKLScorer.score_fixed`, via `prompt_logprobs`). Every rail scores identical
+tokens, so no length strategy can win; the perturbation still propagates through the whole sequence,
+so this is *not* the es_token detached-history failure (§12.4); and it mirrors BP-OPD, which also
+computes token rewards on a fixed sampled trajectory within a step. It is also **much cheaper** —
+1 generation + N prefills instead of N generations, and `log q` once per iteration instead of once
+per rail. The estimator was already validated offline in `es_seq_audit.py` (§12.5c).
+
+The cost is that the fitness is no longer strictly on-policy for the perturbed rail (`y ~ π₀`, not
+`y ~ π_n`), so it estimates the perturbed policy's log-likelihood gap on the clean policy's
+trajectory rather than a pure `KL(π_n ‖ q)`. That is the same approximation BP-OPD makes, and it
+buys exact length-neutrality.
+
+New metric: `train/kl_per_tok` — the length-normalised view, which under a fixed trajectory can no
+longer be gamed and so is a usable progress signal. `train/resp_len` now reports the **clean**
+policy's length, i.e. genuine policy drift rather than within-iteration selection.
+
 ---
 
 # ZO-NP (zeroth-order node-perturbation) OPD — results
@@ -1448,6 +1491,79 @@ Trainer: `verl/verl/trainer/np/` (custom n_sample-wide perturbed vLLM decode); d
 (`scripts/zo_opd/zo_np.sh`). Full working notes: `scripts/zo_opd/results/{ANALYSIS,SCALING_FIX_AND_LR}.md`.
 
 ---
+
+## Session 2026-08-31/09-01 — rail-aware kernels: shared-KV attention + streaming LM head, and the measured free-rail frontier
+
+Executes the systems test plan ([opd_profile_plan.md](opd_profile_plan.md)) Phases 0–6 on 2× H100 NVL; **full record with every table,
+heat map and gate: [es_profile_results.md](es_profile_results.md)** — this block is the collected summary. Code on branch
+`feat/es-token-trainer` (commits `baf335c`, `3e30358`): kernels `verl/trainer/es_token/{rail_attn_kernel, lm_head_kernel}.py`, harness `scripts/zo_opd/es_profile/`, gate `scripts/zo_opd/es_token_checks/check_rail_kernels.py`.
+
+### The two O(rails) costs the decode still paid, and their replacements
+
+The 2026-08-22 fused rail kernel removed the *launch-count* tax, but two per-rail *memory* costs
+remained, exactly the plan's §18/§9 gaps:
+
+1. **Attention** ran every rail row as its own FlashAttention request, so the slot's KV pages were
+   re-read once per rail. Measured (Phase 2, L=2048, B=64): `T(R)/T(1)` = 4.8× / 19.0× at R=8 / 32.
+   Two rail-aware replacements behind `es_cfg["attn_impl"]`, both reading each KV page once per slot:
+   `shared` (custom Triton split-KV kernel; rails × GQA-group as one query tile) and `fold` (rails
+   folded into the head axis in (kv-head, rail, group) order so stock FA3's GQA packing does the
+   reuse). Result: **0.98× / 1.21× (shared), 1.06× / 1.34× (fold)** — rails ~free in attention from
+   L=512 to 32K.
+2. **The LM head** materialised `[rows, 151936]` logits in bf16 *and* an fp32 copy every token.
+   `lm_head_impl="stream"` (Triton): clean-row logits + all-row LSE in one pass, never `[rows, V]`;
+   **1.4–1.5× faster at ≥256 rows** and 400× more accurate (|Δlogp| 1e-5 vs 4e-3 — the old path's
+   bf16 logit rounding).
+
+A third candidate was a **measured negative**: a Triton GEMM with the rank-1 rail fused into the
+epilogue is 1.4–5× *slower* than cuBLAS + the separate rail op (`rail_gemm_kernel.py`, kept for the
+record). The rail op's true cost is one latency-bound launch per layer (~3–5 µs), not bandwidth.
+
+### The free-rail frontier (Phase 5, full decoder)
+
+- **Rails-on is a fixed +0.45–0.6 ms** (+11–18 % at B ≤ 16) on every path — the 112 rail-op launches,
+  flat in N (Phase 3 profile: `_rail_fused` 0.47 ms at N=1 and at N=16). Under the plan's literal
+  definition this makes `N_free(5 %) = 0` everywhere; the marginal frontier is read **relative to N=1**.
+- Relative to N=1 the new kernels are near-free up to the **measured cuBLAS ridge `B(1+N) ≈ 130 rows`**
+  (Phase 0/1: ridge 161 FLOP/B, GEMM latency flat to ~128–192 rows): N_free(10 %) = **4–8 at B=8**
+  (shipping: 1), 8 at B=4, 16+ at B=1.
+- Shipping operating point **B=8, N=8**: clean-token overhead **+44 / +163 / +252 %** (ctx short / 2 K /
+  8 K) → **+24 / +42 / +30 %**. At N=32 the new path is 1.35–5.6× faster, growing with context.
+- **`pack_width=64` (the production single-wave setting) is past the ridge at N=1**: N=8 costs
+  +96–161 % even with the new kernels. A 64-prompt batch is cheaper per probe as **8 waves of B=8,
+  N=8** — the plan's §30 "moderate local batch + rail dimension" conclusion, confirmed.
+- **B=1 fine-N sweep to N=384 (idle GPUs, 2026-09-01)**: relative to N=1, `fold` carries **16 / 48 /
+  128 rails within 5 / 10 / 25 %** — nearly the ideal ~160-row ridge (shipping: 4 / 4 / 32) — and
+  delivers 54.3 k rail evals/s at R=385 (36 % of the rails-literally-free bound). The Triton `shared`
+  kernel under-fills the GPU at B=1 (one program per kv-head × split): use `fold` at B=1, `shared`
+  from B≥4. Fig `figs/es_profile_b1_railsweep.png`.
+- **DP2 ≡ solo** (24 points, median +0 %); **TP2 works** (capture inside vLLM's `graph_capture()` +
+  NCCL all-reduce) at a fixed ~1.3 ms/step collective cost that rails amortise — but DP2 × B_local=4
+  beats TP2 × B=8 by 1.2–1.4×: TP does not enlarge the per-GPU rail budget.
+
+### Correctness, and a bug found on the way
+
+All gates pass (`check_rail_kernels.py`): graphed ≡ eager **bit-for-bit** on the new paths; per-layer
+kernel vs FA3 ≤ 1 bf16 ulp on real decode data (`ES_ATTN_CHECK=1`); σ=0 greedy identical to stock
+except at **exact bf16 ties** (gap 0.000 nats — the fp32 streaming head resolves ties the bf16 logits
+cannot); per-rail logp deviations up to 1.7 nats are **bf16 chaos, not kernel error** — proven with a
+tiling yardstick (the shared kernel vs *itself* at BLOCK_N 32 vs 64 deviates by 2.19; FA2-vs-FA3 and
+bucket-4-vs-8 are bit-identical here and useless as yardsticks).
+
+**Stale-KV-page bug (pre-existing, fixed):** since the 2026-08-23 budget-sized reservation each wave's
+page ids depend on *that wave's* longest prompt, but the cached graph's block table was built once at
+capture — any later wave with a different longest prompt read the previous wave's pages.
+`_es_refresh_kv_pages` now copies the wave's ids into the pinned table before every decode
+(`ES_NO_KV_REFRESH=1` restores the old behaviour); gate G4 covers it. Training runs since 08-23 were
+one wave per step but reused the graph *across steps*, so step ≥ 2 decodes were affected.
+
+### What is next (in measured order)
+
+Fuse the rail op into its consumer kernels (`silu_and_mul`, `fused_add_rms_norm`, RoPE) to delete the
+fixed +0.47 ms; graph-capture the LM head + payload path (0.4–1.0 ms of eager per-token work); a
+rows-tiled RMSNorm (0.35 → 0.9 ms at 136 rows — now larger than attention on the new path); then
+re-run `bench_es_token_vs_bp.sh` with `attn_impl=fold, lm_head_impl=stream` at 8×B=8 waves. None of
+this changes the estimator: the systems claim now holds, the learning question ([es_rails_formulation.md](es_rails_formulation.md)) stays open.
 
 ## Session 2026-06-02 — gradient scaling, LR search, and a self-amplifying divergence
 

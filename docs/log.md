@@ -32,7 +32,7 @@ Entry format — one `##` header per event, so `grep '^## \[' log.md | tail -5` 
 
 ## [2026-06-02] ingest | compressed_opd + zo_opd results
 - `results/compressed_opd.md`: post-train compression table (SparseGPT/SVD_V2/Nystrom × C4/OpenThought3 calib vs C4-PPL + MATH-500); SparseGPT+math-calib = 45%, structured/one-shot SVD collapse to 0%.
-- `results/zo_opd.md`: ZO-NP OPD results — NP-vs-BP gradient scaling, LR search, self-amplifying divergence.
+- `results/ZO_OPD/zo_opd.md`: ZO-NP OPD results — NP-vs-BP gradient scaling, LR search, self-amplifying divergence.
 
 ## [2026-06-02] lint | knowledge-base scaffolding
 - Created `index.md` (content catalog) and `log.md` (this file); added the **Knowledge system** section to `CLAUDE.md` pointing future sessions at the wiki/results/aris layout and the ingest/query/lint workflow.
@@ -257,7 +257,7 @@ alpha only takes bigger steps on the same sharp objective. Qualifies the earlier
 -> `docs/results/ES/es_results.md` section 11.3
 
 ## [2026-08-21] profile | es_token trainer — gradient cosine, decode throughput vs N, one-step reproduction
-User: profile the `feat/es-token-trainer` branch in a separate worktree (`OPD-estoken`) and file results under the ZO-ES-token section of results/zo_opd.md, collecting prior profiling too. Built 4 new harnesses (`scripts/zo_opd/es_token_checks/{sweep_grad_cosine.sh,bench_decode_throughput.py,sweep_decode_throughput.sh,sweep_stock_batch.sh,sweep_decode_isolation.sh}`), all on H100 NVL. **(1) Gradient quality**: cos(es dW, autograd) sits at **0.86–0.99× the rank-1 weight-probe bound** sqrt(K/(K+d_out·d_in)) over K=400..4800 and two layer shapes (down_proj 2048×6144, o_proj 2048×2048); √K scaling verified; **rails and repeats are interchangeable at equal K** (N=8×300 = +0.0130 vs N=16×150 = +0.0136) → N is a cheap way to buy probes, not extra quality per probe; per-probe cosine scales as 1/√(d_out·d_in), which is exactly the cost of probing weight space instead of NP's output space. **(2) Decode throughput** (ms/token-step from the T=64→320 slope, EOS disabled): clean-only (N=0) through the packed graphed driver = 2.939 ms vs **stock vLLM cudagraph at the same concurrency = 2.831 ms — only 4% driver overhead** (11% at pw=8), which corrects the earlier "511 vs 1134 tok/s" framing (that was a concurrency gap, not a driver gap). Switching rails on costs **+3.41 ms (N=0→1)**, then only **+0.10 ms/rail** (N=1..32: 6.35→9.43 ms = 11× probes for 1.49× time). `pack_width` 4→8 = **1.80× clean tok/s for +11%**; pw=16 fails on the **full-context scratch-KV reservation** (b_pack 16 × 2560 blocks > 24717) — the highest-leverage fix. **(3) Cost attribution** (ES_BENCH_SKIP_NOISE): 36% bare graphed decode / 4% fused noise draw / **60% 112-layer rank-1 rail compute**. **(4) One OPD step reproduced**: 147.54 s (decode 129.59 + teacher 4.22 + assemble 13.65, peak 85,129 MiB) vs BP-OPD 61.86 s (gen 14.58 + reward 35.61 + logprob/adv/update 13.94, peak 71,710 MiB) = **2.39×**, matching June's 2.33×, step time within 1.2%; both sides emitted exactly 65,536 response tokens so phases are like-for-like; teacher phase **8.4× faster than BP's**, assembly at parity with BP's backward, **100% of the residual gap is decode concurrency**. Known-issue **teardown hang reproduced** (240 s, manual SIGTERM needed before the BP side could start). Still open: LR sweep / learning quality — this page remains a wall-clock + correctness result. → results/zo_opd.md §ZO-ES-token, raw: scripts/zo_opd/results/es_token_{grad_cosine_sweep,decode_throughput,stock_batch,decode_isolation}.txt
+User: profile the `feat/es-token-trainer` branch in a separate worktree (`OPD-estoken`) and file results under the ZO-ES-token section of results/ZO_OPD/zo_opd.md, collecting prior profiling too. Built 4 new harnesses (`scripts/zo_opd/es_token_checks/{sweep_grad_cosine.sh,bench_decode_throughput.py,sweep_decode_throughput.sh,sweep_stock_batch.sh,sweep_decode_isolation.sh}`), all on H100 NVL. **(1) Gradient quality**: cos(es dW, autograd) sits at **0.86–0.99× the rank-1 weight-probe bound** sqrt(K/(K+d_out·d_in)) over K=400..4800 and two layer shapes (down_proj 2048×6144, o_proj 2048×2048); √K scaling verified; **rails and repeats are interchangeable at equal K** (N=8×300 = +0.0130 vs N=16×150 = +0.0136) → N is a cheap way to buy probes, not extra quality per probe; per-probe cosine scales as 1/√(d_out·d_in), which is exactly the cost of probing weight space instead of NP's output space. **(2) Decode throughput** (ms/token-step from the T=64→320 slope, EOS disabled): clean-only (N=0) through the packed graphed driver = 2.939 ms vs **stock vLLM cudagraph at the same concurrency = 2.831 ms — only 4% driver overhead** (11% at pw=8), which corrects the earlier "511 vs 1134 tok/s" framing (that was a concurrency gap, not a driver gap). Switching rails on costs **+3.41 ms (N=0→1)**, then only **+0.10 ms/rail** (N=1..32: 6.35→9.43 ms = 11× probes for 1.49× time). `pack_width` 4→8 = **1.80× clean tok/s for +11%**; pw=16 fails on the **full-context scratch-KV reservation** (b_pack 16 × 2560 blocks > 24717) — the highest-leverage fix. **(3) Cost attribution** (ES_BENCH_SKIP_NOISE): 36% bare graphed decode / 4% fused noise draw / **60% 112-layer rank-1 rail compute**. **(4) One OPD step reproduced**: 147.54 s (decode 129.59 + teacher 4.22 + assemble 13.65, peak 85,129 MiB) vs BP-OPD 61.86 s (gen 14.58 + reward 35.61 + logprob/adv/update 13.94, peak 71,710 MiB) = **2.39×**, matching June's 2.33×, step time within 1.2%; both sides emitted exactly 65,536 response tokens so phases are like-for-like; teacher phase **8.4× faster than BP's**, assembly at parity with BP's backward, **100% of the residual gap is decode concurrency**. Known-issue **teardown hang reproduced** (240 s, manual SIGTERM needed before the BP side could start). Still open: LR sweep / learning quality — this page remains a wall-clock + correctness result. → results/ZO_OPD/zo_opd.md §ZO-ES-token, raw: scripts/zo_opd/results/es_token_{grad_cosine_sweep,decode_throughput,stock_batch,decode_isolation}.txt
 
 ## [2026-08-22] results | ES thread COMPLETE at 150/150 — fixed-spectrum matches unconstrained ES
 
@@ -304,10 +304,10 @@ suggested.
 -> `docs/results/ES/es_results.md` sections 11.5, 12
 
 ## [2026-08-22] optimize | es_token fused rail kernel — the fixed rail overhead was graph-node count, not RNG
-User asked why N=0→N=1 doubles ms/token-step while N=1→N=8 barely moves, and set the goal N=1 < 3.5 ms; hypothesised CPU-side RNG. **RNG ruled out**: `draw_noise` already builds `torch.Generator(device=cuda)` and draws on-GPU, and the isolation delta prices the fused per-(slot,token) draw at 0.199 ms which is paid at N=0 too — so it is not in the N=0→N=1 delta at all. **Real cause: CUDA-graph node count.** `bench_rail_op.py` (new) replays the rail op alone, graphed, at true Qwen3-1.7B shapes for all 112 linears and reproduces the delta exactly (3.376 ms vs the 3.41 ms measured live); torch-profiler shows **1568 kernels per decode token at ~2.3 µs each** = 14 kernels/layer (672 gathers 1.80 µs, 224 non-vectorised elementwise 2.69 µs, 336 vectorised 1.62 µs, 112 index_put 4.73 µs, 112 reduce 4.54 µs). Two corollaries: >half the launches gather operands that depend only on the token (R[rail], v[pidx], S[rail], u[pidx]), and the non-vectorised rows are the strided-view penalty from `noise_buf[:, off:off+d]` (row stride d_total=917504). **Seven variants built and measured** (rail-op ms @N=1): v0 3.376 → v1 flat sign*noise 2.373 → v2 vecdot/addcmul 1.992 → v3 contiguous rows 1.138 → v4 bmm 0.765 → v5 blocked-noise 1.527 → v6 Triton (needs v3 layout) 0.491 → **v7 Triton reading row indices 0.478, tuned (BLOCK 4096/4096, 16 warps) 0.313 = 10.8×**. v7 shipped as `verl/verl/trainer/es_token/rail_kernel.py` + `ESTokenLinear.forward` (PyTorch fallback kept): one launch per layer, forms sign*noise on the fly, needs **no packed-row-layout change** (NP attention/KV metadata untouched) and never materialises the [P,d_total] buffer (235 MB at N=32). Tuning insight: grid is only bucket*n_sample programs → latency-bound, so big blocks beat occupancy. **End-to-end**: decode N=1 6.347 → **3.424 ms (goal <3.5 MET**, overhead 3.408 → 0.481, 7.1× less), N=8 7.600 → 3.885, N=32 9.429 → 5.208; **one OPD step 147.54 → 89.59 s (1.65×)**, decode 129.59 → 72.00 s (waves 7.85 → 4.25 s), **ES/BP 2.39× → 1.45×**, peak mem unchanged. **Correctness**: 19/19 CPU tests, new `check_rail_op_parity.py` ≤3.0e-06 vs the shipping op for every variant (compared in each variant's own row layout), GPU gates all green (σ=0 ≡ stock greedy, graphed ≡ eager BIT-FOR-BIT payload diff 0, staggered-EOS bit-for-bit), and step `L_clean_mean` bit-identical (0.2556177764199674) so the clean trajectory is untouched; dW_norm_mean 239.726 → 239.514 (rail now accumulates fp32 not bf16). Remaining headroom: the noise draw (int64 randint 7.34 MB/slot + 5-kernel cast chain, 0.199 ms, ALSO paid per token in the 13.6 s assemble — decode and assembly must move together to stay bit-identical) and pack_width. → results/zo_opd.md §6, wiki/es_token_trainer.md §7, raw scripts/zo_opd/results/es_token_rail_op.txt
+User asked why N=0→N=1 doubles ms/token-step while N=1→N=8 barely moves, and set the goal N=1 < 3.5 ms; hypothesised CPU-side RNG. **RNG ruled out**: `draw_noise` already builds `torch.Generator(device=cuda)` and draws on-GPU, and the isolation delta prices the fused per-(slot,token) draw at 0.199 ms which is paid at N=0 too — so it is not in the N=0→N=1 delta at all. **Real cause: CUDA-graph node count.** `bench_rail_op.py` (new) replays the rail op alone, graphed, at true Qwen3-1.7B shapes for all 112 linears and reproduces the delta exactly (3.376 ms vs the 3.41 ms measured live); torch-profiler shows **1568 kernels per decode token at ~2.3 µs each** = 14 kernels/layer (672 gathers 1.80 µs, 224 non-vectorised elementwise 2.69 µs, 336 vectorised 1.62 µs, 112 index_put 4.73 µs, 112 reduce 4.54 µs). Two corollaries: >half the launches gather operands that depend only on the token (R[rail], v[pidx], S[rail], u[pidx]), and the non-vectorised rows are the strided-view penalty from `noise_buf[:, off:off+d]` (row stride d_total=917504). **Seven variants built and measured** (rail-op ms @N=1): v0 3.376 → v1 flat sign*noise 2.373 → v2 vecdot/addcmul 1.992 → v3 contiguous rows 1.138 → v4 bmm 0.765 → v5 blocked-noise 1.527 → v6 Triton (needs v3 layout) 0.491 → **v7 Triton reading row indices 0.478, tuned (BLOCK 4096/4096, 16 warps) 0.313 = 10.8×**. v7 shipped as `verl/verl/trainer/es_token/rail_kernel.py` + `ESTokenLinear.forward` (PyTorch fallback kept): one launch per layer, forms sign*noise on the fly, needs **no packed-row-layout change** (NP attention/KV metadata untouched) and never materialises the [P,d_total] buffer (235 MB at N=32). Tuning insight: grid is only bucket*n_sample programs → latency-bound, so big blocks beat occupancy. **End-to-end**: decode N=1 6.347 → **3.424 ms (goal <3.5 MET**, overhead 3.408 → 0.481, 7.1× less), N=8 7.600 → 3.885, N=32 9.429 → 5.208; **one OPD step 147.54 → 89.59 s (1.65×)**, decode 129.59 → 72.00 s (waves 7.85 → 4.25 s), **ES/BP 2.39× → 1.45×**, peak mem unchanged. **Correctness**: 19/19 CPU tests, new `check_rail_op_parity.py` ≤3.0e-06 vs the shipping op for every variant (compared in each variant's own row layout), GPU gates all green (σ=0 ≡ stock greedy, graphed ≡ eager BIT-FOR-BIT payload diff 0, staggered-EOS bit-for-bit), and step `L_clean_mean` bit-identical (0.2556177764199674) so the clean trajectory is untouched; dW_norm_mean 239.726 → 239.514 (rail now accumulates fp32 not bf16). Remaining headroom: the noise draw (int64 randint 7.34 MB/slot + 5-kernel cast chain, 0.199 ms, ALSO paid per token in the 13.6 s assemble — decode and assembly must move together to stay bit-identical) and pack_width. → results/ZO_OPD/zo_opd.md §6, wiki/es_token_trainer.md §7, raw scripts/zo_opd/results/es_token_rail_op.txt
 
 ## [2026-08-22b] optimize | es_token direct Rademacher noise — 13.5x cheaper fill, step 89.6 -> 83.8 s
-User: "we can directly have bf16 noise. also, try directly draw from rademacher distribution with +-1." Both done. **Problem**: `draw_noise(method="bernoulli")` produced ±1 the long way — `torch.randint(0,2,dtype=int64)` (a 7.34 MB buffer per slot at d_total=917,504) → `.to(float32)` → `*2-1` → `.to(bf16)` → `copy_`: ~42 MB of traffic and ~6 kernels **per slot per token** for 1.83 MB of output, plus a fresh `torch.Generator` per slot and a host blake2b inside the decode loop — and the same routine ran once per token record during assembly (65,536/step). **Fix** (`verl/verl/trainer/es_token/noise_kernel.py`): draw ±1 **directly in the destination dtype**, one Triton launch per batch of rows, from counter-based Philox (`tl.randint` → low bit → ±1) — no generator state, no host RNG, no intermediate. Plus `build_seed_table()` hoists every (token, slot) seed out of the decode loop (no blake2b, no H2D in the hot path), and assembly fills a whole chunk in ONE launch instead of m × ~6 kernels. Torch fallback kept (`Tensor.random_(0,2)` straight into the destination) for non-Triton envs and non-bernoulli methods; impl chosen once at import so **decode and assembly can never disagree within a run**. **Isolated**: decode fill 0.203 → **0.015 ms**/token×4slots (13.5×); assembly 1024-row chunk 38.9 → **2.9 ms** (13.4×). **End-to-end**: decode N=0 2.943 → 2.783, N=1 3.424 → **3.244**, N=8 3.885 → **3.722**, N=32 5.208 → 4.956, pw=8 4.547 → 4.237; **one OPD step 89.59 → 83.80 s**, decode 72.00 → 68.44 s, **assemble 13.56 → 11.03 s**, ES/BP 1.45× → **1.35×**. **Cumulative with the fused rail kernel: step 147.54 → 83.80 s (1.76×), decode 129.59 → 68.44 s (1.89×), ES/BP 2.39× → 1.35×.** **Correctness**: new `check_noise_parity.py` gates the regeneration invariant — decode path (per-wave seed table, device-resident) == assembly path (host-derived, freshly uploaded) BYTE-FOR-BYTE every token; chunk row j == its own (t,rollout) record; values exactly {-1,+1}; |mean|<0.02/row; distinct across t and rollout; regeneration bit-identical — ALL PASS. 19/19 CPU tests, GPU gates all still green (σ=0 == stock greedy, graphed == eager bit-for-bit payload diff 0, staggered-EOS). `L_clean_mean` bit-identical across all three versions (0.2556177764199674) so the clean trajectory never moved; `dW_norm_mean` 239.51 → 243.78 because Philox counter mode is a different stream from torch.randint (nothing depended on the old one; both consumers moved together). Decode is now 82% of the step and the noise fill 0.5%, so **pack_width is the only lever of consequence left** (scratch-KV reserves 2560 blocks/slot regardless of the real 1024-token budget, capping concurrency at 4-8 vs BP's 64). → results/zo_opd.md §7, wiki/es_token_trainer.md §8, raw scripts/zo_opd/results/es_token_noise.txt
+User: "we can directly have bf16 noise. also, try directly draw from rademacher distribution with +-1." Both done. **Problem**: `draw_noise(method="bernoulli")` produced ±1 the long way — `torch.randint(0,2,dtype=int64)` (a 7.34 MB buffer per slot at d_total=917,504) → `.to(float32)` → `*2-1` → `.to(bf16)` → `copy_`: ~42 MB of traffic and ~6 kernels **per slot per token** for 1.83 MB of output, plus a fresh `torch.Generator` per slot and a host blake2b inside the decode loop — and the same routine ran once per token record during assembly (65,536/step). **Fix** (`verl/verl/trainer/es_token/noise_kernel.py`): draw ±1 **directly in the destination dtype**, one Triton launch per batch of rows, from counter-based Philox (`tl.randint` → low bit → ±1) — no generator state, no host RNG, no intermediate. Plus `build_seed_table()` hoists every (token, slot) seed out of the decode loop (no blake2b, no H2D in the hot path), and assembly fills a whole chunk in ONE launch instead of m × ~6 kernels. Torch fallback kept (`Tensor.random_(0,2)` straight into the destination) for non-Triton envs and non-bernoulli methods; impl chosen once at import so **decode and assembly can never disagree within a run**. **Isolated**: decode fill 0.203 → **0.015 ms**/token×4slots (13.5×); assembly 1024-row chunk 38.9 → **2.9 ms** (13.4×). **End-to-end**: decode N=0 2.943 → 2.783, N=1 3.424 → **3.244**, N=8 3.885 → **3.722**, N=32 5.208 → 4.956, pw=8 4.547 → 4.237; **one OPD step 89.59 → 83.80 s**, decode 72.00 → 68.44 s, **assemble 13.56 → 11.03 s**, ES/BP 1.45× → **1.35×**. **Cumulative with the fused rail kernel: step 147.54 → 83.80 s (1.76×), decode 129.59 → 68.44 s (1.89×), ES/BP 2.39× → 1.35×.** **Correctness**: new `check_noise_parity.py` gates the regeneration invariant — decode path (per-wave seed table, device-resident) == assembly path (host-derived, freshly uploaded) BYTE-FOR-BYTE every token; chunk row j == its own (t,rollout) record; values exactly {-1,+1}; |mean|<0.02/row; distinct across t and rollout; regeneration bit-identical — ALL PASS. 19/19 CPU tests, GPU gates all still green (σ=0 == stock greedy, graphed == eager bit-for-bit payload diff 0, staggered-EOS). `L_clean_mean` bit-identical across all three versions (0.2556177764199674) so the clean trajectory never moved; `dW_norm_mean` 239.51 → 243.78 because Philox counter mode is a different stream from torch.randint (nothing depended on the old one; both consumers moved together). Decode is now 82% of the step and the noise fill 0.5%, so **pack_width is the only lever of consequence left** (scratch-KV reserves 2560 blocks/slot regardless of the real 1024-token budget, capping concurrency at 4-8 vs BP's 64). → results/ZO_OPD/zo_opd.md §7, wiki/es_token_trainer.md §8, raw scripts/zo_opd/results/es_token_noise.txt
 
 ## [2026-08-23] ingest | BP (true-gradient) counterpart of the ISO thread — 4 GRPO arms launched
 
@@ -349,19 +349,19 @@ Host note: `/` is 96% full (76 GB free); raylet warns object spilling may fail.
 -> `docs/results/ES/es_results.md` §11
 
 ## [2026-08-23] optimize+launch | es_token budget-sized scratch-KV: pack_width unlocked, ES now FASTER than BP; training launched
-User: "resolve it, we should not have excessive kv cache. do not care about NP implementation... re-profile after the fix, then launch opd and zo-es-token training... wandb project zo-opd-q34b-1p7b, gpu 1 sequentially." **Problem**: `_np_prefill_packed` carves a private KV region off the top of vLLM's block pool (the driver bypasses vLLM's scheduler and needs static KV for a captured graph) and sized each slot's slice at the FULL `max_model_len` — ceil(40960/16)=2560 blocks against a 24,717-block pool = **9 slots max**, ~20x what a 1024-token generation needs. **Fix**: reserve (longest prompt + max_tokens), capped at max_model_len; `max_new_tokens=None` preserves the old behaviour so NP is untouched; `ES_KV_FULL_RESERVE=1` A/B knob. Added a second assert because the attention block table is zero-filled and only `len(block_ids)` entries are written — an undersized slice would read block 0 and **silently corrupt a neighbour's KV rather than crash**. **The gate had to be rewritten, and that was the substantive finding**: the obvious check (packed clean tokens == stock greedy) FAILS at pack_width>=10, but it is bf16 rounding, not corruption — (i) neighbour-independence: hold slots 0-3 fixed and swap the CONTENT of every other slot → byte-identical output, so slices do not alias (PASS at 4/8/16/32/64); (ii) output changes with wave WIDTH alone (slots 0-3 identical at width 4 and 16, differ at 32); (iii) it appears at the shipping pack_width=4 too, where the reservation change is provably byte-neutral; (iv) divergent slots come in pairs (i, i+8) = same prompt text, and divergence compounds with length. The hand-driven packed forward batches differently from vLLM's scheduler → different bf16 rounding → greedy argmax flips on near-ties. Gate now checks [A] output-neutrality vs the old reservation ACROSS PROCESSES (flipping it in-process reuses the already-captured graph and is vacuous — that artifact initially looked like a pw=8 failure), [B] neighbour-independence, [C] full-length generation. All PASS; check_es_parity's 3 gates unchanged; cross-process [A] byte-identical (payload diff 0.0) at pw=4 and 8. **Throughput** (N=8): pack_width 4/8/16/32/64 → 3.734/4.259/5.435/8.431/15.036 ms per token-step = 1071/1878/2944/3795/**4257** clean tok/s; at pw=64 a 64-prompt batch is **ONE wave** instead of 16. **One OPD step 83.80 → 42.67 s** (decode 68.44 → 25.40, teacher 3.99, assemble 13.18), peak mem unchanged, weight_sync_ok 1.0. **Cumulative over the three optimisations: 147.54 → 42.67 s (3.46x), decode 129.59 → 25.40 s (5.10x), ES/BP 2.39x → 0.69x — es_token is now FASTER than BP-OPD.** Assembly is now 31% of the step and is the next lever, not decode. **Training launched** on GPU 1, sequential, wandb project `zo-opd-q34b-1p7b` via new `scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`: (1) BP-OPD `token_reward_direct` LR 1e-6, (2) ZO-ES-token N=8, pack_width=64, sigma=0.01 absolute, bernoulli, student_iw, token_agg=mean, LR=1e-3, 150 iters, heldout probe 16. Both: Qwen3-4B teacher → Qwen3-1.7B student, MATH lv3-5 train / MATH-500 eval, batch 64 x 1024, **TEMPERATURE=1.0** (on-policy sampling — the IW rail loss is an unbiased estimate of KL(pi_n||q) only when the clean token is SAMPLED from pi_0; the greedy benchmark regime would bias it). ES LR 1e-3 = the shipped all-layer default (NP lesson: ~30x below the single-layer LR); **no ES LR sweep exists yet** — heldout probe is on so divergence shows within a few steps. → results/zo_opd.md §8, wiki/es_token_trainer.md §9, raw scripts/zo_opd/results/es_token_kv_reservation.txt
+User: "resolve it, we should not have excessive kv cache. do not care about NP implementation... re-profile after the fix, then launch opd and zo-es-token training... wandb project zo-opd-q34b-1p7b, gpu 1 sequentially." **Problem**: `_np_prefill_packed` carves a private KV region off the top of vLLM's block pool (the driver bypasses vLLM's scheduler and needs static KV for a captured graph) and sized each slot's slice at the FULL `max_model_len` — ceil(40960/16)=2560 blocks against a 24,717-block pool = **9 slots max**, ~20x what a 1024-token generation needs. **Fix**: reserve (longest prompt + max_tokens), capped at max_model_len; `max_new_tokens=None` preserves the old behaviour so NP is untouched; `ES_KV_FULL_RESERVE=1` A/B knob. Added a second assert because the attention block table is zero-filled and only `len(block_ids)` entries are written — an undersized slice would read block 0 and **silently corrupt a neighbour's KV rather than crash**. **The gate had to be rewritten, and that was the substantive finding**: the obvious check (packed clean tokens == stock greedy) FAILS at pack_width>=10, but it is bf16 rounding, not corruption — (i) neighbour-independence: hold slots 0-3 fixed and swap the CONTENT of every other slot → byte-identical output, so slices do not alias (PASS at 4/8/16/32/64); (ii) output changes with wave WIDTH alone (slots 0-3 identical at width 4 and 16, differ at 32); (iii) it appears at the shipping pack_width=4 too, where the reservation change is provably byte-neutral; (iv) divergent slots come in pairs (i, i+8) = same prompt text, and divergence compounds with length. The hand-driven packed forward batches differently from vLLM's scheduler → different bf16 rounding → greedy argmax flips on near-ties. Gate now checks [A] output-neutrality vs the old reservation ACROSS PROCESSES (flipping it in-process reuses the already-captured graph and is vacuous — that artifact initially looked like a pw=8 failure), [B] neighbour-independence, [C] full-length generation. All PASS; check_es_parity's 3 gates unchanged; cross-process [A] byte-identical (payload diff 0.0) at pw=4 and 8. **Throughput** (N=8): pack_width 4/8/16/32/64 → 3.734/4.259/5.435/8.431/15.036 ms per token-step = 1071/1878/2944/3795/**4257** clean tok/s; at pw=64 a 64-prompt batch is **ONE wave** instead of 16. **One OPD step 83.80 → 42.67 s** (decode 68.44 → 25.40, teacher 3.99, assemble 13.18), peak mem unchanged, weight_sync_ok 1.0. **Cumulative over the three optimisations: 147.54 → 42.67 s (3.46x), decode 129.59 → 25.40 s (5.10x), ES/BP 2.39x → 0.69x — es_token is now FASTER than BP-OPD.** Assembly is now 31% of the step and is the next lever, not decode. **Training launched** on GPU 1, sequential, wandb project `zo-opd-q34b-1p7b` via new `scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`: (1) BP-OPD `token_reward_direct` LR 1e-6, (2) ZO-ES-token N=8, pack_width=64, sigma=0.01 absolute, bernoulli, student_iw, token_agg=mean, LR=1e-3, 150 iters, heldout probe 16. Both: Qwen3-4B teacher → Qwen3-1.7B student, MATH lv3-5 train / MATH-500 eval, batch 64 x 1024, **TEMPERATURE=1.0** (on-policy sampling — the IW rail loss is an unbiased estimate of KL(pi_n||q) only when the clean token is SAMPLED from pi_0; the greedy benchmark regime would bias it). ES LR 1e-3 = the shipped all-layer default (NP lesson: ~30x below the single-layer LR); **no ES LR sweep exists yet** — heldout probe is on so divergence shows within a few steps. → results/ZO_OPD/zo_opd.md §8, wiki/es_token_trainer.md §9, raw scripts/zo_opd/results/es_token_kv_reservation.txt
 
 ## [2026-08-23b] train | first zo-opd-q34b-1p7b runs: lr=1e-3 degrades, LR bound established, and a measurement trap
-Launched BP-OPD then ZO-ES-token on GPU 1 (wandb `zo-opd-q34b-1p7b`). **BP-OPD** completed 138 steps at ~25 s/step, LR 1e-6, T=1.0: MATH-500 2.8/2.2/2.8/1.8% across its four evals — flat, so it is a wall-clock reference, not a learning baseline. **ZO-ES-token at the shipped lr=1e-3 DEGRADES the model**: fixed 16-prompt probe KL 0.2244 → 0.5565 (step 25) → 1.1559 (step 50), MATH-500 (200 fixed) 5.0% → 1.5% → 0.0%, monotonic and ~2x per interval. Cause: 1e-3 was calibrated on the GREEDY benchmark where dW_norm_mean≈240; at TEMPERATURE=1.0 the rails ride a higher-entropy trajectory, the importance weights spread, and dW_norm_mean is ≈866 at step 0 / ~2000-2550 steady — ~3.6x larger before any LR applies. (T=1.0 is nonetheless required: student_iw is unbiased for KL(pi_n||q) only when the clean token is SAMPLED from pi_0.) **MEASUREMENT TRAP — I killed a healthy run on this and had to retract**: `train/L_clean_mean` is scored on whatever 64 prompts that step drew and swings **0.23–3.4 batch to batch**; LRs 1e-3/1e-5/3e-5 (100x span) produce *indistinguishable* curves on it, with the same steps low in every run — it is data, not the optimizer. `dW_norm_mean` is not a divergence signal either: it is the gradient-estimate norm BEFORE the LR multiplies it. The only usable metric is `eval/heldout_clean_loss` (fixed 16 prompts, ray_trainer.py:333, logged **only every EVAL_INTERVAL**, not per step). **Probe noise floor = ±8%**: three sweep runs read the same untouched step-0 model as 0.1908/0.2126/0.2242. **Sweep** (21 steps, EVAL_INTERVAL=10, fixed probe + MATH-500@50): 1e-4 → 0.2126/0.1886/0.2035; 1e-5 → 0.1908/0.2126/0.2010; 1e-6 → 0.2242/0.1988/0.1909 — all flat within the noise floor (and MATH-500@50 has sigma≈4pp). **This is a BOUND, not a ranking**: 1e-3 destroys, ≤1e-4 does not, 20 steps cannot separate 1e-4/1e-5/1e-6. Relaunched the 150-step run at **1e-4** (largest non-degrading LR = most movement per step; a principled default, NOT a measured optimum). Whether es_token learns at ANY LR is still unanswered — the 1e-4 run is the first horizon that could show it. Separating 1e-4 from 1e-5 needs hundreds of steps or a lower-variance probe (greedy probe rollouts / more probe prompts). Standing blocker for accuracy as a metric: in BOTH runs every rollout hits the 1024-token cap without emitting EOS (response_length mean=min=max=1024), pinning MATH-500 near its floor. → results/zo_opd.md §9, wiki/es_token_trainer.md §5, raw scripts/zo_opd/results/es_token_lr.txt
+Launched BP-OPD then ZO-ES-token on GPU 1 (wandb `zo-opd-q34b-1p7b`). **BP-OPD** completed 138 steps at ~25 s/step, LR 1e-6, T=1.0: MATH-500 2.8/2.2/2.8/1.8% across its four evals — flat, so it is a wall-clock reference, not a learning baseline. **ZO-ES-token at the shipped lr=1e-3 DEGRADES the model**: fixed 16-prompt probe KL 0.2244 → 0.5565 (step 25) → 1.1559 (step 50), MATH-500 (200 fixed) 5.0% → 1.5% → 0.0%, monotonic and ~2x per interval. Cause: 1e-3 was calibrated on the GREEDY benchmark where dW_norm_mean≈240; at TEMPERATURE=1.0 the rails ride a higher-entropy trajectory, the importance weights spread, and dW_norm_mean is ≈866 at step 0 / ~2000-2550 steady — ~3.6x larger before any LR applies. (T=1.0 is nonetheless required: student_iw is unbiased for KL(pi_n||q) only when the clean token is SAMPLED from pi_0.) **MEASUREMENT TRAP — I killed a healthy run on this and had to retract**: `train/L_clean_mean` is scored on whatever 64 prompts that step drew and swings **0.23–3.4 batch to batch**; LRs 1e-3/1e-5/3e-5 (100x span) produce *indistinguishable* curves on it, with the same steps low in every run — it is data, not the optimizer. `dW_norm_mean` is not a divergence signal either: it is the gradient-estimate norm BEFORE the LR multiplies it. The only usable metric is `eval/heldout_clean_loss` (fixed 16 prompts, ray_trainer.py:333, logged **only every EVAL_INTERVAL**, not per step). **Probe noise floor = ±8%**: three sweep runs read the same untouched step-0 model as 0.1908/0.2126/0.2242. **Sweep** (21 steps, EVAL_INTERVAL=10, fixed probe + MATH-500@50): 1e-4 → 0.2126/0.1886/0.2035; 1e-5 → 0.1908/0.2126/0.2010; 1e-6 → 0.2242/0.1988/0.1909 — all flat within the noise floor (and MATH-500@50 has sigma≈4pp). **This is a BOUND, not a ranking**: 1e-3 destroys, ≤1e-4 does not, 20 steps cannot separate 1e-4/1e-5/1e-6. Relaunched the 150-step run at **1e-4** (largest non-degrading LR = most movement per step; a principled default, NOT a measured optimum). Whether es_token learns at ANY LR is still unanswered — the 1e-4 run is the first horizon that could show it. Separating 1e-4 from 1e-5 needs hundreds of steps or a lower-variance probe (greedy probe rollouts / more probe prompts). Standing blocker for accuracy as a metric: in BOTH runs every rollout hits the 1024-token cap without emitting EOS (response_length mean=min=max=1024), pinning MATH-500 near its floor. → results/ZO_OPD/zo_opd.md §9, wiki/es_token_trainer.md §5, raw scripts/zo_opd/results/es_token_lr.txt
 
 ## [2026-08-23c] result | ZO-ES-token 150 steps @ lr=1e-4 — NEGATIVE, and BP-OPD is flat too
-Completed the 150-step run (wandb `zo-opd-q34b-1p7b` / N8_pw64_lr1e-4): 37.18 s/step, 92.9 min, 9,713,323 token-records, weight_sync_ok=1.0. Fixed 16-prompt probe across the seven evals: 0.2126 / 0.2002 / 0.1987 / 0.2169 / 0.2049 / 0.2157 / **0.2228**; MATH-500 (fixed 200): 6.0 / 7.0 / 6.5 / 5.5 / 7.0 / 2.0 / 4.0%. **es_token does NOT learn measurably at 1e-4 over 150 steps** — every probe reading lies in 0.199–0.223 with no direction, the endpoint is +4.8% vs step 0 which is INSIDE the ±8% noise floor (so "no change", not "slightly worse"), and MATH-500 shows no trend (sigma≈1.7pp at n=200). The monotone decline at steps 25/50 that looked promising broke at step 75 — precisely the false signal the noise floor predicts, and a second reminder not to read short trends on this probe. **Bracket established, no recipe inside it**: lr 1e-3 destroys the model (+415% probe by step 50, accuracy 0%), lr 1e-4 holds it steady — one order of magnitude between "destroys" and "does nothing", and the gap is too wide to conclude no working step size exists. **Crucially this is NOT ES-specific**: the BP-OPD baseline was equally flat (MATH-500 2.8/2.2/2.8/1.8% over 138 steps at lr 1e-6). Neither method moved, which implicates the SETUP rather than the algorithm. **Leading suspect: truncation** — in both runs every rollout hits the 1024-token cap without emitting EOS (response_length mean=min=max=1024, clip_ratio=1.0), so the student never produces a terminated answer and the teacher reward is computed entirely on truncated continuations; MATH-500 reads a floor for both. **Prerequisites before judging es_token as a method**: (1) fix truncation — longer budget or a terminating template; (2) a probe that can resolve the effect — 16 prompts sampled at T=1.0 gives ±8%, greedy rollouts over ~100 prompts would cut that several-fold for far less than a 93-min run; (3) only then sweep LR between 1e-4 and 1e-3. Wall-clock side is settled and positive: one OPD step 147.5→42.7 s (3.46x) and es_token is now faster than BP-OPD. → results/zo_opd.md §9.4, raw scripts/zo_opd/results/es_token_lr.txt
+Completed the 150-step run (wandb `zo-opd-q34b-1p7b` / N8_pw64_lr1e-4): 37.18 s/step, 92.9 min, 9,713,323 token-records, weight_sync_ok=1.0. Fixed 16-prompt probe across the seven evals: 0.2126 / 0.2002 / 0.1987 / 0.2169 / 0.2049 / 0.2157 / **0.2228**; MATH-500 (fixed 200): 6.0 / 7.0 / 6.5 / 5.5 / 7.0 / 2.0 / 4.0%. **es_token does NOT learn measurably at 1e-4 over 150 steps** — every probe reading lies in 0.199–0.223 with no direction, the endpoint is +4.8% vs step 0 which is INSIDE the ±8% noise floor (so "no change", not "slightly worse"), and MATH-500 shows no trend (sigma≈1.7pp at n=200). The monotone decline at steps 25/50 that looked promising broke at step 75 — precisely the false signal the noise floor predicts, and a second reminder not to read short trends on this probe. **Bracket established, no recipe inside it**: lr 1e-3 destroys the model (+415% probe by step 50, accuracy 0%), lr 1e-4 holds it steady — one order of magnitude between "destroys" and "does nothing", and the gap is too wide to conclude no working step size exists. **Crucially this is NOT ES-specific**: the BP-OPD baseline was equally flat (MATH-500 2.8/2.2/2.8/1.8% over 138 steps at lr 1e-6). Neither method moved, which implicates the SETUP rather than the algorithm. **Leading suspect: truncation** — in both runs every rollout hits the 1024-token cap without emitting EOS (response_length mean=min=max=1024, clip_ratio=1.0), so the student never produces a terminated answer and the teacher reward is computed entirely on truncated continuations; MATH-500 reads a floor for both. **Prerequisites before judging es_token as a method**: (1) fix truncation — longer budget or a terminating template; (2) a probe that can resolve the effect — 16 prompts sampled at T=1.0 gives ±8%, greedy rollouts over ~100 prompts would cut that several-fold for far less than a 93-min run; (3) only then sweep LR between 1e-4 and 1e-3. Wall-clock side is settled and positive: one OPD step 147.5→42.7 s (3.46x) and es_token is now faster than BP-OPD. → results/ZO_OPD/zo_opd.md §9.4, raw scripts/zo_opd/results/es_token_lr.txt
 
 ## [2026-08-24] sync | es_token docs merged from the OPD-estoken worktree into main
 
 Branch `feat/es-token-trainer` (worktree `/home/yequan/Project/compression/OPD-estoken`, HEAD 687ddaa)
 carried the whole ZO-ES-token thread in its own copy of the wiki. Synced into main without
-clobbering main's diverged pages: `results/zo_opd.md` gained the 632-line **§ZO-ES-token** section
+clobbering main's diverged pages: `results/ZO_OPD/zo_opd.md` gained the 632-line **§ZO-ES-token** section
 (sessions 2026-06-09 build/gates/headline, 08-21 profiling, 08-22 fused rail kernel, 08-22b direct
 Rademacher noise, 08-23 budget-sized scratch-KV, 08-23b LR bound + measurement trap, 08-23c the
 150-step negative result) spliced above main's existing §ZO-NP, which was kept verbatim (the two
@@ -394,9 +394,9 @@ not 8-10x), grad+update 10.89 vs 9.63 (1.13x). Cold penalties differ 13% (ES: te
 already-warm vLLM engine) vs 146% (BP: separate FSDP module firing first inside the timed phase).
 WITHDRAWN: "es_token is faster than BP-OPD" and "teacher phase 8.4x/10x faster than BP's".
 UNAFFECTED: the 3.46x step / 5.10x decode optimisation gains (cold-vs-cold on one harness), the
-gradient-cosine results, and the negative learning result. Corrected in results/zo_opd.md §10 (new)
+gradient-cosine results, and the negative learning result. Corrected in results/ZO_OPD/zo_opd.md §10 (new)
 + summary/wall-clock tables + §1/§4/§6.4/§7.5/§8.3 relabels, wiki/es_token_trainer.md, index.md.
--> `docs/results/zo_opd.md` §10, raw `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`,
+-> `docs/results/ZO_OPD/zo_opd.md` §10, raw `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`,
 harness `scripts/zo_opd/es_token_checks/bench_rm_stages.py`
 
 ## [2026-08-24] ingest | ES catastrophic forgetting: MATH leg is a null, Countdown leg launched
@@ -618,7 +618,7 @@ on the *right* direction already reaches 70.50.
 
 ## [2026-08-26] ingest | The setting where BP-OPD learns; es_token measured against it
 
--> `docs/results/zo_opd.md` section 11 (new), plus summary-table row and a rewritten bottom line.
+-> `docs/results/ZO_OPD/zo_opd.md` section 11 (new), plus summary-table row and a rewritten bottom line.
 
 Found the pair/config where BP-OPD demonstrably learns on one GPU: `Qwen/Qwen3-1.7B` (non-thinking)
 <- `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`, NERSC slurm hyperparameters verbatim
@@ -642,8 +642,8 @@ trained checkpoint generates exactly what base does -- possible off-distribution
 
 ## [2026-08-28] ingest | Why es_token does not learn: the update footprint, not the code and not sigma
 
--> `docs/results/zo_opd.md` section 12 (new), plus corrected rows in `docs/index.md` for
-   `wiki/es_token_trainer.md` and `results/zo_opd.md`.
+-> `docs/results/ZO_OPD/zo_opd.md` section 12 (new), plus corrected rows in `docs/index.md` for
+   `wiki/es_token_trainer.md` and `results/ZO_OPD/zo_opd.md`.
 
 Follow-up on section 11.7. Four candidate causes tested; three falsified by measurement.
 
@@ -685,7 +685,7 @@ enable_thinking fix and is being re-tested rather than assumed.
 
 ## [2026-08-28] ingest | Sequence-level ES-OPD built, and its sigma calibrated by measurement
 
--> `docs/results/zo_opd.md` section 13 (new), plus the `results/zo_opd.md` row in `docs/index.md`.
+-> `docs/results/ZO_OPD/zo_opd.md` section 13 (new), plus the `results/ZO_OPD/zo_opd.md` row in `docs/index.md`.
 
 Section 12 showed es_token's rails never write KV and are perturbed only at the current decode
 step, so the token dimension multiplies TARGETS rather than probes. This builds the other design
@@ -755,7 +755,7 @@ alpha re-tuned before N can be cut.
 
 ## [2026-08-29] ingest | es_token LR endpoint: both LRs damage the model; random-walk model confirmed
 
--> `docs/results/zo_opd.md` section 12.8 (new), 13.4 (updated).
+-> `docs/results/ZO_OPD/zo_opd.md` section 12.8 (new), 13.4 (updated).
 
 Both es_token LR arms finished 200 steps. MATH-500 greedy n=1 against a base reference of
 73.60 +- 1.97 measured under an identical protocol:
@@ -785,7 +785,7 @@ batch 16, 1536 tokens, 120 iterations.
 
 ## [2026-08-29] ingest | ES-OPD length-hacked its own fitness; mean -> sum aggregation
 
--> `docs/results/zo_opd.md` section 13.5 (new), 13.4 (corrected).
+-> `docs/results/ZO_OPD/zo_opd.md` section 13.5 (new), 13.4 (corrected).
 
 The first two sequence-level ES-OPD arms were killed at iteration 30. They were minimising the
 fitness and getting WORSE at the task: MATH-500 73.2 -> 68.2 (sigma=3e-3) and 73.2 -> 71.4
@@ -835,3 +835,133 @@ max over 16 noisy evals (~2.2 pp per-eval SE); the honest statistic is the plate
 nominally the best anywhere here but not significantly above fura N=30's 72.68.
 
 -> `docs/results/ES/es_results.md` section 16.4
+
+## [2026-08-31] ingest | ES results — condensed reader's version (`es_results_short.md`)
+
+Distilled the 2,029-line [results/ES/es_results.md](results/ES/es_results.md) into a
+129-line front page at [results/ES/es_results_short.md](results/ES/es_results_short.md).
+No new experiments — a re-presentation of what is already filed.
+
+Contents:
+* **One-line result** — all ~21 pp of gain is singular-frame rotation; six of eight arms tie
+  inside 0.86 pp (per-eval SE 2.24 pp) from 0.018%–100% of the parameters, so footprint σ
+  and motion α/√N decide the ranking, not the subspace.
+* **Methods table** — one line each for `dense`, `zoact r=1`, `insparse d=1%`, `fura`,
+  `iso`, `isobtt`, `lora r=44`, `lora r=1`, with trainable counts and the † caveat that the
+  ISO entries are manifold dimensions, not coefficient counts.
+* **Leaderboard N=30** — plateau (≥40) + best + GPU-h for all eight arms, with the ‡ note
+  that the plateau statistic understates the two LoRA arms (still rising at 150) and that
+  both are under-scaled.
+* **Leaderboard N=10** — `dense` / `iso` / `fura` at fixed α plus `fura`'s motion-matched
+  (α=3.6084e-3) and half-motion controls, with paired Δ, t and GPU-h. Uses the *relative*
+  motion factor (1.73× / 1.00× / 0.50×) rather than absolute α/√N, since §16.1 and §16.4
+  normalise that quantity differently.
+* **Six takeaways** (hold α/√N fixed; spectrum is free; step size dominates; calibrated
+  beats learned by 15 pp at rank 1; forgetting does not reproduce; the 64-problem batch is
+  the ceiling), **open items**, and a topic → §-of-the-full-doc pointer table.
+
+Catalogued in [index.md](index.md) directly above the ARIS section.
+
+## [2026-08-31] ingest | ZO-OPD docs reorganised; one-page summary added
+
+Docs moved by hand to `docs/results/ZO_OPD/`. Repaired what the move broke and added a summary:
+
+- `docs/results/ZO_OPD/zo_opd.md` — relative links fixed for the extra directory level
+  (`ES/es_results.md` -> `../ES/` x9, `../wiki/` -> `../../wiki/`, `../plans/` -> `../../plans/`);
+  all three targets verified to resolve.
+- `docs/index.md`, `docs/log.md` — 5 and 18 references repointed from `results/zo_opd.md`.
+- `docs/results/ZO_OPD/zo_opd_short.md` — NEW one-page overview: what was tried, current results,
+  problems found/fixed, remaining opens. Catalogued in `index.md` as the entry point for the thread.
+
+## [2026-08-31] ingest | What actually sets sigma in ES, and two calibrated hybrids
+
+`es_results.md` §17. Built `fura_zoact` (`dW[:,blk_j] = A_j C_j V_j`, both frames frozen,
+**831,488 coeffs = 0.011%**, the smallest arm on the page) and `lora_zoact` (`lora` with `A`
+initialised to the calibrated directions — an exactly matched control). Gates PASS.
+
+Three corrections fell out, all verified by measurement:
+
+1. **`reward_std`, not footprint, sets sigma.** Every working config sits in 0.040–0.055;
+   below 0.035 it crawls, above 0.09 it degrades — while footprint spans 200× across them.
+   3 iterations to measure vs 2.7 h for a screen (`probe_reward_std.sh` + `pick_sigma.py`).
+2. **§6's footprint table is from the 192×144 *fake* model** (all four entries reproduce
+   analytically from entry-std 0.02). Real Qwen numbers in §17.1. This retracts §15.6's
+   "11× footprint confound" (really **1.2×**, so the 15 pp calibrated-beats-learned result
+   is unconfounded) and §11.4's "at *matched* footprint" (`fura` wins at **3.4×** dense's).
+3. **LoRA-ES is quadratic in sigma**: `dW = s.sigma.eps_B A0 + s.sigma^2.eps_B eps_A`, with
+   **quad/lin = sigma*sqrt(in)**, rank-independent, and the cross term does **not** cancel
+   under antithetic sampling. At matched footprint it is `F*rms*in/sqrt(r)` — 3.6–18.9 at
+   r=1, 0.54–2.9 at r=44 — so rank-1 LoRA-ES is capped at **3% of dense's footprint** by
+   construction. A third, mechanical reason for the §15.6 gap.
+
+New: `measure_es_footprint.py`, `collect_es_curves.py`, `plot_es_curves.py`,
+`test_zoact_hybrid_es.py`, `probe_reward_std.sh`, `pick_sigma.py`, four `chain_*` launchers.
+N=10 alpha/sigma screens for `dense` and `lora` running on GPUs 6/7.
+
+## [2026-08-31] ingest | ES rails for OPD: formulation audit, curvature measurement, new DeepSeek/JustRL setting
+
+- New page `results/ZO_OPD/es_rails_formulation.md`. es_token is unbiased for the detached reverse-KL
+  gradient but leaks variance three ways (+1 score term, exponential IW at finite sigma, random
+  re-estimation of the known layer input x_t). Measured on DeepSeek-R1-Distill-1.5B <- JustRL-1.5B:
+  kappa_g = 34, tr(H) = 5.5e3, r_eff = 160 -- ES is not curvature-limited; the random-walk displacement
+  budget makes full-parameter forward-only OPD ~1/40 of a BP step per step.
+- Built on `feat/es-token-trainer`: thunlp-mirrored 1-GPU BP-OPD launcher (`scripts/zo_opd/ds15b/`),
+  `algorithm.es_update` (prefill-rail ES inside the PPO trainer, same rollout/advantages as BP),
+  `opd_curvature.py`. Runs: BP baseline (GPU 4), ES N=32 / N=128 (GPUs 1 / 0).
+
+## [2026-08-31] ingest | es_token rail-aware kernels (shared-KV attention, streaming LM head) + H100 profile (from worktree OPD-estoken)
+
+Executed `results/ZO_OPD/opd_profile_plan.md` Phases 0–6 on 2× H100 NVL in the `feat/es-token-trainer` worktree; results page `results/ZO_OPD/es_profile_results.md` (+ `figs/`) copied here. Code (kernels, worker-extension integration, gates, `scripts/zo_opd/es_profile/` harness) lives on the branch.
+
+## [2026-09-01] ingest | ES rails vs BP-OPD on DeepSeek-R1-Distill-1.5B <- JustRL-1.5B: verdict
+
+- `results/ZO_OPD/es_rails_formulation.md` §7 filled in. At the reference 7168-token cap, prefill-rail
+  ES (8-128 rails, 64 seq/step, no backward) reaches MATH-500 0.80-0.83 vs BP 0.85-0.86 by step 40-60,
+  then plateaus/declines (turnover step (0.05/footprint)^2, verified on two arms). Decomposition:
+  both methods' capped gains are truncation reductions; BP keeps completed-answer accuracy, ES loses
+  2-3 pp. 16k-cap re-eval: BP +6 pp MATH-500 / +23 pp AIME24 vs base; every ES arm <= +1.8 pp (noise).
+  Verdict: no forward-only rail configuration is comparable to BP-OPD here. Raw data in
+  `results/ZO_OPD/data/`. Fixed an ES normalisation bug (std -> RMS of antithetic differences).
+
+## [2026-09-01] ingest | ds15b runs closed out; run-naming taxonomy adopted
+
+- BP stopped at step 239 (plateau 0.844-0.861 on MATH-500@7168 from step 40; 16k-cap headline stands).
+- Naming for all future ZO/ES runs: es-prefill / es-token-prefill / es-decode / es-token-decode
+  (perturbation granularity x where it is evaluated); mapping table in
+  `results/ZO_OPD/es_rails_formulation.md` §1.5. wandb project `nersc_opd_qwen4b_1p7b`.
+
+## [2026-09-01] result | B=1 rail sweep: fold carries 48 rails within 10% (128 within 25%) of N=1 latency
+
+Single-batch fine-N sweep (idle GPUs) added to `results/ZO_OPD/es_profile_results.md` §5.1 with `figs/es_profile_b1_railsweep.png`; measurement/plot code on branch `feat/es-token-trainer`.
+
+## [2026-09-01] ingest | N=10 leaderboard rebuilt after the alpha/sigma searches
+
+`es_results_short.md` leaderboard + `es_results.md` §17.4/17.5, figure
+`docs/results/ES/figs/n10_convergence.png`. 14 runs at N=10 (2.8 GPU-h each, 80 iterations).
+
+**Best per method (plateau ≥40):** `fura` 73.17 · `dense` **72.68** · **`fura_zoact` 71.36
+from 0.011% of the weights** · `iso` 71.05 · `lora r=44` 70.04 · `zoact r=1` 67.68 ·
+`lora r=1` 63.76. The last four are still rising at 80, so they are lower bounds.
+
+* **`dense` reproduces the alpha/sqrt(N) rule** (unimodal, peak at motion-matched alpha) —
+  the rule is not `fura`-specific, and N=10 is now **+0.86 pp over N=30 at 5.3x less
+  compute**, not the "-0.49 ns" of §16.3.
+* **§15.6's "calibrated beats learned by 15 pp" is retracted to ~4 pp** — that number
+  compared zoact at its best against a lora r=1 8.7 pp below its own best sigma, plus a
+  fake-vs-real footprint mismatch. Like-for-like: 67.68 vs 63.76.
+* **`fura_zoact` matches the 150-iteration `zoact r=1` (70.50) from 831,488 coefficients** —
+  118x fewer than `lora r=44`, 40x cheaper than the N=30 protocol.
+* **Four dead/diverged runs, one mechanism**: matching sigma across arms by ||dW||_F does not
+  match them functionally (a random rank-r input subspace captures ~r/in of the activation
+  energy; the calibrated top-r captures most of it). Both `lora_zoact` arms inherited their
+  `lora` twin's sigma and were destroyed or diverged; re-tuning by reward_std probe.
+
+## [2026-09-01] ingest | rail-kernel profile collected into zo_opd.md as a session block
+
+Session 2026-08-31/09-01 block (kernels, free-rail frontier incl. the B=1 sweep, gates, stale-KV-page bug, DP2/TP2) appended before the 06-02 block; summary + pointer to es_profile_results.md (+ zo_opd_short.md open-item 4 annotated: cost side now measured).
+
+## [2026-09-01] ingest | zo_opd_short: DeepSeek/JustRL verdict section; runs moved to wandb es_opd_JustRL_1p5b
+
+- One-page summary of the es-prefill vs BP comparison + 6 takeaways added to `results/ZO_OPD/zo_opd_short.md`.
+- All ds15b wandb runs moved to project `es_opd_JustRL_1p5b` (future runs default there).
+- Launching: es-token-decode with the rail-aware kernels (GPU 7) and a reward-only ES-RL baseline (GPU 6).

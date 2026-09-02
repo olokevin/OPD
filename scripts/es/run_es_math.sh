@@ -13,6 +13,9 @@
 #   iso       run 5  ISO fixed-spectrum ES (arXiv:2607.19331), full-matrix frames
 #   isobtt    run 6  ISO on the block-wise SVD -- frozen per-block spectrum, the
 #                    trained core is a small orthogonal R_j in O(b)
+#   lora             LoRA adapter, both factors ES-trained (random A, zero B)
+#   fura_zoact       fura's output frame + zoact's calibrated input directions
+#   lora_zoact       lora, but A initialised to the calibrated directions
 #
 # Usage:  DEVICE=1 PERTURB_MODE=dense bash scripts/es/run_es_math.sh
 
@@ -103,6 +106,8 @@ case "$PERTURB_MODE" in
   insparse) TAG="insparse-d${INSPARSE_DENSITY}" ;;
   fura)     TAG="fura-btt-smallcore" ;;
   lora)     TAG="lora-r${LORA_RANK}" ;;
+  fura_zoact) TAG="furazoact-r${SUBSPACE_RANK}" ;;
+  lora_zoact) TAG="lorazoact-r${LORA_RANK}" ;;
   iso)      TAG="iso-fixedspec-b${ISO_BLOCK_SIZE}" ;;
   isobtt)   TAG="isobtt-fixedspec-smallcore" ;;
   *)        TAG="$PERTURB_MODE" ;;
@@ -114,9 +119,9 @@ LOG_DIR=${LOG_DIR:-${REPO}/logs/es}
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
 
 CALIB_ARG="null"
-if [ "$PERTURB_MODE" = "zoact" ] || [ "$PERTURB_MODE" = "insparse" ]; then
-  CALIB_ARG="$CALIB_PATH"
-fi
+case "$PERTURB_MODE" in
+  zoact|insparse|fura_zoact|lora_zoact) CALIB_ARG="$CALIB_PATH" ;;
+esac
 
 # NOTE: do NOT `ray stop --force` here -- it is host-global and would kill a
 # concurrent ES run on another GPU. Each job starts its own local Ray instance

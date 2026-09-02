@@ -2027,3 +2027,227 @@ and 74.4 in the off-protocol aligned sweep). Treat it as a max over 16 noisy eva
 ~2.2 pp per-eval SE, not as a headline: the honest statistic is the plateau, 73.17 ± 0.33,
 which is nominally the best plateau anywhere here but **not** significantly above `fura`
 N=30's 72.68 (+0.41 ± 0.43).
+
+## 17. N=10 as the default: step-size search, two calibrated hybrids, and what actually sets σ
+
+> Everything here runs the [§7](#7-results) MATH protocol at **N=10** — the population
+> [§16.4](#164-it-was-the-step-size--fura-at-n10-fully-recovers) showed is free once α/√N is
+> held fixed — on GPUs 6 and 7, 2026-08-31. Two new perturbation modes (`fura_zoact`,
+> `lora_zoact`) plus α/σ searches for `dense` and `lora`.
+> Launchers `scripts/es/chain_{dense,lora}_pop10_lr.sh`,
+> `chain_{furazoact,lorazoact}_pop10.sh`, `probe_reward_std.sh`.
+
+### 17.1 σ is set by `train/reward_std`, not by weight-space footprint
+
+Picking σ for a new subspace has been the recurring cost of this study — [§11.3](#113-answer-yes--but-scale-σ-not-α)
+spent a 4-config sweep on `fura`, [§15.5](#155-result--both-ranks-learn-neither-plateaus-and-rank-matters-enormously)
+left `lora` unresolved. The rule that actually predicts the outcome is **the reward spread
+in the first few iterations**:
+
+| run | σ | real ‖ΔW‖/‖W‖ | **`reward_std`** | outcome |
+|---|---|---|---|---|
+| `dense` | 1e-3 | 3.46e-2 | **0.0528** | 71.82 plateau (reference) |
+| `fura` | 1.25e-2 | 1.18e-1 | **0.0524** | **72.68 — best on the page** |
+| `insparse d=1%` | 1e-3 | 4.05e-3 | 0.0419 | 72.07 |
+| `zoact r=1` | 1e-3 | 5.9e-4 | 0.0401 | 70.50 |
+| `fura` | 1e-3 | 9.4e-3 | 0.0343 | 60.2 @ 20 — crawls |
+| `lora r=44` | 1e-3 | 4.04e-3 | 0.0236 | never plateaus |
+| `zoact r=1` | 1.2e-2 | 7.1e-3 | **0.1124** | 68.85 — *worse than its own paper σ* |
+
+**Everything that works sits in 0.040–0.055; below ~0.035 the arm learns but crawls, above
+~0.09 it degrades.** The footprint column spans **200×** across the working configs
+(`zoact` 5.9e-4 to `fura` 1.18e-1) and orders nothing. Three iterations measure
+`reward_std`; a screen costs 2.7 h. `scripts/es/probe_reward_std.sh` does the probe and
+`pick_sigma.py` log-interpolates to the target.
+
+⚠️ **[§6](#6-numerical-health)'s footprint table is from the *fake* model.** The
+`dense 5.0e-2 / zoact 4.2e-3 / insparse 1.6e-2 / fura 4.0e-3` row comes from
+`test_es_perturb_modes.py`, which runs on a 192×144 / 144×256 random matrix with entry std
+0.02 — all four reproduce analytically from that (`dense` = σ/0.02, `zoact` = σ/(0.02·√in),
+`fura` = σ·√b, `insparse` = σ·√d/0.02). `zoact` scales as 1/√in and `fura` as √b, so **none
+of it transfers to a 7 B model**, while [§15.3](#153-numerical-gate)'s LoRA numbers *were*
+measured on real weights. Measured consistently on Qwen2.5-Math-7B
+(`scripts/es/measure_es_footprint.py`, at σ=0.05 so the bf16 write does not contaminate —
+see [§17.4](#174-reference)):
+
+| mode | coeffs | ‖ΔW‖/‖W‖ per unit σ | σ for `dense`'s 3.46e-2 |
+|---|---|---|---|
+| `dense` | 7,615,616,512 | 34.61 | 1.00e-3 |
+| `fura` | 97,771,520 | 9.43 | 3.67e-3 |
+| `insparse d=1%` | 65,415,168 | 4.04 | 8.56e-3 |
+| `lora r=44` (linear part) | 97,771,520 | 4.04 | 8.56e-3 |
+| `zoact r=1` | 1,390,592 | 0.590 | 5.87e-2 |
+| `lora_zoact r=1` (linear) | 2,222,080 | 0.49 | 7.1e-2 |
+| `lora r=1` (linear) | 2,222,080 | 0.485 | 7.13e-2 |
+| `fura_zoact r=1` | 831,488 | 0.123 | 0.281 |
+
+**Two claims elsewhere on this page rest on the fake numbers and are corrected:**
+
+1. [§15.6](#156-the-lora-vs-zoact-control-a-calibrated-direction-beats-a-learned-one)'s
+   "⚠️ confounded by footprint, and not by a little — an **11×** gap" compared §6 (fake)
+   against §15.3 (real). On one convention `zoact r=1` is **5.9e-4** and `lora r=1`
+   **4.85e-4** — **1.2×**. The 15 pp calibrated-beats-learned result is essentially
+   **unconfounded**, and the caveat is withdrawn.
+2. [§11.4](#114-at-matched-footprint-the-structured-subspace-beats-dense)'s "at *matched*
+   footprint the structured subspace beats dense" — `fura`'s winning σ=1.25e-2 is
+   **1.18e-1, or 3.4× `dense`'s**, not matched. The *empirical* finding (`fura` ≥ `dense`
+   from 1.3% of the parameters) stands; the footprint-matching explanation does not.
+
+### 17.2 LoRA-ES is not linear in σ, and that caps rank 1 structurally
+
+Training **both** LoRA factors makes the perturbation quadratic:
+
+```
+ΔW = s·σ·ε_B A₀    +    s·σ²·ε_B ε_A
+     linear, informative   cross term, pure noise
+```
+
+`‖ε_B ε_A‖_F = σ²√(out·in·r)` against the linear `σ√(out·r)`, so
+
+> **quad / lin = σ·√in — independent of rank.**
+
+Measured at σ=0.05: 4.27 (r=1) and 3.26 (r=44) against 4.12 predicted; the gate at σ=0.13
+reads ‖ΔW‖/‖W‖ = **0.5602** where the linear term alone gives 0.063 and the two-term model
+gives 0.588 (5%).
+
+**The cross term does not cancel under antithetic sampling.** `W(+ε)` and `W(−ε)` carry the
+*same* `+σ²ε_Bε_A` offset, so mirrored sampling removes the odd part and leaves it: the
+pair is evaluated at a randomly displaced point, not at `W`. The gate sees this directly as
+`(W⁺+W⁻)/2 − W = 2.7e-1` at σ=0.13, against 1.6e-4 for every linear mode.
+
+Rank enters through the σ needed to reach a target footprint, `σ = F·rms·√(in/r)`, giving
+**quad/lin = F·rms·in/√r at matched footprint** — a property of the parameterisation, not a
+tuning choice:
+
+| arm | quad/lin at `dense`'s footprint | largest clean σ (≤0.3) | clean footprint reachable |
+|---|---|---|---|
+| `lora r=1` | 3.58 (qkv) / **18.9** (`down_proj`) | 2.2e-3 | 1.1e-3 = **3% of `dense`'s** |
+| `lora r=44` | 0.54 / **2.86** | 2.2e-3 | 8.8e-3 = **25% of `dense`'s** |
+
+**So neither rank can be run at `dense`'s footprint cleanly, and rank 1 is hopeless** —
+`down_proj` (in=18944) is the binding layer. `zoact r=1` has no cap at all: it perturbs only
+the out-side coefficient, so it is exactly linear. This is a **third, mechanical reason**
+for §15.6's 15 pp gap that has nothing to do with the projection being uninformed — at rank
+1, LoRA-ES cannot take a useful step size at all. It also predicts §15.5's shape: at σ=1e-3
+`lora` is clean but 8× under-footprinted, and every σ that fixes the footprint buys noise
+instead of signal.
+
+### 17.3 The two calibrated hybrids
+
+Both compose a **structured output side** with zoact's **calibrated input side** — "the
+fura/lora update with an activation-aware perturbation".
+
+| mode | ΔW | trained | coeffs | % of 7.6 B |
+|---|---|---|---|---|
+| `fura_zoact` | `A_j C_j V_j` per input block *j* | `C_j` (b×r) only — **both frames frozen** | **831,488** | **0.011%** |
+| `lora_zoact` | `s·B A`, `A` init = top-r calibrated directions | `A` **and** `B`, exactly as `lora` | 2,222,080 (r=1) | 0.029% |
+
+`A_j` is `fura`'s frozen block-SVD frame (`U_j diag S_j`); `V_j` is the calibrated
+activation basis restricted to block *j*'s input columns (column *i* of W lives at block
+`i//b`, position `i%b`, the same layout as `fura`'s reshape). `V_j` is a *slice* of a
+unit-norm row, not itself unit-norm, so blocks carrying more activation energy get a
+proportionally larger perturbation — that is the point. `fura_zoact` is the **smallest arm
+on the page**, below `zoact r=1`'s 1,390,592.
+
+`lora_zoact` changes **nothing** but `A`'s initialisation, so it is an exactly matched
+control — and the footprints make the rank-1 comparison three-way clean:
+
+| arm | projection `V` | trained? | ‖ΔW‖/‖W‖ per unit σ |
+|---|---|---|---|
+| `zoact r=1` | calibrated | frozen | 0.590 |
+| **`lora_zoact r=1`** | **calibrated** | **also trained** | **0.49** |
+| `lora r=1` | random | trained | 0.485 |
+
+All three within 1.2×, isolating *informed* from *trainable* with no footprint confound.
+
+**Numerical gate** (`scripts/es/test_zoact_hybrid_es.py`, real weights) — all PASS:
+
+| check | `fura_zoact` r=1 | `lora_zoact` r=1 |
+|---|---|---|
+| step 0 vs base | 1.291e-3 (bf16 BTT floor, same as `fura`) | **0.0** (B=0) |
+| perturb → restore | **0.0** | **0.0** |
+| `(W⁺+W⁻)/2 − W` | 3.9e-3 @ σ=0.2 | 2.7e-1 @ σ=0.13 — the §17.2 cross term |
+| off-subspace mass of ΔW | **10.2%** @ σ=0.2 | 99.9% — expected, `A` is trained |
+| `es_update` moves coefficients | ✓ | ✓ |
+
+⚠️ **The first gate run read 94.5% off-subspace for `fura_zoact` and it was the bf16 write,
+not a bug.** At σ=1e-3 its intended footprint is 1.2e-4, ~3× *below* the rounding noise of
+the bf16 parameter vLLM runs, so the measured ΔW was mostly quantisation. At σ=0.2 it falls
+to 10.2%. The same effect inflates every small-footprint row of a σ=1e-3 footprint table
+(`fura_zoact` reads 0.295 per unit σ at σ=1e-3 against a true 0.123) — **measure footprints
+at σ well above the floor and divide**, the map is exactly linear.
+
+### 17.4 `dense`: the α search confirms the α/√N rule on a second mode
+
+σ = 1e-3 throughout, 80 iterations, N=10. [§16.4](#164-it-was-the-step-size--fura-at-n10-fully-recovers)
+derived "hold α/√N fixed, not α" from `fura` alone; `dense` reproduces it exactly.
+
+| α | motion vs N=30 | **plateau (≥40)** | best @ step | `reward_std` | shape |
+|---|---|---|---|---|---|
+| 1.5e-4 | 0.52× | 71.76 ± 0.31 | 72.6 @ 80 | 0.0454 | slow start (57.2 @ 10), still rising |
+| **2.887e-4** | **1.00×** | **72.68 ± 0.43** | 73.2 @ 50 | 0.0383 | **flat plateau from 50** |
+| 5e-4 † | 1.73× | 71.07 ± 0.42 | 73.4 @ 20 | 0.0318 | flat |
+| 1e-3 | 3.46× | 69.84 ± 0.84 | 73.0 @ **10** | 0.0340 | rise, then monotone slide to 67.2 |
+
+† the [§16.2](#162-results) run, 150 iterations.
+
+**Unimodal, peak exactly at motion-matched α, one-sided failure** — the same shape as `fura`.
+And **72.68 is the best `dense` result anywhere on this page**, at **2.8 GPU-h against 14.8**:
+
+| `dense` | N | iters | plateau | GPU-h |
+|---|---|---|---|---|
+| paper ([§7](#7-results)) | 30 | 150 | 71.82 ± 0.34 | 14.8 |
+| fixed α ([§16.2](#162-results)) | 10 | 150 | 71.07 ± 0.42 | 4.9 |
+| **α motion-matched** | **10** | **80** | **72.68 ± 0.43** | **2.8** |
+
+So [§16.3](#163-reading)'s "`dense` pays nothing for N=10 (−0.49, ns)" understates it: with α
+corrected, N=10 is **+0.86 pp over N=30 at 5.3× less compute**. The −0.49 was the 1.73×
+overshoot, exactly as it was for `fura`.
+
+⚠️ **If the budget is ~10 iterations, use the *larger* α.** α=1e-3 posts 73.0 by step 10
+(0.34 GPU-h) — the fastest climb of any `dense` config — before walking back downhill. The
+best *plateau* and the best *transient* are at different α.
+
+### 17.5 `lora`: the σ search, and rank 1 rescued by 8.7 pp
+
+α = σ/2·√(10/30) throughout (except the r=1 rows, which keep [§15.5](#155-result--both-ranks-learn-neither-plateaus-and-rank-matters-enormously)'s
+α/σ = 5), 80 iterations, N=10.
+
+| rank | σ | quad/lin ([§17.2](#172-lora-es-is-not-linear-in-σ-and-that-caps-rank-1-structurally)) | **plateau (≥40)** | best @ step | `reward_std` |
+|---|---|---|---|---|---|
+| 44 | 4e-3 | 0.24 / 0.55 | 64.68 ± 0.44 | 66.0 @ 80 | 0.0318 |
+| **44** | **1.5385e-2** | 0.92 / 2.1 | **70.04 ± 0.48** | 71.2 @ 80 | 0.0454 |
+| 44 | 3e-2 | 1.8 / 4.1 | 68.28 ± 0.43 | 69.4 @ 40 | 0.0473 |
+| 44 | 1.3e-1 | 7.8 / 17.9 | *(not run — r=1 below settles it)* | | |
+| 1 | **2.2e-3** | 0.13 / 0.30 | **63.76 ± 1.31** | 68.4 @ 80 | 0.0230 |
+| 1 | 1.3e-1 | 7.8 / 17.9 | **DEAD** | 51.6 @ 0 | **0.0000** |
+
+**Two results.**
+
+1. **Rank 44 is unimodal in σ with the peak at 1.5385e-2**, and 70.04 beats §15.5's
+   67.95 **at 1/5 the compute** (2.8 vs 14.7 GPU-h) — still rising at 80.
+2. **Rank 1 gains +8.7 pp from σ alone.** §15.5 read 55.07 at σ=1e-3/N=30/150 it; at
+   σ=2.2e-3 with motion-corrected α it reaches **63.76 (best 68.4, still rising) in 2.8
+   GPU-h**. σ=2.2e-3 is not arbitrary — it is the largest σ keeping the §17.2 cross term
+   under 0.3, set by `down_proj`.
+
+**σ=0.13 is the §17.2 prediction realised.** At quad/lin ≈ 8–18 the perturbation is almost
+entirely the uninformative cross term: `reward_mean = reward_std = reward_max = 0.0` and
+`train/accuracy = 0.0` on **every** population member from iteration 1 — the model is
+destroyed and ES's estimator is identically zero. Stopped after 2 iterations.
+
+**This substantially retracts [§15.6](#156-the-lora-vs-zoact-control-a-calibrated-direction-beats-a-learned-one)'s
+15 pp.** That number compared `zoact r=1` against a `lora r=1` that was **8.7 pp
+below its own best σ** *and* footprint-mismeasured ([§17.1](#171-σ-is-set-by-trainreward_std-not-by-weight-space-footprint)).
+Against `zoact r=1`'s 70.50 the honest gap is now **≤6.7 pp and shrinking** — see
+[§17.6](#176-the-two-hybrids) for the like-for-like N=10 comparison.
+
+### 17.9 Reference
+
+* Real-model footprints: `scripts/es/measure_es_footprint.py` (log `logs/es/es_footprint_pass2.log`).
+* σ probe: `scripts/es/probe_reward_std.sh` + `pick_sigma.py`.
+* Curves/plateaus from chain logs: `scripts/es/collect_es_curves.py` (reproduces §16's
+  tables exactly), plotted by `plot_es_curves.py`.
+* Hybrid gate: `scripts/es/test_zoact_hybrid_es.py`.
+* Mode kernels: `_es_write` / `init_es_state` in
+  `verl/verl/workers/rollout/vllm_rollout/es_worker_extension.py`.

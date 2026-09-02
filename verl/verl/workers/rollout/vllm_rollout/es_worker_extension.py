@@ -390,6 +390,25 @@ class WorkerExtension:
 #                                              core R is perturbed (train_position=small,
 #                                              s_merged_to=keep_frozen)
 #
+# Two hybrids compose the *structured* output side of fura / lora with zoact's
+# *calibrated* input side -- "fura/lora update, activation-aware perturbation":
+#
+#   fura_zoact  P(C)[:, blk_j] = A_j C_j V_j    fura's frozen block-SVD frame A_j on the
+#                                              output side, and the input side pinned to
+#                                              the calibrated activation directions V
+#                                              restricted to block j's columns.  Both
+#                                              sides frozen; only C_j (b x r) is trained,
+#                                              so the cost is in_f * r per layer.
+#   lora_zoact  P(C) = s * B @ A                identical to `lora` -- both factors trained
+#                                              -- except A is *initialised* to the top-r
+#                                              calibrated directions instead of a random
+#                                              Gaussian.  Same coefficient count and (since
+#                                              calibrated rows are unit-norm and random rows
+#                                              have E||row||^2 = 1) the same footprint per
+#                                              unit sigma, so it isolates whether the
+#                                              projection has to be *informed* from rank,
+#                                              trainability and step size.
+#
 # Keeping C in fp32 matters: one ES step moves a coefficient by ~alpha/sqrt(N) ~ 1e-4,
 # which is at or below one bf16 ULP of a typical LLM weight (~8e-5 at |w|~0.02).  With a
 # bf16-only accumulator most of the update is silently rounded away, and the structured
@@ -562,7 +581,7 @@ class StructuredESMixin:
             return {"mode": mode}
 
         calib = None
-        if mode in ("zoact", "insparse"):
+        if mode in ("zoact", "insparse", "fura_zoact", "lora_zoact"):
             blob = torch.load(cfg["calib_path"], map_location="cpu", weights_only=False)
             calib = blob["layers"]
 
@@ -659,7 +678,31 @@ class StructuredESMixin:
                 n_coef += coef.numel()
                 n_base += p.numel()
 
-            elif mode == "fura":
+            elif mode == "lora_zoact":
+                # `lora`'s update with a calibrated A instead of a random one.  Same
+                # coefficient layout, so every kernel below stays on the "lora" path.
+                r = int(cfg.get("lora_rank", 1))
+                v = calib[_es_calib_key(name)]["v"]
+                if v.shape[0] < r:
+                    raise ValueError(
+                        f"{name}: calibration has rank {v.shape[0]} < lora_rank {r}; "
+                        "re-run scripts/es/calibrate_activations.py with --rank"
+                    )
+                coef = torch.zeros(r * (in_f + out_f), dtype=torch.float32, device=p.device)
+                coef[: r * in_f].copy_(v[:r].reshape(-1).to(p.device, torch.float32))
+                self._es[name] = {
+                    "kind": "lora",
+                    "base": p.data.detach().clone(),
+                    "coef": coef,
+                    "r": r,
+                    "in_f": in_f,
+                    "out_f": out_f,
+                    "lora_s": float(cfg.get("lora_scale", 1.0)),
+                }
+                n_coef += coef.numel()
+                n_base += p.numel()
+
+            elif mode in ("fura", "fura_zoact"):
                 n_blk, b = _es_closest_factor_pair(in_f)
                 if cfg.get("swap_blocks", False):
                     n_blk, b = b, n_blk
@@ -668,16 +711,43 @@ class StructuredESMixin:
                 A = (U * S.unsqueeze(1)).to(p.dtype).contiguous()  # (n, out, b)
                 R = Vh.float().contiguous()  # (n, b, b)
                 del w, U, S, Vh
-                self._es[name] = {
-                    "kind": "fura",
-                    "A": A,
-                    "R0": R,
-                    "coef": torch.zeros_like(R),
-                    "n_blk": n_blk,
-                    "b": b,
-                }
-                n_coef += R.numel()
-                n_base += A.numel()
+                if mode == "fura":
+                    self._es[name] = {
+                        "kind": "fura",
+                        "A": A,
+                        "R0": R,
+                        "coef": torch.zeros_like(R),
+                        "n_blk": n_blk,
+                        "b": b,
+                    }
+                    n_coef += R.numel()
+                    n_base += A.numel()
+                else:
+                    # Column i of W sits at (block i//b, position i%b) -- the same layout
+                    # as the reshape above -- so the calibrated basis splits blockwise the
+                    # same way.  V_j is a *slice* of a unit-norm row, not itself unit-norm:
+                    # blocks carrying more activation energy get a proportionally larger
+                    # perturbation, which is the point.
+                    v = calib[_es_calib_key(name)]["v"]
+                    r = int(cfg.get("rank", v.shape[0]))
+                    if v.shape[0] < r:
+                        raise ValueError(
+                            f"{name}: calibration has rank {v.shape[0]} < subspace_rank {r}; "
+                            "re-run scripts/es/calibrate_activations.py with --rank"
+                        )
+                    V = v[:r].to(p.device, torch.float32)
+                    V = V.reshape(r, n_blk, b).permute(1, 0, 2).contiguous()  # (n, r, b)
+                    self._es[name] = {
+                        "kind": "fura_zoact",
+                        "A": A,
+                        "R0": R,
+                        "V": V,
+                        "coef": torch.zeros(n_blk, b, r, dtype=torch.float32, device=p.device),
+                        "n_blk": n_blk,
+                        "b": b,
+                    }
+                    n_coef += n_blk * b * r
+                    n_base += A.numel() + R.numel()
                 # Overwrite W with its exact BTT reconstruction so step 0 is consistent.
                 self._es_write(name, p, self._es[name], None, 0.0)
             else:
@@ -893,7 +963,7 @@ class StructuredESMixin:
             shape = st["coef"].shape
         elif kind == "insparse":
             shape = st["coef"].shape
-        else:  # fura
+        else:  # fura / fura_zoact / lora
             shape = st["coef"].shape
         return torch.randn(shape, dtype=torch.float32, device=p.device, generator=gen)
 
@@ -924,13 +994,18 @@ class StructuredESMixin:
             p.data.copy_(delta)
             del delta
             return
-        # fura: W[:, blk_j] = A_j @ (R0_j + coef_j + scale*noise_j)
-        R = st["R0"] + st["coef"] if noise is None else torch.add(
-            st["R0"] + st["coef"], noise, alpha=scale
-        )
         prev = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = False  # TF32 mantissa < ES step size
         try:
+            if kind == "fura_zoact":
+                # W[:, blk_j] = A_j @ (R0_j + (coef_j + scale*noise_j) @ V_j)
+                c = st["coef"] if noise is None else torch.add(st["coef"], noise, alpha=scale)
+                R = torch.baddbmm(st["R0"], c, st["V"])  # (n, b, b)
+            else:
+                # fura: W[:, blk_j] = A_j @ (R0_j + coef_j + scale*noise_j)
+                R = st["R0"] + st["coef"] if noise is None else torch.add(
+                    st["R0"] + st["coef"], noise, alpha=scale
+                )
             w = torch.bmm(st["A"].float(), R)  # (n, out, b)
         finally:
             torch.backends.cuda.matmul.allow_tf32 = prev

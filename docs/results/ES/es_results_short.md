@@ -1,0 +1,194 @@
+# ES on math reasoning — short version
+
+> Forward-only Evolution Strategies fine-tuning of **Qwen2.5-Math-7B** on **MATH lvl 3–5**,
+> scored greedy on **MATH-500**. Ten perturbation subspaces, all at ≤1.9% of the weights,
+> compared at population **N=30** and **N=10**.
+> Full write-up with derivations, gates and failure logs: [es_results.md](es_results.md).
+> wandb `ES-q2p5-7b` · code `verl/verl/trainer/es/`, `scripts/es/`
+
+## The one-line result
+
+**All ~21 pp of gain is singular-frame rotation, and the subspace barely matters — step
+size does.** Six of eight N=30 arms land inside 0.86 pp of each other (per-eval SE 2.24 pp)
+from between 0.018% and 100% of the parameters. What moves an arm 5–13 pp is its step size,
+not which subspace it lives in.
+
+**And the step size is set by `train/reward_std`, not by weight-space footprint.** Every
+config that works sits in **0.040–0.055**; below ~0.035 it crawls, above ~0.09 it degrades —
+while footprint spans **200×** across the working configs and orders nothing. Three
+iterations measure it; a screen costs 2.7 h. That single rule replaces every per-subspace σ
+sweep on this page and is what tuned both new arms
+([§17.1](es_results.md#171-σ-is-set-by-trainreward_std-not-by-weight-space-footprint)).
+
+## Methods
+
+Every additive mode writes `W = W_base + P(C)`; ES perturbs and updates the coefficients
+`C` (fp32), never `W`.
+
+| Method | Idea in one line | Trainable | % of 7.6 B |
+|---|---|---|---|
+| `dense` | Paper baseline — perturb every parameter. | 7,615,616,512 | 100% |
+| `zoact r=1` | Freeze the update's row space to the **top-1 calibrated activation direction** (one forward pass); only the `out`-side coefficient is free. | 1,390,592 | 0.018% |
+| `insparse d=1%` | Same idea in the **canonical** basis: keep the top-1% input channels by activation RMS (Wanda/AWQ criterion). The ablation of `zoact` — does the *direction* matter, or just hitting big channels? | 65,415,168 | 0.86% |
+| `fura` | Block-wise full-rank SVD (BTT). Freeze the large core `A = U·S`, perturb the small core `R = Vh`, so `ΔW[:, blk] = A ΔR`. | 97,771,520 | 1.28% |
+| `iso` | **Fixed spectrum**: multiplicative `W ← C_L W C_Rᵀ` with `C` orthogonal (Cayley step on a block-diagonal skew). Only the singular *frames* rotate; singular values are exactly frozen, no SVD or retraction needed. | 141,102,080 † | 1.85% |
+| `isobtt` | The same fixed-spectrum constraint applied per block of the BTT factorisation (`R_j ∈ O(b)`). | 48,470,016 † | 0.64% |
+| `lora r=44` | Standard LoRA adapter with ES training **both** factors from a **random** `A`. Rank 44 matches `fura`'s coefficient count exactly. | 97,771,520 | 1.28% |
+| `lora r=1` | Same, minimal rank — the designed control against `zoact r=1` (random+trained vs calibrated+frozen projection). | 2,222,080 | 0.029% |
+| `fura_zoact r=1` | **New.** Compose the two calibrated frames: `fura`'s frozen block-SVD output frame `A_j` *and* `zoact`'s calibrated input direction, `ΔW[:,blk_j] = A_j C_j V_j`. Both sides frozen; only `C_j` trains. | **831,488** | **0.011%** |
+| `lora_zoact r=1/44` | **New.** `lora` exactly — both factors ES-trained — but `A` is *initialised* to the top-r calibrated directions instead of a random Gaussian. Isolates *informed* from *frozen*. | 2,222,080 / 97,771,520 | 0.029% / 1.28% |
+
+† Not coefficient counts: the ISO perturbation is a group action, so this is the
+**dimension of the manifold ES searches per step**.
+
+## Leaderboard — N=30
+
+150 iterations, fixed 64-problem batch, greedy MATH-500. Ranked by **plateau = mean over
+steps ≥ 40** (the honest statistic; "best" is a max over 16 noisy evals, per-eval SE 2.24 pp).
+
+| # | Method | σ / α | Base | **Plateau (≥40)** | Best @ step | GPU-h |
+|---|---|---|---|---|---|---|
+| 1 | `fura` | 1.25e-2 / 6.25e-3 | 53.2 | **72.68 ± 0.90** | 74.0 @ 30 | 15.3 |
+| 2 | `iso` | 5e-2 / 2.5e-2 | 51.6 | **72.42 ± 0.78** | 74.0 @ 60 | 16.3 |
+| 3 | `insparse d=1%` | 1e-3 / 5e-4 | 51.6 | 72.07 ± 0.70 | 73.4 @ 80 | ~15 |
+| 4 | `isobtt` | 5e-2 / 2.5e-2 | 53.2 | 71.95 ± 0.94 | 73.4 @ 120 | ~15 |
+| 5 | `dense` (paper ES) | 1e-3 / 5e-4 | 51.6 | 71.82 ± 1.19 | 73.4 @ 40 | 14.8 |
+| 6 | `zoact r=1` | 1e-3 / 5e-4 | 51.6 | 70.50 ± 0.94 | 72.2 @ 130 | ~15 |
+| 7 | `lora r=44` | 1e-3 / 5e-3 | 51.6 | 67.95 ± 0.56 ‡ | 71.6 @ 150 | 15.1 |
+| 8 | `lora r=1` | 1e-3 / 5e-3 | 51.6 | 55.07 ± 0.65 ‡ | 58.6 @ 150 | 15.4 |
+
+`fura`/`isobtt` start from 53.2 rather than 51.6 (bf16 BTT reconstruction) — read their
+deltas against their own base.
+‡ The plateau statistic *understates* the LoRA arms: they are the only ones **still rising
+at step 150**, where every other arm is flat by 40. Both are also badly under-scaled
+(footprint 3.25e-3 / 3.84e-4 vs `fura`'s winning 5e-2), so a σ sweep is a prerequisite
+before reading them as a verdict on random-vs-structured projections.
+
+**Ranks 1–6 are one tie.** The only separable results are that rank-1 `zoact` is a little
+behind and the two LoRA arms are slow.
+
+## Leaderboard — N=10 (current)
+
+Best configuration per method, after the α/σ searches of
+[es_results.md §17](es_results.md#17-n10-as-the-default-step-size-search-two-calibrated-hybrids-and-what-actually-sets-σ).
+**σ and α are per-method** — matching them across methods is what §17 shows to be wrong.
+Ranked by plateau = mean over steps ≥ 40; per-eval SE 2.24 pp.
+
+| # | Method | σ / α | Base | **Plateau (≥40)** | Best @ step | iters | GPU-h | trainable |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `fura` | 1.25e-2 / 3.61e-3 | 53.2 | **73.17 ± 0.33** | **77.4 @ 30** | 150 | 5.1 | 1.28% |
+| 2 | `dense` | 1e-3 / **2.89e-4** | 51.6 | **72.68 ± 0.43** | 73.2 @ 50 | **80** | **2.8** | 100% |
+| 3 | **`fura_zoact` r=1** | 5e-2 / 1.44e-2 | 53.2 | **71.36 ± 0.64** | 73.0 @ 70 | **80** | **2.8** | **0.011%** |
+| 4 | `iso` | 5e-2 / 2.5e-2 | 51.6 | 71.05 ± 0.38 | 73.2 @ 50 | 150 | 5.6 | 1.85% |
+| 5 | `lora r=44` | 1.54e-2 / 4.44e-3 | 51.6 | 70.04 ± 0.48 ‡ | 71.2 @ 80 | 80 | 2.8 | 1.28% |
+| 6 | `zoact r=1` | 1e-3 / 2.89e-4 | 51.6 | 67.68 ± 0.72 ‡ | 70.0 @ 80 | 80 | 2.8 | 0.018% |
+| 7 | `lora r=1` | 2.2e-3 / 6.35e-3 | 51.6 | 63.76 ± 1.31 ‡ | 68.4 @ 80 | 80 | 2.8 | 0.029% |
+
+‡ still rising at the last eval — these are lower bounds, not plateaus.
+`fura`/`fura_zoact` start from 53.2 (bf16 BTT reconstruction); read their deltas against that.
+
+![MATH-500 curves, best N=10 config per method](figs/n10_convergence.png)
+
+**Convergence order:** `fura` and `dense` cross `dense` N=30's 71.82 at **step ~20 (0.7
+GPU-h vs 14.8)**; `fura_zoact` and `lora r=44` follow the same shape ~10 pp lower early and
+close most of the gap by 80; `zoact r=1` and `lora r=1` are slowest and neither has turned
+over. All arms cost 121 s/iteration, so iteration count *is* wall-clock here.
+
+**`fura_zoact` is the efficiency headline:** it matches the 150-iteration `zoact r=1` result
+from [§7](es_results.md#7-results) (70.50) and beats `lora r=44` — from **0.011% of the
+weights, 118× fewer coefficients than `lora r=44` and 40% fewer than `zoact r=1`**.
+
+### The step-size searches behind it
+
+Both are unimodal with a one-sided failure, and both are cheap at N=10 (2.8 GPU-h/point).
+
+| `dense` α | motion vs N=30 | plateau | | `lora r=44` σ | plateau |
+|---|---|---|---|---|---|
+| 1.5e-4 | 0.52× | 71.76 ± 0.31 | | 4e-3 | 64.68 ± 0.44 |
+| **2.89e-4** | **1.00×** | **72.68 ± 0.43** | | **1.5385e-2** | **70.04 ± 0.48** |
+| 5e-4 | 1.73× | 71.07 ± 0.42 | | 3e-2 | 68.28 ± 0.43 |
+| 1e-3 | 3.46× | 69.84 ± 0.84 | | 1.3e-1 | **dead** |
+
+**`dense` reproduces §16.4's α/√N rule exactly** — so the rule is not `fura`-specific, and
+[§16.3](es_results.md#163-reading)'s "N=10 costs `dense` −0.49 pp (ns)" was also the 1.73×
+overshoot: corrected, N=10 is **+0.86 pp over N=30 at 5.3× less compute**.
+
+⚠️ If the budget is ~10 iterations, take the *bigger* α — `dense` at α=1e-3 posts 73.0 by
+step 10 (0.34 GPU-h) before walking downhill. Best plateau and best transient differ.
+
+### Failures worth keeping
+
+| run | what happened |
+|---|---|
+| `lora r=1` σ=0.13 | `reward_mean = reward_std = 0.0`, **every member 0/64** from iteration 1 — the §17.2 quadratic cross term destroys the model. |
+| `lora_zoact r=44` σ=1.54e-2 | Same, at its `lora` twin's winning σ. |
+| `lora_zoact r=1` σ=2.2e-3, α=6.35e-3 | 66.2 @ 20 then a monotone slide to 38.8 — too-large step, not a plateau. |
+| `fura_zoact` σ=0.1 | `reward_std` 0.132 (≫0.09) → erratic, plateau 63.60. |
+
+The three `lora_zoact` rows are all the **same mistake**: σ was inherited from the matched
+`lora` arm. The arms match in ‖ΔW‖_F but not functionally — a random rank-r input subspace
+captures ~r/in of the activation energy (0.03% at r=1, 1.2% at r=44) while the calibrated
+top-r captures most of it, so the same σ is far too large. Re-tuning by `reward_std` probe:
+`lora_zoact r=1` at α/2 and α/4, `lora_zoact r=44` at a probe-picked σ — **both in flight**.
+
+## What to take away
+
+1. **Hold α/√N fixed when changing N** — not α. Confirmed independently on `fura`
+   ([§16.4](es_results.md#164-it-was-the-step-size--fura-at-n10-fully-recovers)) and `dense`
+   ([§17.4](es_results.md#174-dense-the-α-search-confirms-the-αn-rule-on-a-second-mode)),
+   both unimodal with the peak exactly at motion-matched α. With it, **N=10 is better *and*
+   5× cheaper**: `dense` 72.68 in **2.8 GPU-h** against 71.82 in 14.8.
+2. **Freezing the entire singular-value spectrum costs nothing**: `iso` +0.44 ± 0.31 pp and
+   `isobtt` −0.37 ± 0.48 pp vs dense ES. All the gain is frame rotation.
+3. **Step size dominates subspace — but tune σ by `reward_std`, not by footprint.**
+   `fura` moved −12.25 → +0.82 pp on σ alone. ⚠️ The "matched footprint" framing of
+   §10.4/§11.3/§11.4 rests on numbers measured on a 192×144 **fake** model; on real weights
+   `fura`'s winning σ is **3.4× `dense`'s** footprint, not matched
+   ([§17.1](es_results.md#171-σ-is-set-by-trainreward_std-not-by-weight-space-footprint)).
+4. **The rank-1 "calibrated beats learned by 15 pp" claim is retracted — it is ~4 pp.**
+   §15.6 compared a `zoact r=1` at its best against a `lora r=1` **8.7 pp below its own best
+   σ**, and quoted an "11× footprint confound" that was a fake-vs-real measurement mismatch
+   (really 1.2×). Like-for-like at N=10/80 it: `zoact r=1` **67.68** vs `lora r=1` **63.76**,
+   both still rising. Calibration still helps — it is worth roughly a **7× speedup** in
+   convergence (`lora_zoact r=1` reaches 65.0 by step 10 where random `A` needs ~70) — but it
+   is not a 15 pp accuracy gap.
+5. **Catastrophic forgetting does not reproduce** — not on MATH, and not on the paper's own
+   Countdown → HellaSwag pair. What orders forgetting is **‖ΔW‖_F**, not sparsity and not
+   the subspace.
+6. **The 64-problem fixed batch is the ceiling**, not the method: after step ~40 every arm
+   is flat within ±1.5 pp. With the official **resampled** batch, dense ES plateaus in ~10
+   iterations and the σ optimum is **2e-3–4e-3** (best 74.4 @ 15), not the paper's 1e-3.
+
+## Open items
+
+* Re-do the headline comparison on the aligned (resampled) protocol — §7's ranking was
+  measured on the memorising fixed batch.
+* `iso`'s N=10 −1.52 pp is suspect for the same reason `fura`'s was; the motion-matched
+  control (α = 1.443e-2) is not yet run.
+* ~~σ sweep for both LoRA arms~~ — **done**, [§17.5](es_results.md#175-lora-the-σ-search-and-rank-1-rescued-by-87-pp).
+* Four N=10 arms (`lora r=44`, `lora r=1`, `zoact r=1`, `fura_zoact`) are **still rising at
+  80 iterations** — the table's plateaus are lower bounds. Extend the best of each to 150.
+* `zoact r=1`'s `reward_std` at N=10 is 0.032, *below* the healthy band, so it is itself
+  under-tuned; σ between 1e-3 and the 1.2e-2 that overshot (std 0.112) is unexplored.
+* `lora_zoact` at both ranks needs its own σ/α (see the failure table); re-tuning in flight.
+* A second benchmark axis (AIME24, AMC23, Minerva, OlympiadBench) — six arms sit within
+  ±1 pp on MATH-500.
+* The BP (GRPO) leg is half-finished and scored on a **different metric** (mean@4 at T=1.0,
+  where the same base model reads 19.4 against 51.6 greedy), so it is not comparable to
+  anything above. See [es_results.md §13](es_results.md#13-bp-counterpart--fixed-spectrum-training-with-true-gradients).
+
+## Where the detail lives
+
+| Topic | Section of [es_results.md](es_results.md) |
+|---|---|
+| Paper setting, deviations, base-model check | §1–§4 |
+| Calibration, numerical health (bf16 floor) | §5–§6 |
+| Main six-arm result and curves | §7 |
+| ISO derivation (orbit form, Cayley, scale convention) | §10 |
+| FuRA LR search; σ-vs-α; matched-footprint comparison | §11 |
+| Alignment with the official implementation (resampled batch) | §12 |
+| BP counterpart | §13 |
+| Catastrophic forgetting (MATH + Countdown→HellaSwag) | §14 |
+| LoRA-ES | §15 |
+| Population size N=10 vs N=30 | §16 |
+| **What sets σ; the two calibrated hybrids; α/σ searches** | **§17** |
