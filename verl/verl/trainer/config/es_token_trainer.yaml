@@ -29,6 +29,8 @@ es_token:
   # decode driver (graphed packed; eager only as the parity oracle)
   attn_impl: rows                  # rows | shared | fold (rail-aware kernels, es_profile_results.md)
   lm_head_impl: full               # full | stream
+  rail_impl: kernel                # kernel | fused  (0902: rail op fused into norm/silu/rope, zero launches)
+  step_impl: eager                 # eager | graph   (0902: LM head + sampling + payload + advance inside the CUDA graph)
   use_cuda_graph: true
   pack_width: 4                    # B_pack per wave (KV ceiling, wiki §10.5/§11.3)
   b_pack_buckets: [2, 4]           # fixed CUDA-graph bucket widths

@@ -77,7 +77,7 @@ def _block_m(M):
 
 
 def lm_head_stream(x, w, clean_idx, ws=None, n_clean=None, block_v=128, block_k=64,
-                   num_warps=None, num_stages=3):
+                   num_warps=None, num_stages=3, compute_lse=True):
     """x [M, K] bf16 (all rows), w [V, K] bf16, clean_idx [M] int32 (row's index
     into the clean-logit buffer, -1 for rails). Returns (clean_logits [n_clean, V]
     fp32, lse [M] fp32, ws)."""
@@ -94,7 +94,8 @@ def lm_head_stream(x, w, clean_idx, ws=None, n_clean=None, block_v=128, block_k=
         x.stride(0), w.stride(0), ws.logits.stride(0), ws.mp.stride(0),
         BLOCK_M=BM, BLOCK_V=ws.block_v, BLOCK_K=block_k,
         num_warps=num_warps, num_stages=num_stages)
-    torch.logsumexp(ws.mp + torch.log(ws.sp), dim=1, out=ws.lse)
+    if compute_lse:   # the in-graph tail kernel folds this into its own launch
+        torch.logsumexp(ws.mp + torch.log(ws.sp), dim=1, out=ws.lse)
     return ws.logits, ws.lse, ws
 
 

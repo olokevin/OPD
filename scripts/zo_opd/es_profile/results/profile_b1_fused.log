@@ -1,0 +1,155 @@
+/home/yequan/miniconda3/envs/verl/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+INFO 09-02 15:54:49 [__init__.py:216] Automatically detected platform cuda.
+INFO 09-02 15:54:53 [utils.py:233] non-default args: {'dtype': 'bfloat16', 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.5, 'disable_log_stats': True, 'enforce_eager': True, 'worker_extension_cls': 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension', 'model': '/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e'}
+WARNING 09-02 15:54:53 [model.py:371] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 09-02 15:54:53 [model.py:547] Resolved architecture: Qwen3ForCausalLM
+`torch_dtype` is deprecated! Use `dtype` instead!
+INFO 09-02 15:54:53 [model.py:1510] Using max model len 40960
+INFO 09-02 15:54:53 [scheduler.py:205] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 09-02 15:54:53 [__init__.py:381] Cudagraph is disabled under eager mode
+INFO 09-02 15:54:54 [core.py:77] Initializing a V1 LLM engine (v0.11.0) with config: model='/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', speculative_config=None, tokenizer='/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e, enable_prefix_caching=False, chunked_prefill_enabled=True, pooler_config=None, compilation_config={"level":0,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":null,"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":[],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":0,"local_cache_dir":null}
+W0902 15:54:58.556000 3967646 site-packages/torch/utils/cpp_extension.py:2425] TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+W0902 15:54:58.556000 3967646 site-packages/torch/utils/cpp_extension.py:2425] If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'] to specific architectures.
+INFO 09-02 15:54:58 [worker_base.py:243] Injected <class 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_ensure_np_state', '_es_alloc_graph_step', '_es_build_attn_meta', '_es_capture_step_packed', '_es_decode_graph_step', '_es_eager_step_packed', '_es_fill_noise', '_es_install_fused_consumers', '_es_install_state', '_es_refresh_kv_pages', '_es_replay_step_packed', '_es_sigma_eff', '_es_step_body', '_es_update_step_buffers', '_np_build_attn_metadata', '_np_build_attn_metadata_packed', '_np_build_attn_metadata_packed_persistent', '_np_build_attn_metadata_persistent', '_np_capture_step', '_np_capture_step_packed', '_np_commit_clean', '_np_fill_u_buf', '_np_fill_u_buf_all_layers', '_np_fill_u_buf_all_layers_packed', '_np_is_eos', '_np_prefill', '_np_prefill_packed', '_np_replay_step', '_np_replay_step_packed', '_np_run_forward', '_np_sample_clean', '_np_slot_for_position', '_np_step_forward', '_np_step_forward_graph', '_np_step_forward_packed', '_run_np_decode_all_layers', '_topk_store', 'apply_node_update', 'assemble_all_layers_and_apply', 'assemble_and_apply', 'broadcast_layer_weights', 'es_assemble_and_apply', 'es_export_weights', 'es_reset_graphs', 'get_worker_ip', 'init_inter_engine_group', 'install_es_layers', 'install_perturb_layers', 'last_changed_frac', 'layer_weight_norm', 'run_es_decode_packed', 'run_np_decode', 'run_np_decode_graphed', 'run_np_decode_packed', 'run_np_decode_packed_graphed']
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 09-02 15:54:59 [parallel_state.py:1208] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+WARNING 09-02 15:54:59 [topk_topp_sampler.py:59] FlashInfer is available, but it is not enabled. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please set VLLM_USE_FLASHINFER_SAMPLER=1.
+INFO 09-02 15:54:59 [gpu_model_runner.py:2602] Starting to load model /data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e...
+INFO 09-02 15:54:59 [gpu_model_runner.py:2634] Loading model from scratch...
+INFO 09-02 15:54:59 [cuda.py:325] Using Flash Attention backend on V1 engine.
+Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:00<00:00,  1.93it/s]
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:00<00:00,  3.86it/s]
+
+INFO 09-02 15:55:00 [default_loader.py:267] Loading weights took 0.72 seconds
+INFO 09-02 15:55:01 [gpu_model_runner.py:2653] Model loading took 3.2152 GiB and 0.860597 seconds
+INFO 09-02 15:55:02 [gpu_worker.py:298] Available KV cache memory: 37.59 GiB
+INFO 09-02 15:55:02 [kv_cache_utils.py:1087] GPU KV cache size: 351,888 tokens
+INFO 09-02 15:55:02 [kv_cache_utils.py:1091] Maximum concurrency for 40,960 tokens per request: 8.59x
+2026-09-02 15:55:02,628 - INFO - autotuner.py:256 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-09-02 15:55:02,750 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process ends
+All deep_gemm operations loaded successfully!
+WARNING 09-02 15:55:02 [cudagraph_dispatcher.py:106] cudagraph dispatching keys are not initialized. No cudagraph will be used.
+INFO 09-02 15:55:04 [core.py:210] init engine (profile, create kv cache, warmup model) took 3.00 seconds
+INFO 09-02 15:55:04 [llm.py:306] Supported_tasks: ('generate',)
+[cfg] matched_layers=112 Bs=[1] Ns=[0, 8, 32, 128] paths=[('rows', 'full', 'kernel', 'eager'), ('fold', 'stream', 'kernel', 'eager'), ('seq', 'stream', 'fused', 'eager'), ('seq', 'stream', 'fused', 'graph')] L=512
+[prof B=1 N=0 rows/full] total=2.599 ms/step  noise=0.005  attn=0.520  gemm=1.442  norm=0.313  act=0.112  rope=0.094  elementwise=0.112
+         0.911  nvjet_tst_64x8_64x16_4x1_v_bz_TNT
+         0.294  nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+         0.255  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.176  nvjet_tst_384x8_64x4_2x1_v_bz_TNT
+         0.170  std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,
+         0.143  void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1
+[prof B=1 N=8 rows/full] total=3.514 ms/step  rail_op=0.454  noise=0.005  attn=0.718  gemm=1.495  norm=0.307  act=0.113  rope=0.089  elementwise=0.331
+         0.514  nvjet_tst_64x16_64x16_4x1_v_bz_TNT
+         0.454  _rail_fused
+         0.449  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.303  nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT
+         0.247  nvjet_tst_64x8_64x16_1x2_h_bz_TNT
+         0.190  nvjet_tst_64x8_64x16_4x2_v_bz_TNT
+[prof B=1 N=32 rows/full] total=3.858 ms/step  rail_op=0.466  noise=0.005  attn=0.885  gemm=1.536  norm=0.320  act=0.121  rope=0.094  elementwise=0.431
+         0.647  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.532  nvjet_tst_128x40_64x10_4x1_v_bz_TNT
+         0.466  _rail_fused
+         0.312  nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT
+         0.243  nvjet_tst_64x40_64x16_4x1_v_bz_TNT
+         0.197  nvjet_tst_64x24_64x16_4x2_v_bz_TNT
+[prof B=1 N=128 rows/full] total=6.285 ms/step  rail_op=0.540  noise=0.005  attn=2.496  gemm=1.788  norm=0.379  act=0.123  rope=0.101  elementwise=0.852
+         2.224  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.581  nvjet_tst_192x72_64x6_1x2_h_bz_TNT
+         0.540  _rail_fused
+         0.353  nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT
+         0.298  nvjet_tst_64x72_64x12_2x1_v_bz_TNT
+         0.240  nvjet_tst_128x136_64x6_2x1_v_bz_TNT
+[prof B=1 N=0 fold/stream] total=2.668 ms/step  noise=0.005  attn=0.525  lm_head_stream=0.190  gemm=1.263  norm=0.312  act=0.115  rope=0.095  elementwise=0.162
+         0.909  nvjet_tst_64x8_64x16_4x1_v_bz_TNT
+         0.297  nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+         0.255  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.190  _lm_head_stream
+         0.170  std::enable_if<(((8)>(0)))&&vllm::_typeConvert<c10::BFloat16>::exists,
+         0.142  void vllm::rms_norm_kernel<c10::BFloat16>(c10::BFloat16*, c10::BFloat1
+[prof B=1 N=8 fold/stream] total=3.477 ms/step  rail_op=0.449  noise=0.005  attn=0.535  lm_head_stream=0.188  gemm=1.310  norm=0.308  act=0.114  rope=0.093  elementwise=0.476
+         0.512  nvjet_tst_64x16_64x16_4x1_v_bz_TNT
+         0.449  _rail_fused
+         0.364  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp
+         0.304  nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT
+         0.259  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.246  nvjet_tst_64x8_64x16_1x2_h_bz_TNT
+[prof B=1 N=32 fold/stream] total=3.712 ms/step  rail_op=0.468  noise=0.005  attn=0.612  lm_head_stream=0.191  gemm=1.359  norm=0.321  act=0.120  rope=0.095  elementwise=0.543
+         0.540  nvjet_tst_128x40_64x10_4x1_v_bz_TNT
+         0.468  _rail_fused
+         0.378  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp
+         0.323  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.314  nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT
+         0.241  nvjet_tst_64x40_64x16_4x1_v_bz_TNT
+[prof B=1 N=128 fold/stream] total=4.665 ms/step  rail_op=0.542  noise=0.005  attn=0.712  lm_head_stream=0.425  gemm=1.569  norm=0.383  act=0.123  rope=0.100  elementwise=0.805
+         0.611  nvjet_tst_192x72_64x6_1x2_h_bz_TNT
+         0.542  _rail_fused
+         0.425  _lm_head_stream
+         0.407  void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp
+         0.356  nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT
+         0.354  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+[prof B=1 N=0 seq/stream/fused/eager] total=2.403 ms/step  fused_norm=0.140  fused_qkv=0.082  fused_silu=0.118  noise=0.005  attn=0.521  lm_head_stream=0.190  gemm=1.263  norm=0.003  act=0.001  elementwise=0.080
+         0.910  nvjet_tst_64x8_64x16_4x1_v_bz_TNT
+         0.293  nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+         0.242  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.190  _lm_head_stream
+         0.140  _norm_rail_kernel
+         0.118  _silu_mul_rail_kernel
+[prof B=1 N=8 seq/stream/fused/eager] total=2.753 ms/step  fused_norm=0.278  fused_qkv=0.124  fused_silu=0.188  noise=0.005  attn=0.543  lm_head_stream=0.188  gemm=1.316  norm=0.003  act=0.000  elementwise=0.108
+         0.515  nvjet_tst_64x16_64x16_4x1_v_bz_TNT
+         0.304  nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT
+         0.278  _norm_rail_kernel
+         0.252  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.246  nvjet_tst_64x8_64x16_1x2_h_bz_TNT
+         0.192  nvjet_tst_64x8_64x16_4x2_v_bz_TNT
+[prof B=1 N=32 seq/stream/fused/eager] total=2.944 ms/step  fused_norm=0.281  fused_qkv=0.127  fused_silu=0.191  noise=0.005  attn=0.624  lm_head_stream=0.191  gemm=1.362  norm=0.003  rope=0.000  elementwise=0.162
+         0.536  nvjet_tst_128x40_64x10_4x1_v_bz_TNT
+         0.312  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.312  nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT
+         0.281  _norm_rail_kernel
+         0.241  nvjet_tst_64x40_64x16_4x1_v_bz_TNT
+         0.202  nvjet_tst_64x24_64x16_4x2_v_bz_TNT
+[prof B=1 N=128 seq/stream/fused/eager] total=3.799 ms/step  fused_norm=0.325  fused_qkv=0.136  fused_silu=0.207  noise=0.005  attn=0.729  lm_head_stream=0.422  gemm=1.573  norm=0.004  elementwise=0.398
+         0.604  nvjet_tst_192x72_64x6_1x2_h_bz_TNT
+         0.422  _lm_head_stream
+         0.358  nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT
+         0.344  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.325  _norm_rail_kernel
+         0.299  nvjet_tst_64x72_64x12_2x1_v_bz_TNT
+[prof B=1 N=0 seq/stream/fused/graph] total=2.344 ms/step  fused_norm=0.144  fused_qkv=0.077  fused_silu=0.116  lm_tail=0.006  advance=0.004  noise=0.005  attn=0.526  lm_head_stream=0.187  gemm=1.258  norm=0.004  act=0.000  rope=0.000  elementwise=0.016
+         0.905  nvjet_tst_64x8_64x16_4x1_v_bz_TNT
+         0.296  nvjet_tst_64x8_64x16_2x1_v_bz_splitK_TNT
+         0.242  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.187  _lm_head_stream
+         0.144  _norm_rail_kernel
+         0.116  _silu_mul_rail_kernel
+[prof B=1 N=8 seq/stream/fused/graph] total=2.692 ms/step  fused_norm=0.277  fused_qkv=0.126  fused_silu=0.189  lm_tail=0.007  advance=0.004  noise=0.005  attn=0.550  lm_head_stream=0.185  gemm=1.326  norm=0.003  elementwise=0.019
+         0.516  nvjet_tst_64x16_64x16_4x1_v_bz_TNT
+         0.305  nvjet_tst_64x16_64x16_2x1_v_bz_splitK_TNT
+         0.277  _norm_rail_kernel
+         0.248  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.246  nvjet_tst_64x8_64x16_1x2_h_bz_TNT
+         0.198  nvjet_tst_64x8_64x16_4x2_v_bz_TNT
+[prof B=1 N=32 seq/stream/fused/graph] total=2.824 ms/step  fused_norm=0.280  fused_qkv=0.127  fused_silu=0.191  lm_tail=0.007  advance=0.004  noise=0.006  attn=0.634  lm_head_stream=0.191  gemm=1.362  norm=0.004  act=0.000  elementwise=0.019
+         0.538  nvjet_tst_128x40_64x10_4x1_v_bz_TNT
+         0.312  nvjet_tst_64x40_64x16_2x1_v_bz_splitK_TNT
+         0.308  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.280  _norm_rail_kernel
+         0.240  nvjet_tst_64x40_64x16_4x1_v_bz_TNT
+         0.202  nvjet_tst_64x24_64x16_4x2_v_bz_TNT
+[prof B=1 N=128 seq/stream/fused/graph] total=3.419 ms/step  fused_norm=0.322  fused_qkv=0.137  fused_silu=0.206  lm_tail=0.008  advance=0.004  noise=0.006  attn=0.727  lm_head_stream=0.420  gemm=1.573  norm=0.004  act=0.000  rope=0.000  elementwise=0.012
+         0.604  nvjet_tst_192x72_64x6_1x2_h_bz_TNT
+         0.420  _lm_head_stream
+         0.357  nvjet_tst_64x136_64x8_2x1_v_bz_splitK_TNT
+         0.350  void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt
+         0.322  _norm_rail_kernel
+         0.299  nvjet_tst_64x72_64x12_2x1_v_bz_TNT
+[saved] /home/yequan/Project/compression/OPD-estoken/scripts/zo_opd/es_profile/results/phase5_profile_b1_fused.json
+[rank0]:[W902 15:56:13.586958977 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

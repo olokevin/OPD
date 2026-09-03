@@ -242,6 +242,30 @@ def rail_attention_fold(q, key_cache, value_cache, block_table, seq_lens, sm_sca
     return out
 
 
+def rail_attention_seq(q, key_cache, value_cache, block_table, seq_lens, sm_scale,
+                       max_seqlen_k, out=None, fa_version=3, cu_seqlens_q=None):
+    """The fold's KV reuse with NO permute and no custom kernel: one FA request
+    per slot with seqlen_q = R and causal=False, so all R rail rows attend the
+    slot's full seqused_k history (which already holds the clean current
+    token's K/V). FA3's GQA packing puts the R*G query rows of a KV head in one
+    M tile, i.e. each KV tile is read once per slot. q [B, R, Hq, D] with any
+    row/rail strides (D contiguous) -- the qkv split view is used as is."""
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    B, R, Hq, D = q.shape
+    if out is None:
+        out = torch.empty_like(q)
+    if cu_seqlens_q is None:
+        cu_seqlens_q = torch.arange(B + 1, dtype=torch.int32, device=q.device) * R
+    if not seq_lens.is_contiguous():
+        seq_lens = seq_lens.contiguous()
+    flash_attn_varlen_func(
+        q=q.view(B * R, Hq, D), k=key_cache, v=value_cache, out=out.view(B * R, Hq, D),
+        cu_seqlens_q=cu_seqlens_q, max_seqlen_q=R, seqused_k=seq_lens,
+        max_seqlen_k=max_seqlen_k, softmax_scale=sm_scale, causal=False,
+        block_table=block_table, fa_version=fa_version)
+    return out
+
+
 def rail_attention_rows(q, key_cache, value_cache, block_table_rows, seq_lens_rows,
                         sm_scale, max_seqlen_k, out=None, fa_version=3, cu_seqlens_q=None):
     """The shipping path: every rail row is its own FA request (KV re-read per

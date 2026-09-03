@@ -1016,3 +1016,14 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   tokens). Time parity with BP (329 s) => N=2. Launched ds15b_es-prefill_b256_N2_sig1e-3_a4.4e-4
   (plain sampling, mean baseline; alpha keeps the 0.58%/step footprint). es_update gained
   `algorithm.es_antithetic=False` (one eval per rail).
+
+## [2026-09-02] ingest | es_token 0902 fused kernels: zero-launch rail + non-causal seq attention + in-graph token step (B=1 decode ≤ stock vLLM up to 16 rails)
+
+- Built behind `es_cfg` flags (`rail_impl=fused`, `attn_impl=seq`, `step_impl=graph`) in
+  `verl/trainer/es_token/fused_rail_kernels.py` + `es_token_worker_extension.py`; gates
+  `check_fused_kernels.py` (kernel-level, bit-exact) and `check_fused_path.py` (G1–G5, all pass).
+- Measured on GPU 4 only (user rule): B=1 sweep N=0…384 (`phase5_b1_fused.json`), kernel audit,
+  one-prompt step series for shipping vs fused (`es_b1_step_*.tsv`), BP batch-1 reference
+  (`bp_b1.json`). Figure `figs/es_profile_b1_fused.png`. Results in es_profile_results.md §11–14.
+- Two launcher lessons: the trainer hangs on the decode after an eval (run step timings with
+  `EVAL_INTERVAL=0`); `timeout` does not reap the trainer's python (kill by GPU PID).

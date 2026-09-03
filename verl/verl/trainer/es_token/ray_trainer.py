@@ -283,6 +283,8 @@ class RayESTokenTrainer(RayNPTrainer):
             # rail-aware kernels (es_profile_results.md): rows = shipping path
             attn_impl=str(cfg.get("attn_impl", "rows")),
             lm_head_impl=str(cfg.get("lm_head_impl", "full")),
+            rail_impl=str(cfg.get("rail_impl", "kernel")),
+            step_impl=str(cfg.get("step_impl", "eager")),
         )
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643
