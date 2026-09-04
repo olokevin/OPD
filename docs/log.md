@@ -1033,3 +1033,32 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   arm consistent with the turnover law. Checkpoints + eval dumps kept; wandb es_opd_JustRL_1p5b.
 
 ## [2026-09-03] ingest | es-token-decode: fused Qwen2 relaunch (640s/step) + exact top-K loss arm built, gated, launched (lr 3e-3, GPU 2)
+
+## [2026-09-03] ingest | The leaderboard re-run on the paper-aligned data protocol
+
+`es_results.md` §19 + a new top leaderboard in `es_results_short.md`. Every earlier ES number
+was measured on ONE FIXED 64-problem batch, never refreshed (16x smaller than the official
+`--batch-size 1024`, resampled never) -- so the ranking was open to the charge that it ranked
+which method memorises 64 problems best. Re-ran the four best arms with **batch 1024 resampled
+every iteration from the full 8,890 pool, 100 iterations, N=10**, each keeping its own best
+(sigma, alpha); only the data protocol changed. ~15 GPU-h/arm on GPUs 6/7.
+
+**The ranking survives unchanged** and every arm gains: `fura` 73.89 (+0.72) > `dense` 72.83
+(+0.15) > `fura_zoact` 72.46 (+1.10, from 0.011% of the weights) > `lora r=44` 71.23 (+0.55).
+Adjacent gaps are inside noise; the reproducible *order* is the result.
+
+* **The memorisation ceiling is real and now gone** -- 3 of 4 arms peak at step 90-100 and are
+  still rising, where every fixed-batch arm was flat by 40. Plateaus are lower bounds.
+* **`lora r=44` is the exception and now DECLINES** (73.0 @ 50 -> 69.0 @ 100): its alpha was
+  chosen on the fixed batch and is over-stepped here. Needs its own search on this protocol.
+* ⚠️ **§17.1's `reward_std` band does not transfer across batch size.** At batch 1024 the same
+  sigma gives 0.44x the batch-64 spread (consistent across all four arms -- more than the 0.25x
+  pure 1/sqrt(B) predicts, so part of the spread is real signal). Healthy band here is
+  **0.016-0.024**, not 0.040-0.055. Quote the band with its batch size.
+* **Gotcha:** `TRAIN_MAX_SAMPLES=-1` is required, else the pool truncates to 64 and the guard
+  `train_batch_size < len(train_data)` makes resampling **silently** fall back to fixed batch.
+
+`isobtt` (fura + ISO, small core only, spectrum exactly preserved) and `lora r=1` running.
+New launcher `scripts/es/chain_aligned_pop10.sh`.
+
+## [2026-09-04] ingest | topk CE arm: entropy-collapse negative result (68->54.2 @40, CE -36%) -> loss fixed to truncated reverse KL, relaunched (topk16rkl); fused sampled arm 75.2 @40

@@ -21,10 +21,20 @@ estimates exactly this objective's gradient): no importance weight, no +1 score 
 single-token sampling noise — the same top-K objective BP-OPD trains (`LOG_PROB_TOP_K=16`).
 Teacher `log q` at arbitrary ids comes from a new eager HF teacher (vLLM `prompt_logprobs`
 can't do it); gates: HF-vs-vLLM max|d| 0.12 (bf16 kernel noise), in-run K-gather consistency
-7.6e-6, teacher cost ~1 s/step. Running as
-`ds15b_es-token-decode_N32_sig1e-3_lr3e-3_topk16`. If the exact estimator still shows the
-one-jump-then-creep of the sampled-token arms, the es-token-decode direction is closed on
-information grounds, not estimator quality. Results pending.
+7.6e-6, teacher cost ~1 s/step. Launched at lr 3e-3, recalibrated to lr 2.2e-2 by step-0 footprint.
+
+**First result (2026-09-04): the truncated CE was the wrong objective — and the rails proved
+it by optimizing it.** At footprint 5.5e-3/step the CE fell 36 % in 40 steps (0.822 → 0.530,
+far beyond random walk — the exact estimator moves coherently) while greedy MATH-500 fell
+68.0 → 60.0 → 54.2 and responses shortened 15 %. Diagnosis: `−Σ_k π(k)·log q(k)` is **linear
+in π**, so its optimum is a delta on the teacher argmax — the arm was collapsing entropy, not
+distilling. Fixed by adding the `π·log π` term (the payload already holds `log π` at the K
+ids): the loss is now the truncated **reverse KL** `Σ_k π(k)(log π(k) − log q(k))`. Relaunched
+as `..._topk16rkl`. Meanwhile the fused sampled-token arm (lr 9e-3, footprint 5.7e-3) runs
+68.0 → 71.6 @20 → **75.2 @40** on the same ruler — the strongest es-token-decode curve so far.
+Two learnings either way: the per-token exact estimator has enough signal-to-noise to *steer*
+(the CE run moved fast and monotonically — in the objective's own direction), and objective
+curvature (KL vs linear CE) matters more than estimator variance at this footprint.
 
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 
