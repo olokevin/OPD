@@ -65,12 +65,14 @@ if HAVE_TRITON:
                           off_u, off_v, d_in, width,
                           sy, sres, sx, snoise, ssign, eps,
                           HAS_RAIL: tl.constexpr, HAS_RES: tl.constexpr,
-                          H: tl.constexpr, BLOCK_IN: tl.constexpr):
+                          H: tl.constexpr, BLOCK_IN: tl.constexpr,
+                          HP: tl.constexpr = None):
         """[rail on Y] -> RES += Y -> Y = rmsnorm(RES) * W   (in place, like
         vLLM's fused_add_rms_norm). HAS_RES=False: plain rms_norm of Y."""
         row = tl.program_id(0)
-        idx = tl.arange(0, H)
-        y = tl.load(Y + row * sy + idx).to(tl.float32)
+        idx = tl.arange(0, HP)
+        hm = idx < H
+        y = tl.load(Y + row * sy + idx, mask=hm, other=0.0).to(tl.float32)
         if HAS_RAIL:
             slot = row // width
             rail = row % width - 1
@@ -84,20 +86,20 @@ if HAVE_TRITON:
                     r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
                     acc += tl.sum(x * v * r, axis=0)
                 a = acc * tl.load(SIGMA).to(tl.float32)
-                u = tl.load(NOISE + slot * snoise + off_u + idx).to(tl.float32)
-                s = tl.load(SIGNS + rail * ssign + off_u + idx).to(tl.float32)
+                u = tl.load(NOISE + slot * snoise + off_u + idx, mask=hm, other=0.0).to(tl.float32)
+                s = tl.load(SIGNS + rail * ssign + off_u + idx, mask=hm, other=0.0).to(tl.float32)
                 y = (y + a * u * s).to(Y.dtype.element_ty).to(tl.float32)
         if HAS_RES:
-            res = tl.load(RES + row * sres + idx).to(tl.float32)
+            res = tl.load(RES + row * sres + idx, mask=hm, other=0.0).to(tl.float32)
             z = (y + res).to(Y.dtype.element_ty).to(tl.float32)
-            tl.store(RES + row * sres + idx, z.to(RES.dtype.element_ty))
+            tl.store(RES + row * sres + idx, z.to(RES.dtype.element_ty), mask=hm)
         else:
             z = y
         var = tl.sum(z * z, axis=0) / H
         inv = tl.rsqrt(var + eps)
-        w = tl.load(W + idx).to(tl.float32)
+        w = tl.load(W + idx, mask=hm, other=0.0).to(tl.float32)
         out = ((z * inv).to(Y.dtype.element_ty).to(tl.float32) * w).to(Y.dtype.element_ty)
-        tl.store(Y + row * sy + idx, out)
+        tl.store(Y + row * sy + idx, out, mask=hm)
 
     @triton.jit
     def _qkv_rail_norm_rope_kernel(QKV, X, NOISE, SIGNS, SIGMA, QW, KW, CS, POS,
@@ -105,24 +107,29 @@ if HAVE_TRITON:
                                    sq, sx, snoise, ssign, scs, eps,
                                    HAS_RAIL: tl.constexpr, HQ: tl.constexpr,
                                    HKV: tl.constexpr, D: tl.constexpr,
-                                   BLOCK_IN: tl.constexpr):
+                                   BLOCK_IN: tl.constexpr,
+                                   HAS_NORM: tl.constexpr = True,
+                                   HQP: tl.constexpr = None,
+                                   HKVP: tl.constexpr = None):
         """[rail on the qkv row] -> per-head RMSNorm of q and k -> neox RoPE at
         POS[row], all in place in QKV. v is left alone: a perturbed v of a rail
         row is never cached (slot -1) and clean rows have a = 0."""
         row = tl.program_id(0)
         HD: tl.constexpr = D // 2
-        hq = tl.arange(0, HQ)
-        hk = tl.arange(0, HKV)
+        hq = tl.arange(0, HQP)
+        hk = tl.arange(0, HKVP)
+        mq = (hq < HQ)[:, None]
+        mk = (hk < HKV)[:, None]
         dh = tl.arange(0, HD)
         base = QKV + row * sq
         q1o = hq[:, None] * D + dh[None, :]
         q2o = q1o + HD
         k1o = HQ * D + hk[:, None] * D + dh[None, :]
         k2o = k1o + HD
-        q1 = tl.load(base + q1o).to(tl.float32)
-        q2 = tl.load(base + q2o).to(tl.float32)
-        k1 = tl.load(base + k1o).to(tl.float32)
-        k2 = tl.load(base + k2o).to(tl.float32)
+        q1 = tl.load(base + q1o, mask=mq, other=0.0).to(tl.float32)
+        q2 = tl.load(base + q2o, mask=mq, other=0.0).to(tl.float32)
+        k1 = tl.load(base + k1o, mask=mk, other=0.0).to(tl.float32)
+        k2 = tl.load(base + k2o, mask=mk, other=0.0).to(tl.float32)
         if HAS_RAIL:
             slot = row // width
             rail = row % width - 1
@@ -138,29 +145,34 @@ if HAVE_TRITON:
                 a = acc * tl.load(SIGMA).to(tl.float32)
                 nb = NOISE + slot * snoise + off_u
                 sb = SIGNS + rail * ssign + off_u
-                q1 = (q1 + a * tl.load(nb + q1o).to(tl.float32) * tl.load(sb + q1o).to(tl.float32)
+                q1 = (q1 + a * tl.load(nb + q1o, mask=mq, other=0.0).to(tl.float32)
+                      * tl.load(sb + q1o, mask=mq, other=0.0).to(tl.float32)
                       ).to(QKV.dtype.element_ty).to(tl.float32)
-                q2 = (q2 + a * tl.load(nb + q2o).to(tl.float32) * tl.load(sb + q2o).to(tl.float32)
+                q2 = (q2 + a * tl.load(nb + q2o, mask=mq, other=0.0).to(tl.float32)
+                      * tl.load(sb + q2o, mask=mq, other=0.0).to(tl.float32)
                       ).to(QKV.dtype.element_ty).to(tl.float32)
-                k1 = (k1 + a * tl.load(nb + k1o).to(tl.float32) * tl.load(sb + k1o).to(tl.float32)
+                k1 = (k1 + a * tl.load(nb + k1o, mask=mk, other=0.0).to(tl.float32)
+                      * tl.load(sb + k1o, mask=mk, other=0.0).to(tl.float32)
                       ).to(QKV.dtype.element_ty).to(tl.float32)
-                k2 = (k2 + a * tl.load(nb + k2o).to(tl.float32) * tl.load(sb + k2o).to(tl.float32)
+                k2 = (k2 + a * tl.load(nb + k2o, mask=mk, other=0.0).to(tl.float32)
+                      * tl.load(sb + k2o, mask=mk, other=0.0).to(tl.float32)
                       ).to(QKV.dtype.element_ty).to(tl.float32)
-        # per-head RMSNorm (vLLM rms_norm on [rows*heads, D])
-        qw1 = tl.load(QW + dh).to(tl.float32)
-        qw2 = tl.load(QW + HD + dh).to(tl.float32)
-        kw1 = tl.load(KW + dh).to(tl.float32)
-        kw2 = tl.load(KW + HD + dh).to(tl.float32)
-        iq = tl.rsqrt((tl.sum(q1 * q1, axis=1) + tl.sum(q2 * q2, axis=1)) / D + eps)
-        ik = tl.rsqrt((tl.sum(k1 * k1, axis=1) + tl.sum(k2 * k2, axis=1)) / D + eps)
-        q1 = ((q1 * iq[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * qw1[None, :]
-              ).to(QKV.dtype.element_ty).to(tl.float32)
-        q2 = ((q2 * iq[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * qw2[None, :]
-              ).to(QKV.dtype.element_ty).to(tl.float32)
-        k1 = ((k1 * ik[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * kw1[None, :]
-              ).to(QKV.dtype.element_ty).to(tl.float32)
-        k2 = ((k2 * ik[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * kw2[None, :]
-              ).to(QKV.dtype.element_ty).to(tl.float32)
+        # per-head RMSNorm (vLLM rms_norm on [rows*heads, D]); Qwen2 has no q/k norm
+        if HAS_NORM:
+            qw1 = tl.load(QW + dh).to(tl.float32)
+            qw2 = tl.load(QW + HD + dh).to(tl.float32)
+            kw1 = tl.load(KW + dh).to(tl.float32)
+            kw2 = tl.load(KW + HD + dh).to(tl.float32)
+            iq = tl.rsqrt((tl.sum(q1 * q1, axis=1) + tl.sum(q2 * q2, axis=1)) / D + eps)
+            ik = tl.rsqrt((tl.sum(k1 * k1, axis=1) + tl.sum(k2 * k2, axis=1)) / D + eps)
+            q1 = ((q1 * iq[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * qw1[None, :]
+                  ).to(QKV.dtype.element_ty).to(tl.float32)
+            q2 = ((q2 * iq[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * qw2[None, :]
+                  ).to(QKV.dtype.element_ty).to(tl.float32)
+            k1 = ((k1 * ik[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * kw1[None, :]
+                  ).to(QKV.dtype.element_ty).to(tl.float32)
+            k2 = ((k2 * ik[:, None]).to(QKV.dtype.element_ty).to(tl.float32) * kw2[None, :]
+                  ).to(QKV.dtype.element_ty).to(tl.float32)
         # neox RoPE with vLLM's bf16 arithmetic order
         pos = tl.load(POS + row)
         cos = tl.load(CS + pos * scs + dh).to(tl.float32)
@@ -168,12 +180,12 @@ if HAVE_TRITON:
         T = QKV.dtype.element_ty
         o1 = ((q1 * cos[None, :]).to(T).to(tl.float32) - (q2 * sin[None, :]).to(T).to(tl.float32)).to(T)
         o2 = ((q2 * cos[None, :]).to(T).to(tl.float32) + (q1 * sin[None, :]).to(T).to(tl.float32)).to(T)
-        tl.store(base + q1o, o1)
-        tl.store(base + q2o, o2)
+        tl.store(base + q1o, o1, mask=mq)
+        tl.store(base + q2o, o2, mask=mq)
         o1 = ((k1 * cos[None, :]).to(T).to(tl.float32) - (k2 * sin[None, :]).to(T).to(tl.float32)).to(T)
         o2 = ((k2 * cos[None, :]).to(T).to(tl.float32) + (k1 * sin[None, :]).to(T).to(tl.float32)).to(T)
-        tl.store(base + k1o, o1)
-        tl.store(base + k2o, o2)
+        tl.store(base + k1o, o1, mask=mk)
+        tl.store(base + k2o, o2, mask=mk)
 
     @triton.jit
     def _silu_mul_rail_kernel(GU, OUT, X, NOISE, SIGNS, SIGMA,
@@ -348,7 +360,8 @@ def norm_rail(y, residual, weight, eps, rail=None, num_warps=None):
             y, residual if residual is not None else z, weight, z, z, z, z,
             0, 0, 0, 1, y.stride(0), residual.stride(0) if residual is not None else 0,
             0, 0, 0, eps, HAS_RAIL=False, HAS_RES=residual is not None,
-            H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps)
+            H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
+            HP=triton.next_power_of_2(H))
     else:
         _norm_rail_kernel[(R,)](
             y, residual if residual is not None else _null(dev), weight,
@@ -357,12 +370,13 @@ def norm_rail(y, residual, weight, eps, rail=None, num_warps=None):
             y.stride(0), residual.stride(0) if residual is not None else 0,
             rail.x.stride(0), rail.noise.stride(0), rail.signs.stride(0), eps,
             HAS_RAIL=True, HAS_RES=residual is not None,
-            H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps)
+            H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
+            HP=triton.next_power_of_2(H))
     return y, residual
 
 
 def qkv_rail_norm_rope(qkv, positions, q_weight, k_weight, eps, cos_sin, hq, hkv, d,
-                       rail=None, num_warps=None):
+                       rail=None, num_warps=None, has_norm=None):
     """In place on qkv [rows, (hq+2*hkv)*d]: rail, q/k per-head RMSNorm, RoPE.
     enable_fp_fusion=False: vLLM's RoPE rounds x*cos and y*sin to bf16 before
     combining; an FMA would skip one rounding (measured 18% ulp mismatches)."""
@@ -371,12 +385,18 @@ def qkv_rail_norm_rope(qkv, positions, q_weight, k_weight, eps, cos_sin, hq, hkv
     dev = qkv.device
     num_warps = num_warps or _WARPS
     z = _null(dev)
+    if has_norm is None:
+        has_norm = q_weight is not None
+    if not has_norm:
+        q_weight = k_weight = z
+        eps = 0.0
     if rail is None:
         _qkv_rail_norm_rope_kernel[(R,)](
             qkv, z, z, z, z, q_weight, k_weight, cos_sin, positions,
             0, 0, 0, 1, qkv.stride(0), 0, 0, 0, cos_sin.stride(0), eps,
             HAS_RAIL=False, HQ=hq, HKV=hkv, D=d, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
-            enable_fp_fusion=False)
+            HAS_NORM=bool(has_norm), HQP=triton.next_power_of_2(hq),
+            HKVP=triton.next_power_of_2(hkv), enable_fp_fusion=False)
     else:
         _qkv_rail_norm_rope_kernel[(R,)](
             qkv, rail.x, rail.noise, rail.signs, rail.sigma, q_weight, k_weight,
@@ -386,7 +406,8 @@ def qkv_rail_norm_rope(qkv, positions, q_weight, k_weight, eps, cos_sin, hq, hkv
             cos_sin.stride(0), eps,
             HAS_RAIL=True, HQ=hq, HKV=hkv, D=d,
             BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
-            enable_fp_fusion=False)
+            HAS_NORM=bool(has_norm), HQP=triton.next_power_of_2(hq),
+            HKVP=triton.next_power_of_2(hkv), enable_fp_fusion=False)
     return qkv
 
 

@@ -51,6 +51,21 @@ def sampled_token_losses(
     return losses, clean
 
 
+def topk_rail_losses(
+    topk_payload: torch.Tensor,   # [T, 1+N, K] student logprobs at the clean
+                                  #             rail's top-K ids (col 0 = clean)
+    teacher_logq_k: torch.Tensor, # [T, K] teacher logprobs at the SAME ids
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Exact top-K truncated cross-entropy per rail (loss_impl=topk):
+    l_{n,t} = -sum_k pi_n(k) * log q(k) over the clean rail's top-K ids.
+    No IW and no +1 score term -- the K id set is FIXED across rails (the
+    clean rail's top-K), so the rail FD difference estimates exactly the
+    gradient of this truncated CE. Returns (losses [T, N], clean_loss [T])."""
+    p = topk_payload.float().exp()                             # [T, 1+N, K]
+    ce = -(p * teacher_logq_k.float()[:, None, :]).sum(-1)     # [T, 1+N]
+    return ce[:, 1:], ce[:, 0]
+
+
 def rail_scales(
     losses: torch.Tensor,       # [T, N]
     clean_loss: torch.Tensor,   # [T]

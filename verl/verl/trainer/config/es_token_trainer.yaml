@@ -17,6 +17,12 @@ es_token:
   grad_estimate_sample: mean_baseline  # mean_baseline | clean_baseline
   reward_weight_mode: student_iw       # student_iw | student_p | none (DEGENERATE)
   iw_clamp: 10.0
+  loss_impl: sampled                   # sampled (logq at the sampled token, vLLM
+                                       # teacher) | topk (exact top-K truncated CE
+                                       # on the clean rail's top-K ids, HF teacher;
+                                       # no IW / no +1 term)
+  topk_k: 16                           # K for loss_impl=topk
+  teacher_topk_chunk: 512              # HF teacher lm_head position-chunk
   top_p: 1.0                           # 1.0 = historical (no top-p). 0.95 matches
                                        # BP's rollout + every eval (zo_opd.md 12.6)
   use_generation_config_eos: false     # true also stops on 151643 (zo_opd.md 12.6)

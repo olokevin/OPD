@@ -22,7 +22,8 @@ from tqdm import tqdm
 from vllm import SamplingParams
 
 from verl.trainer.es_token.grad_estimator import (rail_scales,
-                                                  sampled_token_losses)
+                                                  sampled_token_losses,
+                                                  topk_rail_losses)
 from verl.trainer.np.ray_trainer import RayNPTrainer
 from verl.utils.tracking import Tracking
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
@@ -67,6 +68,64 @@ class SampledTokenTeacher:
         return out
 
 
+class TopKTeacherHF:
+    """Eager HF teacher for loss_impl=topk: log q at ARBITRARY per-token id
+    sets (vLLM prompt_logprobs can only return the teacher's own top-k, not
+    the student's clean top-K). One bf16 forward per rollout on the training
+    GPU; lm_head + log_softmax run in position chunks so the [chunk, V] fp32
+    logits stay bounded (~300 MB at chunk=512)."""
+
+    def __init__(self, model_path, temperature, device="cuda", chunk=512):
+        from transformers import AutoModelForCausalLM
+        self.temp = float(temperature)
+        self.chunk = int(chunk)
+        self.device = device
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path, torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2")
+        except Exception as e:
+            print(f"[topk-teacher] flash_attention_2 unavailable ({e}); sdpa")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path, torch_dtype=torch.bfloat16,
+                attn_implementation="sdpa")
+        self.model = self.model.to(device).eval()
+
+    @torch.no_grad()
+    def logq_topk(self, fulls, resp_lens, topk_ids):
+        """fulls[i] = prompt+response ids; topk_ids[i] = [T_i, K] int ids.
+        Returns [tensor [T_i, K] fp32] of teacher logprobs at those ids."""
+        out = []
+        for full, T, kids in zip(fulls, resp_lens, topk_ids):
+            T = int(T)
+            if T == 0:
+                out.append(torch.zeros(0, 0))
+                continue
+            ids = torch.tensor([list(full)], dtype=torch.long,
+                               device=self.device)
+            h = self.model.model(input_ids=ids).last_hidden_state[0]
+            hs = h[-T - 1:-1]                        # predicts fulls[-T:]
+            kid = kids.to(self.device).long()        # [T, K]
+            lq = torch.empty(T, kid.shape[1], dtype=torch.float32)
+            for s in range(0, T, self.chunk):
+                e = min(T, s + self.chunk)
+                lg = self.model.lm_head(hs[s:e]).float()
+                if self.temp != 1.0:
+                    lg = lg / self.temp
+                lsm = lg - torch.logsumexp(lg, dim=-1, keepdim=True)
+                lq[s:e] = lsm.gather(1, kid[s:e]).cpu()
+            out.append(lq)
+        return out
+
+    def logq_wave(self, fulls, resp_lens):
+        """Sampled-token logq (K=1 gather) -- keeps the held-out probe's
+        clean reverse-KL metric identical to the SampledTokenTeacher arms."""
+        kids = [torch.tensor(f[-int(T):], dtype=torch.long).view(-1, 1)
+                if int(T) > 0 else torch.zeros(0, 1, dtype=torch.long)
+                for f, T in zip(fulls, resp_lens)]
+        return [lq[:, 0] for lq in self.logq_topk(fulls, resp_lens, kids)]
+
+
 class RayESTokenTrainer(RayNPTrainer):
     def __init__(self, config: DictConfig, tokenizer, reward_fn,
                  val_reward_fn=None, train_data=None, eval_data=None,
@@ -103,11 +162,20 @@ class RayESTokenTrainer(RayNPTrainer):
         teacher_path = self.es.teacher_model_path
         if not teacher_path:
             raise ValueError("es_token requires es_token.teacher_model_path")
-        print(f"Launching teacher engine ({teacher_path})...")
-        self._launch_teacher_engine(teacher_path)
-        self.teacher = SampledTokenTeacher(
-            self.teacher_engine, self.es.teacher_temperature,
-            self.es.get("teacher_batch_size", 16))
+        if str(self.es.get("loss_impl", "sampled")) == "topk":
+            # No vLLM teacher engine: top-K scoring needs logprobs at
+            # arbitrary ids, which prompt_logprobs cannot return. The HF
+            # teacher (~3.5 GB bf16) rides on the freed engine fraction.
+            print(f"Loading HF top-K teacher ({teacher_path})...")
+            self.teacher = TopKTeacherHF(
+                teacher_path, self.es.teacher_temperature,
+                chunk=int(self.es.get("teacher_topk_chunk", 512)))
+        else:
+            print(f"Launching teacher engine ({teacher_path})...")
+            self._launch_teacher_engine(teacher_path)
+            self.teacher = SampledTokenTeacher(
+                self.teacher_engine, self.es.teacher_temperature,
+                self.es.get("teacher_batch_size", 16))
         print("Workers initialized successfully.")
 
     # ---------------------------------------------------------- checkpoint ---
@@ -285,6 +353,10 @@ class RayESTokenTrainer(RayNPTrainer):
             lm_head_impl=str(cfg.get("lm_head_impl", "full")),
             rail_impl=str(cfg.get("rail_impl", "kernel")),
             step_impl=str(cfg.get("step_impl", "eager")),
+            # loss_impl=topk: the worker also returns the clean top-K ids and
+            # per-rail logprobs at them (run_es_decode_packed).
+            topk_k=(int(cfg.get("topk_k", 16))
+                    if str(cfg.get("loss_impl", "sampled")) == "topk" else 0),
         )
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643
@@ -312,6 +384,7 @@ class RayESTokenTrainer(RayNPTrainer):
         batch_size = int(cfg.get("batch_size", 1))
         pack_width = int(cfg.get("pack_width", 4))
         n_rails = int(cfg.n_sample)
+        loss_impl = str(cfg.get("loss_impl", "sampled"))
         weight_mode = cfg.get("reward_weight_mode", "student_iw")
         iw_clamp = cfg.get("iw_clamp", 10.0)
         scale_mode = cfg.get("grad_estimate_sample", "mean_baseline")
@@ -332,6 +405,7 @@ class RayESTokenTrainer(RayNPTrainer):
             # ---- Phase 1: graphed packed rail decode --------------------- #
             t_dec0 = time.time()
             roll_pids, roll_rids, roll_toks, roll_payload = [], [], [], []
+            roll_tp, roll_tids = [], []
             for wi, (wave_pids, wave_rids, real_count) in enumerate(waves):
                 if ES_DEBUG:
                     print(f"[esdbg s{step} wave {wi} real={real_count}] decode",
@@ -350,6 +424,9 @@ class RayESTokenTrainer(RayNPTrainer):
                     roll_rids.append(int(wave_rids[i]))
                     roll_toks.append(list(out["clean_tokens"][i]))
                     roll_payload.append(out["payload"][i])
+                    if loss_impl == "topk":
+                        roll_tp.append(out["topk_payload"][i])
+                        roll_tids.append(out["topk_ids"][i])
             decode_s = time.time() - t_dec0
 
             if not roll_toks:
@@ -361,7 +438,10 @@ class RayESTokenTrainer(RayNPTrainer):
             t_tch0 = time.time()
             fulls = [list(p) + t for p, t in zip(roll_pids, roll_toks)]
             lens = [len(t) for t in roll_toks]
-            logqs = self.teacher.logq_wave(fulls, lens)
+            if loss_impl == "topk":
+                logqs = self.teacher.logq_topk(fulls, lens, roll_tids)
+            else:
+                logqs = self.teacher.logq_wave(fulls, lens)
             teacher_s = time.time() - t_tch0
 
             # ---- Phase 3: losses -> scales -> assemble+apply ------------- #
@@ -370,9 +450,23 @@ class RayESTokenTrainer(RayNPTrainer):
             rec_t: List[int] = []
             rec_scales: List[torch.Tensor] = []
             clean_means: List[float] = []
-            for rid, payload, logq in zip(roll_rids, roll_payload, logqs):
-                losses, clean = sampled_token_losses(
-                    payload, logq, weight_mode, iw_clamp)
+            for ri, (rid, payload, logq) in enumerate(
+                    zip(roll_rids, roll_payload, logqs)):
+                if loss_impl == "topk":
+                    if ES_DEBUG and ri == 0:
+                        # gate: where the sampled token IS in the K set, the
+                        # clean rail's K-gather must equal payload col 0.
+                        _hit = (roll_tids[ri].long()
+                                == torch.tensor(roll_toks[ri])[:, None])
+                        if _hit.any():
+                            _err = (roll_tp[ri][:, 0, :][_hit]
+                                    - payload[:, 0][_hit.any(1)]).abs().max()
+                            print(f"[esdbg topk] clean-token K-gather "
+                                  f"max|d|={float(_err):.3e}", flush=True)
+                    losses, clean = topk_rail_losses(roll_tp[ri], logq)
+                else:
+                    losses, clean = sampled_token_losses(
+                        payload, logq, weight_mode, iw_clamp)
                 # RAW rail differences; the 1/sigma_l is applied per layer in
                 # the worker assemble (sigma_mode=relative stays unbiased).
                 sc = rail_scales(losses, clean, 1.0, scale_mode)   # [T, N]

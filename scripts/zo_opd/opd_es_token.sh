@@ -23,6 +23,8 @@ export HYDRA_FULL_ERROR=1
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
 export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
 export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
+# loss_impl=topk: HF teacher matmuls in the driver under use_deterministic_algorithms
+export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
 export HF_HOME=${HF_HOME:-/data/yequan/huggingface}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2}
 export NP_KEEP_CUDA_VISIBLE=${NP_KEEP_CUDA_VISIBLE:-1}
@@ -111,6 +113,8 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.teacher_max_model_len=${TEACHER_MAX_MODEL_LEN} \
     es_token.temperature=${TEMPERATURE} es_token.max_tokens=${MAX_RESP_LENGTH} \
     es_token.top_p=${ES_TOP_P} \
+    es_token.loss_impl=${ES_LOSS_IMPL:-sampled} \
+    es_token.topk_k=${ES_TOPK_K:-16} \
     es_token.use_generation_config_eos=${ES_EOS_FROM_GENCFG} \
     es_token.max_prompt_length=${MAX_PROMPT_LENGTH} \
     es_token.num_engines=${NUM_ENGINES} \

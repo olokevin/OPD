@@ -262,8 +262,13 @@ def _es_attn_forward(self, positions, hidden_states):
     rope = self.rotary_emb
     if rope.cos_sin_cache.dtype != qkv.dtype or rope.cos_sin_cache.device != qkv.device:
         rope._match_cos_sin_cache_dtype(qkv)
-    qkv_rail_norm_rope(qkv, positions, self.q_norm.weight.data, self.k_norm.weight.data,
-                       self.q_norm.variance_epsilon, rope.cos_sin_cache,
+    qn = getattr(self, "q_norm", None)
+    kn = getattr(self, "k_norm", None)
+    qkv_rail_norm_rope(qkv, positions,
+                       qn.weight.data if qn is not None else None,
+                       kn.weight.data if kn is not None else None,
+                       qn.variance_epsilon if qn is not None else 0.0,
+                       rope.cos_sin_cache,
                        self.num_heads, self.num_kv_heads, self.head_dim,
                        _es_rail_args(st, self._es_producer))
     q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -371,6 +376,13 @@ class WorkerExtension(NPWorkerExtension):
         except Exception:  # pragma: no cover
             self._es_fused_consumers = set()
             return
+        # Qwen2 (DeepSeek-R1-Distill): same decoder graph without q/k norm; the qkv
+        # consumer kernel runs with HAS_NORM=False.
+        try:
+            from vllm.model_executor.models.qwen2 import Qwen2Attention
+            _ATTN_CLASSES = (Qwen3Attention, Qwen2Attention)
+        except Exception:  # pragma: no cover
+            _ATTN_CLASSES = (Qwen3Attention,)
         st_ref = lambda: self.np_state
         consumers = set()
 
@@ -392,7 +404,7 @@ class WorkerExtension(NPWorkerExtension):
         n = 0
         for i, layer in enumerate(layers):
             attn = getattr(layer, "self_attn", None)
-            if not (isinstance(attn, Qwen3Attention)
+            if not (isinstance(attn, _ATTN_CLASSES)
                     and isinstance(layer.input_layernorm, RMSNorm)
                     and isinstance(layer.post_attention_layernorm, RMSNorm)
                     and isinstance(layer.mlp.act_fn, SiluAndMul)
@@ -1063,6 +1075,8 @@ class WorkerExtension(NPWorkerExtension):
             top_p = float(es_cfg.get("top_p", 1.0) or 1.0)
             assert lm_impl == "stream", "step_impl=graph needs lm_head_impl=stream"
             assert top_p >= 1.0, "step_impl=graph: top-p sampling is not in-graph (use step_impl=eager)"
+            assert int(es_cfg.get("topk_k", 0) or 0) == 0, \
+                "loss_impl=topk needs step_impl=eager"
             return self._es_decode_graph_step(
                 model, device, states, B, bucket, n_sample, es_cfg, sampling_params,
                 slot_rollout_ids, max_seq_len_cap, sigma_eff, attn_impl, rail_impl,
@@ -1129,6 +1143,14 @@ class WorkerExtension(NPWorkerExtension):
         clean_row_idx = rs["clean_row_idx"]
         payload_buf = torch.zeros(bucket * width, max_tokens, device=device,
                                   dtype=torch.float32)
+        # Exact top-K rail loss (loss_impl=topk): also record the clean rail's
+        # top-K token ids and EVERY rail's logprob at those K ids.
+        topk_k = int(es_cfg.get("topk_k", 0) or 0)
+        if topk_k > 0:
+            topk_ids_buf = torch.zeros(bucket, max_tokens, topk_k,
+                                       dtype=torch.int32, device=device)
+            topk_buf = torch.zeros(bucket * width, max_tokens, topk_k,
+                                   dtype=torch.float32, device=device)
         clean_tokens = [[] for _ in range(B)]
         temp = float(getattr(sampling_params, "temperature", 0.0) or 0.0)
         top_p = float(es_cfg.get("top_p", 1.0) or 1.0)
@@ -1192,6 +1214,21 @@ class WorkerExtension(NPWorkerExtension):
                 else:
                     tok_logp = logits_f.gather(1, chosen[:, None])[:, 0] - lse
                 payload_buf[:, t] = tok_logp
+                if topk_k > 0:
+                    # Clean rail's top-K ids (pre-temperature logits: same
+                    # ranking); per-row gather-dot in fp32, numerics matching
+                    # lm_head_gather_logit (x.float() . w.float()).
+                    kids = clean_logits.topk(topk_k, dim=-1).indices
+                    topk_ids_buf[:, t] = kids.to(torch.int32)
+                    kids_R = kids.repeat_interleave(width, dim=0)   # [R, K]
+                    if lm_impl == "stream":
+                        wk = W_lm.index_select(0, kids_R.reshape(-1)).view(
+                            -1, topk_k, W_lm.shape[1])              # [R, K, d]
+                        lk = torch.einsum("rd,rkd->rk", hidden.float(),
+                                          wk.float())
+                    else:
+                        lk = logits_f.gather(1, kids_R)
+                    topk_buf[:, t] = lk - lse[:, None]
                 if prof_lm:
                     ev1.record()
                     ev1.synchronize()
@@ -1219,7 +1256,19 @@ class WorkerExtension(NPWorkerExtension):
             T_p = len(clean_tokens[p])
             block = payload_cpu[p * width:(p + 1) * width, :T_p]  # [1+N, T_p]
             payload.append(block.t().contiguous())                # [T_p, 1+N]
-        return {"clean_tokens": clean_tokens, "payload": payload}
+        res = {"clean_tokens": clean_tokens, "payload": payload}
+        if topk_k > 0:
+            tp_cpu = topk_buf.to("cpu")
+            ti_cpu = topk_ids_buf.to("cpu")
+            topk_payload, topk_ids = [], []
+            for p in range(B):
+                T_p = len(clean_tokens[p])
+                blk = tp_cpu[p * width:(p + 1) * width, :T_p]  # [1+N, T_p, K]
+                topk_payload.append(blk.permute(1, 0, 2).contiguous())
+                topk_ids.append(ti_cpu[p, :T_p].clone())       # [T_p, K]
+            res["topk_payload"] = topk_payload                 # [T_p, 1+N, K]
+            res["topk_ids"] = topk_ids
+        return res
 
     # -------------------------------------------------------------- export ---
     def es_export_weights(self):
