@@ -1016,3 +1016,20 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   tokens). Time parity with BP (329 s) => N=2. Launched ds15b_es-prefill_b256_N2_sig1e-3_a4.4e-4
   (plain sampling, mean baseline; alpha keeps the 0.58%/step footprint). es_update gained
   `algorithm.es_antithetic=False` (one eval per rail).
+
+## [2026-09-02] ingest | b256/N=2 arm killed at 15 steps; relaunched as 64 prompts x n=1, N=16
+
+- The equal-wall-clock arm (256 seqs, N=2) ran 15 steps: 294-341 s/step (parity with BP confirmed),
+  train KL 0.278 -> 0.262 vs BP's 0.176 at the same step on identical batches (~6x slower) -- killed
+  on the user's call. Relaunched `ds15b_es-prefill_b64n1_N16_sig1e-3_a1.25e-3`: 64 distinct prompts
+  x n=1 (64 seqs/step), N=16 plain sampling (mean baseline), footprint 0.58%/step, 300 steps,
+  expected ~210 s/step.
+
+## [2026-09-03] ingest | arm F (es-prefill b64n1 N16 plain) completed: full-curve budget-law confirmation
+
+- Ran its full epoch (279 steps, ~16.9 h). MATH-500@7168 curve: 0.751 -> 0.81 band by step 40 ->
+  drift to 0.825 @220 -> decline 0.802/0.798 @240/260 starting at ~9% cumulative displacement.
+  Pins the model's soft displacement budget at ~9-10% of RMS(W) (sigma-probe agreement); fourth
+  arm consistent with the turnover law. Checkpoints + eval dumps kept; wandb es_opd_JustRL_1p5b.
+
+## [2026-09-03] ingest | es-token-decode: fused Qwen2 relaunch (640s/step) + exact top-K loss arm built, gated, launched (lr 3e-3, GPU 2)

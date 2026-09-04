@@ -504,8 +504,26 @@ resume — add the 1.9 % accumulated before. Eval decompositions: `scripts/zo_op
 Full N-scaling tables (64-seq and 256-seq batches) and the algorithm boxes:
 [zo_opd_short.md](zo_opd_short.md). At BP's own 256-seq batch the profiled law is
 `step(N) ≈ 260 + 32·N s`, so time-parity with BP allows only **N ≈ 2** — the equal-cost ES gets
-one or two probes per step (run `ds15b_es-prefill_b256_N2_*`, non-antithetic, launched
-2026-09-02).
+one or two probes per step. **Arm F** (`ds15b_es-prefill_b64n1_N16`: 64 *distinct* prompts × n=1,
+N=16 plain sampling, footprint 0.58 %/step, ~205 s/step) reproduces the antithetic n=4 arms:
+MATH-500 0.751 → 0.794 @20 → 0.809 @40 → 0.811 @60 → 0.806 @80 → 0.815 @100 → 0.820 @120 → 0.824 @140 → 0.816 @160 → 0.824 @180 → 0.817 @200 → 0.825 @220 → **0.802 @240 → 0.798 @260** —
+two consecutive reads below the band, beginning exactly as the displacement crosses ~9 %: the
+decline is now beyond single-eval noise. F held ~0.82 ± 0.01 from step 100 to 220, then turned
+over — pinning this model's *soft* budget at **~9–10 % of RMS(W)**, right where the σ-probe's KL
+rise went super-quadratic. Fourth arm consistent with the displacement-budget law. **F finished at step 279** (epoch end,
+2026-09-03 08:17; ~16.9 h, ~197 s/step median): peak 0.825 @220, last eval 0.798 @260 at 9.4 %
+displacement; checkpoints `global_step_20…260` and eval dumps kept. It is the completed reference
+run for the es-prefill recipe (64 distinct prompts × n=1, N=16 plain sampling, footprint 0.58 %/step), matching C's peak region without a collapse:
+the same band as the earlier arms, and neither prompt diversity (64 vs 16 distinct) nor
+antithetic-vs-plain sampling changes the picture. One refinement to the turnover reading: F is
+still creeping up past its 5 % displacement crossing (6.4 % at step 120) — on this model the
+budget is soft (the σ-probe found no cliff before ~10 %), so the sharp version of
+`S* = (5 %/footprint)²` fits the high-footprint arms (D′ collapse @~20, C stall @~60) while
+low-footprint arms keep converting slowly toward ~10 %. The N=2 run
+was killed at step 15 (train KL 0.262 vs BP's 0.176 on
+identical batches — ~6× slower at time parity, as the budget law predicts) and replaced by
+`ds15b_es-prefill_b64n1_N16_*`: 64 *distinct* prompts × n=1, N=16 plain sampling, footprint
+0.58 %/step.
 
 Even with the rail-aware kernels, the per-token decode machinery costs **2.2× es-prefill per
 sequence** for the same N and the same (actually weaker: detached-history) information — the §4
@@ -551,6 +569,43 @@ greedy ruler is generous to any perturbation on this model (+4 pp after a single
 update), so the standing plan is the standard-ruler offline eval (n = 2 @ T = 0.6 + the
 length/truncation decomposition) on the final checkpoints; `es_coef_best.pt` (full bf16 weights,
 saved on each new best) guarantees the es-rl side is evaluable.
+
+**0902-kernel portability on this model** (found relaunching es-token-decode, 2026-09-03): of the
+new kernel generation (`9a4521e`), `attn_impl=seq` and `lm_head_impl=stream` work on
+Qwen2/R1-Distill, but **`rail_impl=fused` is Qwen3-only** (it fuses the rail into the q/k-norm +
+RoPE consumer chain, which Qwen2 — no q/k-norm, qkv biases — does not have; clean assert) and
+**`step_impl=graph` requires `top_p=1.0`** (top-p sampling is not in-graph; we keep 0.95 for BP
+parity → `eager`). Two Qwen2 ports were then made (2026-09-03): the fused qkv consumer gained a
+`HAS_NORM` constexpr (Qwen2 has no q/k-norm) and `Qwen2Attention` is accepted in consumer
+discovery; and a genuine kernel bug surfaced — `tl.arange(0, HQ)` requires a power of two and
+**Qwen2-1.5B has 12 query heads** (Qwen3's 16 masked it) — fixed by padding the head ranges with
+masked loads/stores (a second non-pow2 site, `H=1536` in the norm-rail kernel, needed the same
+treatment). **Gated on Qwen2**: all three fused kernels are bit-exact (max|d| = 0.0) against the
+reference bf16 arithmetic at Qwen2 dims; G3 graphed≡eager and G5 EOS pass bit-for-bit; the
+trajectory-level G1/G4 divergences are the documented bf16-chaos yardstick (gotcha 3), not bugs.
+The fused rail is ~28 % faster on decode than the separate rail op in the smoke. The ds15b
+launcher runs `seq / stream / fused / eager`; training relaunched 2026-09-03 (lr 9e-3, N=32).
+
+**Fused relaunch + the exact top-K loss arm (2026-09-03).** The fused-kernel es-token-decode
+relaunch (`ds15b_es-token-decode_N32_sig1e-3_lr9e-3`, GPU 1) is running: step 0 = **640 s**
+(decode 353 + assemble 272) vs 746 s with the separate Triton rail op (−14 %), footprint
+5.6e-3 ✓, greedy eval@0 68.0 (this trainer's in-run ruler). In parallel, a new loss was built to
+answer "can es-token-decode *learn*": **`loss_impl=topk`** — per token the worker also records
+the clean rail's top-16 ids and every rail's logprob at those ids (fp32 gather-dot vs the
+streaming head's LSE; payload `[T, 1+N, 16]`), a new HF bf16 teacher (`TopKTeacherHF`) scores
+`log q` at those exact ids (vLLM `prompt_logprobs` cannot return arbitrary ids; the HF teacher
+replaces the vLLM teacher engine), and the rail loss becomes the truncated CE
+`ℓ_{n,t} = −Σ_k π_n(k)·log q(k)` over the **fixed** clean top-K set — no importance weight, no
++1 score term, i.e. none of the §2 variance leaks; the rail FD then estimates exactly the
+gradient of the same top-K objective BP-OPD trains (`LOG_PROB_TOP_K=16, only_stu`). Gated:
+HF-vs-vLLM teacher max|d| = 0.12 (bf16 kernel noise, no positional off-by-one) and in-run
+clean-token K-gather consistency max|d| = 7.6e-6; smoke teacher cost 0.6–1.5 s/step. Launched as
+`ds15b_es-token-decode_N32_sig1e-3_lr3e-3_topk16` (GPU 2; lr 3e-3 ≈ footprint-6e-3 first guess —
+the topk CE produced ~2.7× larger rail scales than the sampled-token loss in the smoke). Two
+env gotchas found: standalone vLLM scripts need the launchers' `VLLM_USE_FLASHINFER_SAMPLER=0`
+guard (flashinfer JIT ninja-build crash), and the HF teacher under the trainer's
+`use_deterministic_algorithms(True)` needs `CUBLAS_WORKSPACE_CONFIG=:4096:8` (now exported by
+`opd_es_token.sh`).
 
 ## 8. Next steps / where rails could still pay
 

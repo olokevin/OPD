@@ -5,6 +5,27 @@
 > Student `Qwen/Qwen3-1.7B` (non-thinking) ← teacher `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`,
 > DAPO-Math-17k, MATH-500 greedy n=1 as the ruler (**base = 73.60 ± 1.97**).
 
+## 2026-09-03 — es-token-decode: fused Qwen2 kernels + the exact top-K loss arm
+
+Two moves to give es-token-decode its best shot before closing it out:
+
+**1. Fused kernels ported to Qwen2** (R1-Distill: no q/k-norm, 12 heads / 1536 hidden — both
+non-power-of-2, needing padded+masked Triton ranges; gated bit-exact, max|d| = 0.0). Relaunched
+`ds15b_es-token-decode_N32_sig1e-3_lr9e-3`: step 0 = **640 s** (decode 353 + assemble 272) vs
+746 s with the separate rail op — **−14 %/step**.
+
+**2. `loss_impl=topk` — the sampled-token estimator's three variance leaks removed at once.**
+Per token the rails now score the truncated cross-entropy over the clean rail's top-16 ids
+(`ℓ_{n,t} = −Σ_k π_n(k)·log q(k)`, fixed K set across rails → the rail finite-difference
+estimates exactly this objective's gradient): no importance weight, no +1 score term, no
+single-token sampling noise — the same top-K objective BP-OPD trains (`LOG_PROB_TOP_K=16`).
+Teacher `log q` at arbitrary ids comes from a new eager HF teacher (vLLM `prompt_logprobs`
+can't do it); gates: HF-vs-vLLM max|d| 0.12 (bf16 kernel noise), in-run K-gather consistency
+7.6e-6, teacher cost ~1 s/step. Running as
+`ds15b_es-token-decode_N32_sig1e-3_lr3e-3_topk16`. If the exact estimator still shows the
+one-jump-then-creep of the sampled-token arms, the es-token-decode direction is closed on
+information grounds, not estimator quality. Results pending.
+
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 
 > New reference pair (thunlp/OPD's): student `DeepSeek-R1-Distill-Qwen-1.5B` ← teacher
