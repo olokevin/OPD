@@ -36,6 +36,27 @@ Two learnings either way: the per-token exact estimator has enough signal-to-noi
 (the CE run moved fast and monotonically — in the objective's own direction), and objective
 curvature (KL vs linear CE) matters more than estimator variance at this footprint.
 
+**Close-out through @80 (2026-09-04 evening): the exact objective did not change the shape.**
+Greedy MATH-500 curves (base 68.0/68.6 on this ruler):
+
+| arm | loss | @20 | @40 | @60 | @80 | @100 | @120 | KL trend |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| sampled fused (lr 9e-3, fp 5.7e-3) | sampled-token IW | 71.6 | **75.2** | 68.6 | 68.6 | 66.6 | 63.8 | 0.266 → 0.171 ✓ |
+| topk CE (lr 2.2e-2) | truncated CE | 60.0 | 54.2 | killed | | | | its obj −36 % ✓ |
+| topk **rkl** (lr 2.2e-2, fp 4.5e-3) | exact truncated reverse KL | **73.4** | 72.4 | 67.8 | 67.6 | | | 0.260 → 0.148 (−43 %) ✓ |
+
+Every arm optimizes its own objective monotonically — and every accuracy curve does the same
+one-jump-then-revert by ~4–5 % cumulative displacement. Removing all three variance leaks
+(rkl: no IW, no +1 term, no single-token sampling noise) bought a faster KL slope and a
+*non-declining* revert (67.6–67.8 vs the sampled arm's 63.8-and-falling) but no durable
+accuracy gain. **Verdict: the estimator was never the binding constraint — the KL landscape's
+accuracy transfer is.** "es-token-decode learns" is true on its own objective (reverse KL to
+the teacher falls 43 % and keeps falling) and false on MATH-500 at any loss quality tried.
+This matches the §16-style budget law: the coherent component steers the objective, the random
+walk spends the displacement budget, and accuracy — which needs more than teacher-agreement —
+reverts. Runs continue to step 150 (checkpoints every 20); standard-ruler offline evals on the
+peak checkpoints (@40 sampled, @20 rkl) are the remaining measurement.
+
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 
 > New reference pair (thunlp/OPD's): student `DeepSeek-R1-Distill-Qwen-1.5B` ← teacher

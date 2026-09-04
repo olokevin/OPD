@@ -1062,3 +1062,29 @@ Adjacent gaps are inside noise; the reproducible *order* is the result.
 New launcher `scripts/es/chain_aligned_pop10.sh`.
 
 ## [2026-09-04] ingest | topk CE arm: entropy-collapse negative result (68->54.2 @40, CE -36%) -> loss fixed to truncated reverse KL, relaunched (topk16rkl); fused sampled arm 75.2 @40
+
+## [2026-09-04] ingest | Aligned leaderboard complete: isobtt ties dense, both LoRA arms fail to transfer
+
+`es_results.md` §19 + `es_results_short.md` top leaderboard, all six arms done on the
+paper-aligned protocol (batch 1024 resampled from 8,890, 100 iters, N=10, ~15 GPU-h each).
+
+**Final:** `fura` 73.89 > `dense` 72.83 > **`isobtt` 72.80** > **`fura_zoact` 72.46** >
+`lora r=44` 71.23 > `lora r=1` 60.91.
+
+* **`isobtt` (fura + ISO: small core only, spectrum exactly preserved) TIES full `dense`**
+  (-0.03 +/- 0.68) from **0.64%** of the weights, with max|R^T R - I| = 1.0e-6 held for all
+  100 iterations -- §10's "freezing the spectrum costs nothing" reproduces on this protocol.
+* **`fura_zoact` 72.46 from 0.011%** of the weights, within 0.4 pp of full dense.
+* **Four of four structured arms transfer their fixed-batch sigma/alpha; two of two LoRA arms
+  do not.** `lora r=44` declines after step 50 (73.0 -> 69.0); `lora r=1` slides monotonically
+  69.6 @ 30 -> 54.6 @ 100 at reward_std 0.0077, under half the healthy band -- large steps on
+  weak signal. Consistent with §17.2: the bilinear step `sigma*eps_B A0 + sigma^2*eps_B eps_A`
+  is data-distribution-dependent in a way the linear modes' is not. Both need their own search.
+* The ranking otherwise reproduces the fixed-batch order exactly, so §17 was not an artefact
+  of the memorising batch.
+
+⚠️ Doc-editing near-miss recorded: a reorder anchored on "| 1 | `fura` | 1.25e-2" matched the
+N=30 table's first row too and spliced out that table plus the aligned section header.
+Restored from HEAD and verified byte-identical. Anchor table edits on unique text.
+
+## [2026-09-04] ingest | es-token-decode close-out through @80: exact rkl loss learns its objective (KL -43%) but accuracy reverts like every arm; estimator was not the binding constraint
