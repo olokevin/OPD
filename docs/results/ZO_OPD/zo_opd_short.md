@@ -54,8 +54,14 @@ accuracy transfer is.** "es-token-decode learns" is true on its own objective (r
 the teacher falls 43 % and keeps falling) and false on MATH-500 at any loss quality tried.
 This matches the §16-style budget law: the coherent component steers the objective, the random
 walk spends the displacement budget, and accuracy — which needs more than teacher-agreement —
-reverts. Runs continue to step 150 (checkpoints every 20); standard-ruler offline evals on the
-peak checkpoints (@40 sampled, @20 rkl) are the remaining measurement.
+reverts. The fused sampled run completed (final greedy 62.2 @140, 62.0 @149 — monotone
+decline from the 75.2 peak); rkl followed it down (67.6 @80 → 64.0 @100, KL still falling,
+−52 %). **The planned standard-ruler evals on the peak checkpoints cannot run**: the es_token
+trainer's `_save_hf_checkpoint` prunes to the last 2 saves (`keep_last=2`), so @40/@20 were
+deleted long before the peaks were identifiable — only declined-state checkpoints survive
+(fused 140/149, rkl 80/100). The standing standard-ruler datum for es-token-decode remains the
+earlier sampled arm's @60 = 0.803. Gotcha filed: copy peak checkpoints out mid-run (or raise
+`keep_last`) whenever a peak-then-revert curve is possible.
 
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 

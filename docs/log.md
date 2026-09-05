@@ -1088,3 +1088,5 @@ N=30 table's first row too and spliced out that table plus the aligned section h
 Restored from HEAD and verified byte-identical. Anchor table edits on unique text.
 
 ## [2026-09-04] ingest | es-token-decode close-out through @80: exact rkl loss learns its objective (KL -43%) but accuracy reverts like every arm; estimator was not the binding constraint
+
+## [2026-09-04] ingest | fused run complete (62.0 @149); rkl declining (64.0 @100); peak checkpoints pruned by keep_last=2 -> standard-ruler peak evals impossible
