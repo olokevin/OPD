@@ -1090,3 +1090,5 @@ Restored from HEAD and verified byte-identical. Anchor table edits on unique tex
 ## [2026-09-04] ingest | es-token-decode close-out through @80: exact rkl loss learns its objective (KL -43%) but accuracy reverts like every arm; estimator was not the binding constraint
 
 ## [2026-09-04] ingest | fused run complete (62.0 @149); rkl declining (64.0 @100); peak checkpoints pruned by keep_last=2 -> standard-ruler peak evals impossible
+
+## [2026-09-05] ingest | both es-token-decode runs complete: fused 75.2@40 -> 62.0@149, rkl 73.4@20 -> 53.2@149 (KL -56%); thread closed -- estimator quality irrelevant beyond the transient

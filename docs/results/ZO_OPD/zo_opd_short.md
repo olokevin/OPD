@@ -43,7 +43,7 @@ Greedy MATH-500 curves (base 68.0/68.6 on this ruler):
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | sampled fused (lr 9e-3, fp 5.7e-3) | sampled-token IW | 71.6 | **75.2** | 68.6 | 68.6 | 66.6 | 63.8 | 0.266 → 0.171 ✓ |
 | topk CE (lr 2.2e-2) | truncated CE | 60.0 | 54.2 | killed | | | | its obj −36 % ✓ |
-| topk **rkl** (lr 2.2e-2, fp 4.5e-3) | exact truncated reverse KL | **73.4** | 72.4 | 67.8 | 67.6 | | | 0.260 → 0.148 (−43 %) ✓ |
+| topk **rkl** (lr 2.2e-2, fp 4.5e-3) | exact truncated reverse KL | **73.4** | 72.4 | 67.8 | 67.6 | 64.0 | 64.4 | 0.260 → 0.115 (−56 %) ✓ |
 
 Every arm optimizes its own objective monotonically — and every accuracy curve does the same
 one-jump-then-revert by ~4–5 % cumulative displacement. Removing all three variance leaks
@@ -62,6 +62,14 @@ deleted long before the peaks were identifiable — only declined-state checkpoi
 (fused 140/149, rkl 80/100). The standing standard-ruler datum for es-token-decode remains the
 earlier sampled arm's @60 = 0.803. Gotcha filed: copy peak checkpoints out mid-run (or raise
 `keep_last`) whenever a peak-then-revert curve is possible.
+
+**Both runs complete (2026-09-05 02:30).** Final curves: fused sampled 68.0 → **75.2 @40** →
+62.0 @149; topk rkl 68.6 → **73.4 @20** → 56.6 @140 → 53.2 @149 (KL monotone to 0.115, −56 %).
+The exact-objective arm ended *lower* than the sampled arm — at matched cumulative displacement
+the decline is the displacement's doing, not the estimator's, and no loss quality changes it.
+es-token-decode is closed on this setting: the machinery demonstrably optimizes any per-token
+teacher objective it is given (three objectives, three monotone loss curves) and none of it
+survives the random-walk damage on the accuracy landscape beyond a ~20–40-step transient.
 
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 
