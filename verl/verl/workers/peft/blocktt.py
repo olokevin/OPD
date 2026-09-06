@@ -510,7 +510,9 @@ class BlockTTAdapter(PEFTAdapter):
             if not isinstance(module, BTTLinear):
                 continue
             btt_prefixes.append(name + ".")
-            out[_clean(f"{name}.weight")] = module.materialize_dense_weight()
+            # bf16: vLLM stores bf16 and casts on copy anyway; an fp32 export
+            # doubles the transient (30 GB for a 7B fp32-master actor).
+            out[_clean(f"{name}.weight")] = module.materialize_dense_weight().to(_torch.bfloat16)
             if module.bias is not None:
                 out[_clean(f"{name}.bias")] = module.bias.detach()
 

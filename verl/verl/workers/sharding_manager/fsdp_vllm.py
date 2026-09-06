@@ -229,6 +229,11 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             if exported_dense is not None:
                 params = exported_dense
                 peft_config = None
+                # Drop the other references to the exported dict so `del params`
+                # below actually frees it before the KV-cache wake_up; otherwise
+                # the whole dense export stays resident through the rollout
+                # (30 GB for a 7B fp32-master blocktt actor).
+                exported_dense = maybe_dict = None
             elif hasattr(peft_model, "peft_config"):
                 peft_config = peft_model.peft_config.get("default", None)
                 params = __collect_lora_params()
