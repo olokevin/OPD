@@ -118,13 +118,16 @@ def parse_path(p):
     return tuple(parts[:4])
 
 
+RAIL_MODE = {"rail_mode": "token", "noise_rank": "1"}   # set from --rail-mode/--noise-rank
+
+
 def es_cfg_for(N, max_tokens, sigma, bucket, attn_impl, lm_impl, seed=42,
                rail_impl="kernel", step_impl="eager"):
     return dict(n_sample=N, max_tokens=max_tokens, global_seed=seed, sigma=sigma,
                 sigma_mode="absolute", sample_method="bernoulli",
                 b_pack_buckets=[bucket], token_agg="mean",
                 attn_impl=attn_impl, lm_head_impl=lm_impl,
-                rail_impl=rail_impl, step_impl=step_impl)
+                rail_impl=rail_impl, step_impl=step_impl, **RAIL_MODE)
 
 
 def time_packed(llm, pids, N, max_tokens, sigma, attn_impl, lm_impl, use_graph=True,
@@ -216,6 +219,8 @@ def main():
                          "asserts when a co-tenant frees memory mid-profile)")
     ap.add_argument("--stock-only", action="store_true")
     ap.add_argument("--profile", action="store_true", help="Phase 3 kernel audit instead of the sweep")
+    ap.add_argument("--rail-mode", default="token", help="token (es-token-decode) | seq (es-decode, held noise)")
+    ap.add_argument("--noise-rank", default="1", help="seq mode: int rank or 'full' (packed bits)")
     ap.add_argument("--tag", default="")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
@@ -265,7 +270,12 @@ def main():
         return
 
     n_rails_max = max(max(Ns), 1)
-    matched = llm.collective_rpc("install_es_layers", args=(RULES, n_rails_max, 42))[0]
+    RAIL_MODE.update(rail_mode=args.rail_mode, noise_rank=str(args.noise_rank))
+    rank_arg = "full" if str(args.noise_rank) == "full" else int(args.noise_rank)
+    matched = llm.collective_rpc("install_es_layers",
+                                 args=(RULES, n_rails_max, 42, args.rail_mode, rank_arg))[0]
+    if args.rail_mode == "seq":   # held noise for the whole sweep (antithetic pairs)
+        llm.collective_rpc("es_seq_draw", args=([100 + i for i in range(max(1, n_rails_max // 2))], True))
     print(f"[cfg] matched_layers={len(matched)} Bs={Bs} Ns={Ns} paths={paths} L={args.prompt_len}", flush=True)
 
     for B in Bs:

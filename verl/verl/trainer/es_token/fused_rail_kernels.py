@@ -62,11 +62,11 @@ if HAVE_TRITON:
 
     @triton.jit
     def _norm_rail_kernel(Y, RES, W, X, NOISE, SIGNS, SIGMA,
-                          off_u, off_v, d_in, width,
+                          off_u, off_v, d_in, width, rank, inv_sqrt_r,
                           sy, sres, sx, snoise, ssign, eps,
                           HAS_RAIL: tl.constexpr, HAS_RES: tl.constexpr,
                           H: tl.constexpr, BLOCK_IN: tl.constexpr,
-                          HP: tl.constexpr = None):
+                          HP: tl.constexpr = None, RB: tl.constexpr = 0):
         """[rail on Y] -> RES += Y -> Y = rmsnorm(RES) * W   (in place, like
         vLLM's fused_add_rms_norm). HAS_RES=False: plain rms_norm of Y."""
         row = tl.program_id(0)
@@ -77,18 +77,39 @@ if HAVE_TRITON:
             slot = row // width
             rail = row % width - 1
             if rail >= 0:
-                acc = tl.zeros((), dtype=tl.float32)
-                for off in range(0, d_in, BLOCK_IN):
-                    j = off + tl.arange(0, BLOCK_IN)
-                    m = j < d_in
-                    x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
-                    v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    acc += tl.sum(x * v * r, axis=0)
-                a = acc * tl.load(SIGMA).to(tl.float32)
-                u = tl.load(NOISE + slot * snoise + off_u + idx, mask=hm, other=0.0).to(tl.float32)
-                s = tl.load(SIGNS + rail * ssign + off_u + idx, mask=hm, other=0.0).to(tl.float32)
-                y = (y + a * u * s).to(Y.dtype.element_ty).to(tl.float32)
+                if RB == 0:   # es-token-decode: fresh rank-1 (slot noise x rail signs)
+                    acc = tl.zeros((), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        acc += tl.sum(x * v * r, axis=0)
+                    a = acc * tl.load(SIGMA).to(tl.float32)
+                    u = tl.load(NOISE + slot * snoise + off_u + idx, mask=hm, other=0.0).to(tl.float32)
+                    s = tl.load(SIGNS + rail * ssign + off_u + idx, mask=hm, other=0.0).to(tl.float32)
+                    y = (y + a * u * s).to(Y.dtype.element_ty).to(tl.float32)
+                else:         # es-decode: rank-r factors HELD per rail (noise row = rail)
+                    rk = tl.arange(0, RB)
+                    mk = rk < rank
+                    nb = NOISE + rail * snoise
+                    accv = tl.zeros((RB,), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        b = tl.load(nb + off_v + rk[:, None] * d_in + j[None, :],
+                                    mask=mk[:, None] & m[None, :], other=0.0).to(tl.float32)
+                        accv += tl.sum(b * x[None, :], axis=1)
+                    coef = accv * (tl.load(SIGMA).to(tl.float32) * inv_sqrt_r)
+                    # apply side: static unroll over k with 1-D loads (a leading-axis
+                    # tile reduce here cost 6x in the silu kernel, 2026-09-05 audit)
+                    for k in tl.static_range(RB):
+                        ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
+                        a_k = tl.load(nb + off_u + k * H + idx, mask=hm, other=0.0).to(tl.float32)
+                        y = y + ck * a_k
+                    y = y.to(Y.dtype.element_ty).to(tl.float32)
         if HAS_RES:
             res = tl.load(RES + row * sres + idx, mask=hm, other=0.0).to(tl.float32)
             z = (y + res).to(Y.dtype.element_ty).to(tl.float32)
@@ -103,14 +124,15 @@ if HAVE_TRITON:
 
     @triton.jit
     def _qkv_rail_norm_rope_kernel(QKV, X, NOISE, SIGNS, SIGMA, QW, KW, CS, POS,
-                                   off_u, off_v, d_in, width,
+                                   off_u, off_v, d_in, width, rank, inv_sqrt_r,
                                    sq, sx, snoise, ssign, scs, eps,
                                    HAS_RAIL: tl.constexpr, HQ: tl.constexpr,
                                    HKV: tl.constexpr, D: tl.constexpr,
                                    BLOCK_IN: tl.constexpr,
                                    HAS_NORM: tl.constexpr = True,
                                    HQP: tl.constexpr = None,
-                                   HKVP: tl.constexpr = None):
+                                   HKVP: tl.constexpr = None,
+                                   RB: tl.constexpr = 0):
         """[rail on the qkv row] -> per-head RMSNorm of q and k -> neox RoPE at
         POS[row], all in place in QKV. v is left alone: a perturbed v of a rail
         row is never cached (slot -1) and clean rows have a = 0."""
@@ -134,29 +156,55 @@ if HAVE_TRITON:
             slot = row // width
             rail = row % width - 1
             if rail >= 0:
-                acc = tl.zeros((), dtype=tl.float32)
-                for off in range(0, d_in, BLOCK_IN):
-                    j = off + tl.arange(0, BLOCK_IN)
-                    m = j < d_in
-                    x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
-                    v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    acc += tl.sum(x * v * r, axis=0)
-                a = acc * tl.load(SIGMA).to(tl.float32)
-                nb = NOISE + slot * snoise + off_u
-                sb = SIGNS + rail * ssign + off_u
-                q1 = (q1 + a * tl.load(nb + q1o, mask=mq, other=0.0).to(tl.float32)
-                      * tl.load(sb + q1o, mask=mq, other=0.0).to(tl.float32)
-                      ).to(QKV.dtype.element_ty).to(tl.float32)
-                q2 = (q2 + a * tl.load(nb + q2o, mask=mq, other=0.0).to(tl.float32)
-                      * tl.load(sb + q2o, mask=mq, other=0.0).to(tl.float32)
-                      ).to(QKV.dtype.element_ty).to(tl.float32)
-                k1 = (k1 + a * tl.load(nb + k1o, mask=mk, other=0.0).to(tl.float32)
-                      * tl.load(sb + k1o, mask=mk, other=0.0).to(tl.float32)
-                      ).to(QKV.dtype.element_ty).to(tl.float32)
-                k2 = (k2 + a * tl.load(nb + k2o, mask=mk, other=0.0).to(tl.float32)
-                      * tl.load(sb + k2o, mask=mk, other=0.0).to(tl.float32)
-                      ).to(QKV.dtype.element_ty).to(tl.float32)
+                if RB == 0:   # es-token-decode: fresh rank-1
+                    acc = tl.zeros((), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        acc += tl.sum(x * v * r, axis=0)
+                    a = acc * tl.load(SIGMA).to(tl.float32)
+                    nb = NOISE + slot * snoise + off_u
+                    sb = SIGNS + rail * ssign + off_u
+                    q1 = (q1 + a * tl.load(nb + q1o, mask=mq, other=0.0).to(tl.float32)
+                          * tl.load(sb + q1o, mask=mq, other=0.0).to(tl.float32)
+                          ).to(QKV.dtype.element_ty).to(tl.float32)
+                    q2 = (q2 + a * tl.load(nb + q2o, mask=mq, other=0.0).to(tl.float32)
+                          * tl.load(sb + q2o, mask=mq, other=0.0).to(tl.float32)
+                          ).to(QKV.dtype.element_ty).to(tl.float32)
+                    k1 = (k1 + a * tl.load(nb + k1o, mask=mk, other=0.0).to(tl.float32)
+                          * tl.load(sb + k1o, mask=mk, other=0.0).to(tl.float32)
+                          ).to(QKV.dtype.element_ty).to(tl.float32)
+                    k2 = (k2 + a * tl.load(nb + k2o, mask=mk, other=0.0).to(tl.float32)
+                          * tl.load(sb + k2o, mask=mk, other=0.0).to(tl.float32)
+                          ).to(QKV.dtype.element_ty).to(tl.float32)
+                else:         # es-decode: rank-r held per rail
+                    DOUT: tl.constexpr = (HQ + 2 * HKV) * D
+                    rk = tl.arange(0, RB)
+                    mkr = rk < rank
+                    nb = NOISE + rail * snoise
+                    accv = tl.zeros((RB,), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        b = tl.load(nb + off_v + rk[:, None] * d_in + j[None, :],
+                                    mask=mkr[:, None] & m[None, :], other=0.0).to(tl.float32)
+                        accv += tl.sum(b * x[None, :], axis=1)
+                    coef = accv * (tl.load(SIGMA).to(tl.float32) * inv_sqrt_r)
+                    for k in tl.static_range(RB):
+                        ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
+                        ab = nb + off_u + k * DOUT
+                        q1 = q1 + ck * tl.load(ab + q1o, mask=mq, other=0.0).to(tl.float32)
+                        q2 = q2 + ck * tl.load(ab + q2o, mask=mq, other=0.0).to(tl.float32)
+                        k1 = k1 + ck * tl.load(ab + k1o, mask=mk, other=0.0).to(tl.float32)
+                        k2 = k2 + ck * tl.load(ab + k2o, mask=mk, other=0.0).to(tl.float32)
+                    q1 = q1.to(QKV.dtype.element_ty).to(tl.float32)
+                    q2 = q2.to(QKV.dtype.element_ty).to(tl.float32)
+                    k1 = k1.to(QKV.dtype.element_ty).to(tl.float32)
+                    k2 = k2.to(QKV.dtype.element_ty).to(tl.float32)
         # per-head RMSNorm (vLLM rms_norm on [rows*heads, D]); Qwen2 has no q/k norm
         if HAS_NORM:
             qw1 = tl.load(QW + dh).to(tl.float32)
@@ -189,27 +237,42 @@ if HAVE_TRITON:
 
     @triton.jit
     def _silu_mul_rail_kernel(GU, OUT, X, NOISE, SIGNS, SIGMA,
-                              off_u, off_v, d_in, width, I,
+                              off_u, off_v, d_in, width, I, rank, inv_sqrt_r,
                               sgu, sout, sx, snoise, ssign,
                               HAS_RAIL: tl.constexpr, BLOCK: tl.constexpr,
-                              BLOCK_IN: tl.constexpr):
+                              BLOCK_IN: tl.constexpr, RB: tl.constexpr = 0):
         """OUT = silu(GU[:, :I] (+rail)) * (GU[:, I:] (+rail)); one program/row."""
         row = tl.program_id(0)
         a = tl.zeros((), dtype=tl.float32)
         slot = row // width
         rail = row % width - 1
+        rk = tl.arange(0, RB + 2 * (RB == 0))     # RB=0 -> size-2 dummy
+        coef = tl.zeros((RB + 2 * (RB == 0),), dtype=tl.float32)
         if HAS_RAIL:
             if rail >= 0:
-                acc = tl.zeros((), dtype=tl.float32)
-                for off in range(0, d_in, BLOCK_IN):
-                    j = off + tl.arange(0, BLOCK_IN)
-                    m = j < d_in
-                    x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
-                    v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
-                    acc += tl.sum(x * v * r, axis=0)
-                a = acc * tl.load(SIGMA).to(tl.float32)
-        rail_eff = tl.maximum(rail, 0)   # clean rows: a == 0, address stays valid
+                if RB == 0:   # es-token-decode: fresh rank-1
+                    acc = tl.zeros((), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        v = tl.load(NOISE + slot * snoise + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        r = tl.load(SIGNS + rail * ssign + off_v + j, mask=m, other=0.0).to(tl.float32)
+                        acc += tl.sum(x * v * r, axis=0)
+                    a = acc * tl.load(SIGMA).to(tl.float32)
+                else:         # es-decode: rank-r held per rail
+                    mkr = rk < rank
+                    nbr = NOISE + rail * snoise
+                    accv = tl.zeros((RB,), dtype=tl.float32)
+                    for off in range(0, d_in, BLOCK_IN):
+                        j = off + tl.arange(0, BLOCK_IN)
+                        m = j < d_in
+                        x = tl.load(X + row * sx + j, mask=m, other=0.0).to(tl.float32)
+                        b = tl.load(nbr + off_v + rk[:, None] * d_in + j[None, :],
+                                    mask=mkr[:, None] & m[None, :], other=0.0).to(tl.float32)
+                        accv += tl.sum(b * x[None, :], axis=1)
+                    coef = accv * (tl.load(SIGMA).to(tl.float32) * inv_sqrt_r)
+        rail_eff = tl.maximum(rail, 0)   # clean rows: a == 0 / coef == 0, address stays valid
         T = GU.dtype.element_ty
         for off in range(0, I, BLOCK):
             j = off + tl.arange(0, BLOCK)
@@ -217,12 +280,22 @@ if HAVE_TRITON:
             g = tl.load(GU + row * sgu + j, mask=m, other=0.0).to(tl.float32)
             h = tl.load(GU + row * sgu + I + j, mask=m, other=0.0).to(tl.float32)
             if HAS_RAIL:
-                nb = NOISE + slot * snoise + off_u
-                sb = SIGNS + rail_eff * ssign + off_u
-                g = (g + a * tl.load(nb + j, mask=m, other=0.0).to(tl.float32)
-                     * tl.load(sb + j, mask=m, other=0.0).to(tl.float32)).to(T).to(tl.float32)
-                h = (h + a * tl.load(nb + I + j, mask=m, other=0.0).to(tl.float32)
-                     * tl.load(sb + I + j, mask=m, other=0.0).to(tl.float32)).to(T).to(tl.float32)
+                if RB == 0:
+                    nb = NOISE + slot * snoise + off_u
+                    sb = SIGNS + rail_eff * ssign + off_u
+                    g = (g + a * tl.load(nb + j, mask=m, other=0.0).to(tl.float32)
+                         * tl.load(sb + j, mask=m, other=0.0).to(tl.float32)).to(T).to(tl.float32)
+                    h = (h + a * tl.load(nb + I + j, mask=m, other=0.0).to(tl.float32)
+                         * tl.load(sb + I + j, mask=m, other=0.0).to(tl.float32)).to(T).to(tl.float32)
+                else:
+                    if rail >= 0:   # clean rows: nothing to add (uniform per program)
+                        for k in tl.static_range(RB):
+                            ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
+                            ab = NOISE + rail_eff * snoise + off_u + k * (2 * I)
+                            g = g + ck * tl.load(ab + j, mask=m, other=0.0).to(tl.float32)
+                            h = h + ck * tl.load(ab + I + j, mask=m, other=0.0).to(tl.float32)
+                        g = g.to(T).to(tl.float32)
+                        h = h.to(T).to(tl.float32)
             sg = _div(g, 1.0 + _exp(-g)).to(T).to(tl.float32)
             tl.store(OUT + row * sout + j, (sg * h).to(T), mask=m)
 
@@ -339,12 +412,28 @@ def _null(device):
 class RailArgs:
     """The rail operands of ONE perturbed linear, as its consumer kernel needs
     them: x (the linear's input, [rows, d_in]), the flat noise/sign buffers,
-    the [1] sigma tensor, this layer's (u, v) offsets and the packed width."""
-    __slots__ = ("x", "noise", "signs", "sigma", "off_u", "off_v", "d_in", "width")
+    the [1] sigma tensor, this layer's (u, v) offsets and the packed width.
+    rank > 0 = es-decode held rank-r factors (noise row = rail, offsets in the
+    rank-r flat layout, no signs); rank == 0 = es-token-decode (fresh rank-1)."""
+    __slots__ = ("x", "noise", "signs", "sigma", "off_u", "off_v", "d_in", "width",
+                 "rank", "inv_sqrt_r")
 
-    def __init__(self, x, noise, signs, sigma, off_u, off_v, d_in, width):
+    def __init__(self, x, noise, signs, sigma, off_u, off_v, d_in, width, rank=0):
         self.x, self.noise, self.signs, self.sigma = x, noise, signs, sigma
         self.off_u, self.off_v, self.d_in, self.width = off_u, off_v, d_in, width
+        self.rank = int(rank)
+        self.inv_sqrt_r = 1.0 / (self.rank ** 0.5) if self.rank > 0 else 1.0
+
+    @property
+    def rb(self):
+        return 0 if self.rank == 0 else max(2, triton.next_power_of_2(self.rank))
+
+    @property
+    def block_in(self):
+        return _BLOCK_IN if self.rank == 0 else max(256, min(_BLOCK_IN, 8192 // self.rb))
+
+
+MAX_FUSED_RANK = 8   # larger held ranks use rail_seq_kernels.rail_lowrank (standalone)
 
 
 def norm_rail(y, residual, weight, eps, rail=None, num_warps=None):
@@ -358,7 +447,7 @@ def norm_rail(y, residual, weight, eps, rail=None, num_warps=None):
         z = _null(dev)
         _norm_rail_kernel[(R,)](
             y, residual if residual is not None else z, weight, z, z, z, z,
-            0, 0, 0, 1, y.stride(0), residual.stride(0) if residual is not None else 0,
+            0, 0, 0, 1, 0, 1.0, y.stride(0), residual.stride(0) if residual is not None else 0,
             0, 0, 0, eps, HAS_RAIL=False, HAS_RES=residual is not None,
             H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
             HP=triton.next_power_of_2(H))
@@ -366,12 +455,12 @@ def norm_rail(y, residual, weight, eps, rail=None, num_warps=None):
         _norm_rail_kernel[(R,)](
             y, residual if residual is not None else _null(dev), weight,
             rail.x, rail.noise, rail.signs, rail.sigma,
-            rail.off_u, rail.off_v, rail.d_in, rail.width,
+            rail.off_u, rail.off_v, rail.d_in, rail.width, rail.rank, rail.inv_sqrt_r,
             y.stride(0), residual.stride(0) if residual is not None else 0,
             rail.x.stride(0), rail.noise.stride(0), rail.signs.stride(0), eps,
             HAS_RAIL=True, HAS_RES=residual is not None,
-            H=H, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
-            HP=triton.next_power_of_2(H))
+            H=H, BLOCK_IN=rail.block_in, num_warps=num_warps,
+            HP=triton.next_power_of_2(H), RB=rail.rb)
     return y, residual
 
 
@@ -393,7 +482,7 @@ def qkv_rail_norm_rope(qkv, positions, q_weight, k_weight, eps, cos_sin, hq, hkv
     if rail is None:
         _qkv_rail_norm_rope_kernel[(R,)](
             qkv, z, z, z, z, q_weight, k_weight, cos_sin, positions,
-            0, 0, 0, 1, qkv.stride(0), 0, 0, 0, cos_sin.stride(0), eps,
+            0, 0, 0, 1, 0, 1.0, qkv.stride(0), 0, 0, 0, cos_sin.stride(0), eps,
             HAS_RAIL=False, HQ=hq, HKV=hkv, D=d, BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
             HAS_NORM=bool(has_norm), HQP=triton.next_power_of_2(hq),
             HKVP=triton.next_power_of_2(hkv), enable_fp_fusion=False)
@@ -401,13 +490,13 @@ def qkv_rail_norm_rope(qkv, positions, q_weight, k_weight, eps, cos_sin, hq, hkv
         _qkv_rail_norm_rope_kernel[(R,)](
             qkv, rail.x, rail.noise, rail.signs, rail.sigma, q_weight, k_weight,
             cos_sin, positions,
-            rail.off_u, rail.off_v, rail.d_in, rail.width,
+            rail.off_u, rail.off_v, rail.d_in, rail.width, rail.rank, rail.inv_sqrt_r,
             qkv.stride(0), rail.x.stride(0), rail.noise.stride(0), rail.signs.stride(0),
             cos_sin.stride(0), eps,
             HAS_RAIL=True, HQ=hq, HKV=hkv, D=d,
-            BLOCK_IN=_BLOCK_IN, num_warps=num_warps,
+            BLOCK_IN=rail.block_in, num_warps=num_warps,
             HAS_NORM=bool(has_norm), HQP=triton.next_power_of_2(hq),
-            HKVP=triton.next_power_of_2(hkv), enable_fp_fusion=False)
+            HKVP=triton.next_power_of_2(hkv), RB=rail.rb, enable_fp_fusion=False)
     return qkv
 
 
@@ -421,16 +510,17 @@ def silu_mul_rail(gu, out, rail=None, block=2048, num_warps=None):
     z = _null(dev)
     if rail is None:
         _silu_mul_rail_kernel[(R,)](
-            gu, out, z, z, z, z, 0, 0, 0, 1, I,
+            gu, out, z, z, z, z, 0, 0, 0, 1, I, 0, 1.0,
             gu.stride(0), out.stride(0), 0, 0, 0,
             HAS_RAIL=False, BLOCK=block, BLOCK_IN=_BLOCK_IN, num_warps=num_warps)
     else:
+        blk = block if rail.rank == 0 else max(256, min(block, 8192 // rail.rb))
         _silu_mul_rail_kernel[(R,)](
             gu, out, rail.x, rail.noise, rail.signs, rail.sigma,
-            rail.off_u, rail.off_v, rail.d_in, rail.width, I,
+            rail.off_u, rail.off_v, rail.d_in, rail.width, I, rail.rank, rail.inv_sqrt_r,
             gu.stride(0), out.stride(0), rail.x.stride(0), rail.noise.stride(0),
             rail.signs.stride(0),
-            HAS_RAIL=True, BLOCK=block, BLOCK_IN=_BLOCK_IN, num_warps=num_warps)
+            HAS_RAIL=True, BLOCK=blk, BLOCK_IN=rail.block_in, num_warps=num_warps, RB=rail.rb)
     return out
 
 

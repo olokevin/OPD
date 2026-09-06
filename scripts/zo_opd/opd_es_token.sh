@@ -104,6 +104,12 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.lm_head_impl=${LM_HEAD_IMPL:-full} \
     es_token.rail_impl=${RAIL_IMPL:-kernel} \
     es_token.step_impl=${STEP_IMPL:-eager} \
+    es_token.rail_mode=${RAIL_MODE:-token} \
+    es_token.noise_rank=${NOISE_RANK:-1} \
+    es_token.es_alpha=${ES_ALPHA:-1.25e-3} \
+    es_token.es_antithetic=${ES_ANTITHETIC:-true} \
+    es_token.es_normalize=${ES_NORMALIZE:-zscore} \
+    es_token.ckpt_keep_last=${CKPT_KEEP_LAST:-2} \
     es_token.pack_width=${PACK_WIDTH} \
     "es_token.b_pack_buckets=${B_PACK_BUCKETS}" \
     'es_token.perturb_rules=["'"${PERTURB_RULES}"'"]' \

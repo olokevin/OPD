@@ -1,0 +1,185 @@
+{
+  "gpu": {
+    "name": "NVIDIA H100 NVL",
+    "sms": 132,
+    "total_mem_gb": 93.1,
+    "cc": "9.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "host": "lambda-scalar",
+    "cuda_visible": "4",
+    "triton": "3.4.0",
+    "vllm": "0.11.0",
+    "nvidia_smi": [
+      "0, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 86258 MiB, 0 %",
+      "1, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 86258 MiB, 0 %",
+      "2, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 2701 MiB, 0 %",
+      "3, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 12251 MiB, 0 %",
+      "4, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 57871 MiB, 0 %",
+      "5, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 2709 MiB, 0 %",
+      "6, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 3499 MiB, 0 %",
+      "7, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 57629 MiB, 99 %"
+    ]
+  },
+  "prompt_len": 512,
+  "t_short": 64,
+  "t_long": 512,
+  "repeats": 2,
+  "tp": 1,
+  "points": [
+    {
+      "B": 1,
+      "N": 0,
+      "path": "seq/stream/fused/graph",
+      "rows": 1,
+      "kernel_ms": {
+        "rail_op": 0.0,
+        "fused_norm": 0.14045737499999988,
+        "fused_qkv": 0.07303237499994755,
+        "fused_silu": 0.17173749999996812,
+        "lm_tail": 0.006672000000004117,
+        "advance": 0.004176124999998138,
+        "noise": 0.0054281249999999105,
+        "attn_shared": 0.0,
+        "attn": 0.5478080000000187,
+        "lm_head_stream": 0.142337750000007,
+        "gemm": 1.2521674999999672,
+        "norm": 0.004168125000002344,
+        "act": -0.009296000000000526,
+        "rope": -1.2499999911541604e-07,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.016648624999981654,
+        "other": 0.0,
+        "total": 2.3553373749998943
+      },
+      "top": [
+        [
+          "nvjet_tst_256x8_64x6_4x1_v_bz_TNT",
+          0.5228008749999822
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_splitK_TNT",
+          0.31771812499995766
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.23802212500000564
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_bias_TNT",
+          0.1770457500000065
+        ],
+        [
+          "_silu_mul_rail_kernel",
+          0.17173749999996812
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x1_v_bz_TNT",
+          0.16064637499999812
+        ],
+        [
+          "void cutlass::device_kernel<flash::FlashAttnFwdCombine<cute::tuple<cut",
+          0.1453935000000421
+        ],
+        [
+          "_lm_head_stream",
+          0.142337750000007
+        ],
+        [
+          "_norm_rail_kernel",
+          0.14045737499999988
+        ],
+        [
+          "flash::prepare_varlen_num_blocks_kernel(int, int, int, int const*, int",
+          0.08394437499999641
+        ],
+        [
+          "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16",
+          0.08002424999997648
+        ],
+        [
+          "_qkv_rail_norm_rope_kernel",
+          0.07303237499994755
+        ]
+      ]
+    },
+    {
+      "B": 1,
+      "N": 8,
+      "path": "seq/stream/fused/graph",
+      "rows": 9,
+      "kernel_ms": {
+        "rail_op": 0.0,
+        "fused_norm": 0.3123634999999222,
+        "fused_qkv": 0.12354875000000014,
+        "fused_silu": 0.2522635000000219,
+        "lm_tail": 0.006832125000000814,
+        "advance": 0.0035518749999982903,
+        "noise": 0.005523874999993041,
+        "attn_shared": 0.0,
+        "attn": 0.6019557499999593,
+        "lm_head_stream": 0.14506550000000515,
+        "gemm": 1.2864195000000067,
+        "norm": 0.0036012499999952055,
+        "act": -0.004564124999999836,
+        "rope": 3.949999999998399e-05,
+        "kv_cache": 0.0,
+        "embed": 0.0,
+        "elementwise": 0.019190874999994903,
+        "other": 0.0,
+        "total": 2.7557918749999155
+      },
+      "top": [
+        [
+          "nvjet_tst_192x16_64x8_4x1_v_bz_TNT",
+          0.553128749999984
+        ],
+        [
+          "nvjet_tst_64x16_64x16_4x1_v_bz_splitK_TNT",
+          0.31917374999999737
+        ],
+        [
+          "_norm_rail_kernel",
+          0.3123634999999222
+        ],
+        [
+          "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAt",
+          0.2565618749999875
+        ],
+        [
+          "_silu_mul_rail_kernel",
+          0.2522635000000219
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x2_v_bz_bias_TNT",
+          0.17854912499996878
+        ],
+        [
+          "void cutlass::device_kernel<flash::FlashAttnFwdCombine<cute::tuple<cut",
+          0.176202125000009
+        ],
+        [
+          "nvjet_tst_64x8_64x16_4x2_v_bz_TNT",
+          0.16312175000003787
+        ],
+        [
+          "_lm_head_stream",
+          0.14506550000000515
+        ],
+        [
+          "_qkv_rail_norm_rope_kernel",
+          0.12354875000000014
+        ],
+        [
+          "flash::prepare_varlen_num_blocks_kernel(int, int, int, int const*, int",
+          0.08731324999999504
+        ],
+        [
+          "void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16",
+          0.08177862499996755
+        ]
+      ]
+    }
+  ]
+}

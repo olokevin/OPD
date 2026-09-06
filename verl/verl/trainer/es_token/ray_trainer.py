@@ -149,11 +149,14 @@ class RayESTokenTrainer(RayNPTrainer):
         print("Initializing inter-engine NCCL group...")
         self._init_inter_engine_group()
         print("Installing es_token layers on all engines...")
+        self.rail_mode = str(self.es.get("rail_mode", "token"))
+        noise_rank = self.es.get("noise_rank", 1)
+        noise_rank = "full" if str(noise_rank) == "full" else int(noise_rank)
         matched_per_engine = ray.get([
             e.collective_rpc.remote(
                 "install_es_layers",
                 args=(list(self.es.perturb_rules), int(self.es.n_sample),
-                      int(self.es.global_seed)))
+                      int(self.es.global_seed), self.rail_mode, noise_rank))
             for e in self.engines
         ])
         self.matched = list(matched_per_engine[0][0])
@@ -357,7 +360,20 @@ class RayESTokenTrainer(RayNPTrainer):
             # per-rail logprobs at them (run_es_decode_packed).
             topk_k=(int(cfg.get("topk_k", 16))
                     if str(cfg.get("loss_impl", "sampled")) == "topk" else 0),
+            # es-decode (rail_mode=seq): one held perturbation per rail
+            rail_mode=str(cfg.get("rail_mode", "token")),
+            noise_rank=str(cfg.get("noise_rank", 1)),
         )
+        rail_mode = str(cfg.get("rail_mode", "token"))
+        es_alpha = float(cfg.get("es_alpha", 1.25e-3))
+        es_antithetic = bool(cfg.get("es_antithetic", True))
+        es_normalize = str(cfg.get("es_normalize", "zscore"))
+        if rail_mode == "seq":
+            assert str(cfg.get("loss_impl", "sampled")) == "sampled", "es-decode uses the k1 fitness"
+            assert cfg.sample_method == "bernoulli", "es-decode noise is Rademacher (packed bits)"
+            if es_antithetic:
+                assert int(cfg.n_sample) % 2 == 0, "antithetic es-decode needs an even n_sample"
+        ckpt_keep_last = int(cfg.get("ckpt_keep_last", 2))
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643
         # (<|endoftext|>, declared only in generation_config.json). Opt-in so the
@@ -402,6 +418,14 @@ class RayESTokenTrainer(RayNPTrainer):
             rollout_ids = _assign_rollout_ids(step, batch_size, 1)
             waves = _pad_waves_to_pack_width(pids, rollout_ids, pack_width)
 
+            # ---- es-decode: draw this step's held rail noise ------------- #
+            if rail_mode == "seq":
+                rng = np.random.default_rng(int(cfg.global_seed) + step)
+                n_eff = max(1, n_rails // 2) if es_antithetic else n_rails
+                seq_seeds = [int(x) for x in rng.integers(0, 2 ** 31 - 1, size=n_eff)]
+                ray.get([e.collective_rpc.remote("es_seq_draw", args=(seq_seeds, es_antithetic))
+                         for e in self.engines])
+
             # ---- Phase 1: graphed packed rail decode --------------------- #
             t_dec0 = time.time()
             roll_pids, roll_rids, roll_toks, roll_payload = [], [], [], []
@@ -443,6 +467,107 @@ class RayESTokenTrainer(RayNPTrainer):
             else:
                 logqs = self.teacher.logq_wave(fulls, lens)
             teacher_s = time.time() - t_tch0
+
+            # ---- es-decode: k1 fitness per rail -> OpenAI-ES step --------- #
+            if rail_mode == "seq":
+                t_asm0 = time.time()
+                num = torch.zeros(n_rails, dtype=torch.float64)
+                den = 0
+                clean_means = []
+                for payload, logq in zip(roll_payload, logqs):
+                    lp = payload.double()                      # [T, 1+N]
+                    lq = logq.double()
+                    A = lq - lp[:, 0]                          # k1 advantage (frozen)
+                    dlp = lp[:, 1:] - lp[:, :1]                # delta log pi_n(y_t)
+                    num += (A[:, None] * dlp).sum(0)
+                    den += lp.shape[0]
+                    clean_means.append(float((lp[:, 0] - lq).mean()))
+                F = (num / max(den, 1)).numpy()                # [N] F(W+sigma eps_n) - F(W)
+                if es_antithetic:
+                    fp_, fm_ = F[0::2], F[1::2]
+                    d = 0.5 * (fp_ - fm_)
+                    n_eff = len(d)
+                    scale = float(np.sqrt(np.mean(d ** 2))) if n_eff > 1 else max(abs(float(d[0])), 1e-12)
+                else:
+                    fp_, fm_ = F, np.full_like(F, float(F.mean()))
+                    d = F - F.mean()
+                    n_eff = len(d)
+                    scale = float(d.std()) + 1e-12
+                if es_normalize == "zscore":
+                    coef_eff = (es_alpha / n_eff) * d / (scale + 1e-12)
+                elif es_normalize == "raw":
+                    coef_eff = es_alpha * d / (n_eff * float(cfg.sigma))
+                else:
+                    raise ValueError(f"unknown es_normalize={es_normalize!r}")
+                if es_antithetic:   # rail 2i = +eps_i, rail 2i+1 = -eps_i
+                    coeffs = np.zeros(n_rails)
+                    coeffs[0::2] = coef_eff
+                else:
+                    coeffs = coef_eff
+                _res = ray.get(self.engines[0].collective_rpc.remote(
+                    "es_seq_apply", args=([float(c) for c in coeffs], es_cfg)))[0]
+                for ln in self.matched:
+                    ray.get([e.collective_rpc.remote("broadcast_layer_weights", args=(ln, 0))
+                             for e in self.engines])
+                assemble_s = time.time() - t_asm0
+                upd_rms = float(np.sqrt(np.sum(coef_eff ** 2)))
+                rms_w = float(_res["rms_w"])
+                self._es_cum_sq = getattr(self, "_es_cum_sq", 0.0) + upd_rms ** 2
+                step_time = time.time() - t0
+                metrics = {
+                    "train/step_time": step_time,
+                    "train/decode_s": decode_s,
+                    "train/teacher_s": teacher_s,
+                    "train/assemble_s": assemble_s,
+                    "train/n_token_records": int(den),
+                    "train/L_clean_mean": float(np.mean(clean_means)),
+                    "train/dW_norm_max": float(max(_res["norms"].values())),
+                    "train/dW_norm_mean": float(np.mean(list(_res["norms"].values()))),
+                    "train/update_footprint": upd_rms / rms_w,
+                    "es/post_update_gain": float("nan"),
+                    "es/cum_footprint": float(np.sqrt(self._es_cum_sq)) / rms_w,
+                    "es/fitness_plus_mean": float(fp_.mean()),
+                    "es/fitness_minus_mean": float(fm_.mean()),
+                    "es/d_mean": float(d.mean()),
+                    "es/d_std": scale,
+                    "es/d_snr": float(abs(d.mean()) / (scale + 1e-12)),
+                    "es/update_rms": upd_rms,
+                    "es/update_rms_measured": float(_res["update_rms_measured"]),
+                    "es/update_footprint": upd_rms / rms_w,
+                    "es/probe_footprint": float(cfg.sigma) / rms_w,
+                    "es/n_rails": n_rails,
+                    "es/sigma": float(cfg.sigma),
+                    "es/alpha": es_alpha,
+                    "training/global_step": step,
+                }
+                logger.log(data=metrics, step=step)
+                progress.set_postfix({
+                    "fp": f"{metrics['train/update_footprint']:.2e}",
+                    "cum": f"{metrics['es/cum_footprint']:.3f}",
+                    "snr": f"{metrics['es/d_snr']:.2f}",
+                    "L_clean": f"{metrics['train/L_clean_mean']:.3f}",
+                    "dec": f"{decode_s:.1f}s", "tch": f"{teacher_s:.1f}s", "asm": f"{assemble_s:.1f}s",
+                }, refresh=False)
+                if save_freq and (step > 0 and step % save_freq == 0
+                                  or step == num_iterations - 1):
+                    try:
+                        self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
+                    except Exception as e:
+                        print(f"[es ckpt] save failed at step {step}: {e}")
+                if eval_interval and (step % eval_interval == 0
+                                      or step == num_iterations - 1):
+                    eval_metrics = self._evaluate_model(
+                        self.engines[0], self.eval_data, step, logger)
+                    if eval_metrics:
+                        logger.log(data=eval_metrics, step=step)
+                    hk = self._heldout_clean_loss(heldout_pids, probe_sp, es_cfg)
+                    if hk is not None:
+                        logger.log(data={"eval/heldout_clean_loss": hk}, step=step)
+                        print(f"[Probe @ step {step}] heldout_clean_loss={hk:.4f} "
+                              f"(fixed {len(heldout_pids)} prompts; lower=better)")
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
 
             # ---- Phase 3: losses -> scales -> assemble+apply ------------- #
             t_asm0 = time.time()
@@ -551,7 +676,7 @@ class RayESTokenTrainer(RayNPTrainer):
             if save_freq and (step > 0 and step % save_freq == 0
                               or step == num_iterations - 1):
                 try:
-                    self._save_hf_checkpoint(step, logging_dir)
+                    self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
                 except Exception as e:
                     print(f"[es ckpt] save failed at step {step}: {e}")
 

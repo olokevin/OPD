@@ -1,0 +1,62 @@
+/home/yequan/miniconda3/envs/verl/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+INFO 09-05 22:59:49 [__init__.py:216] Automatically detected platform cuda.
+INFO 09-05 22:59:55 [utils.py:233] non-default args: {'dtype': 'bfloat16', 'max_model_len': 4096, 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.35, 'disable_log_stats': True, 'enforce_eager': True, 'worker_extension_cls': 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension', 'model': 'deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B'}
+WARNING 09-05 22:59:55 [model.py:371] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 09-05 22:59:56 [model.py:547] Resolved architecture: Qwen2ForCausalLM
+`torch_dtype` is deprecated! Use `dtype` instead!
+INFO 09-05 22:59:56 [model.py:1510] Using max model len 4096
+INFO 09-05 22:59:56 [scheduler.py:205] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 09-05 22:59:56 [__init__.py:381] Cudagraph is disabled under eager mode
+INFO 09-05 22:59:56 [core.py:77] Initializing a V1 LLM engine (v0.11.0) with config: model='deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', speculative_config=None, tokenizer='deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, enable_prefix_caching=False, chunked_prefill_enabled=True, pooler_config=None, compilation_config={"level":0,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":null,"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":[],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":0,"local_cache_dir":null}
+W0905 22:59:59.737000 3232845 site-packages/torch/utils/cpp_extension.py:2425] TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+W0905 22:59:59.737000 3232845 site-packages/torch/utils/cpp_extension.py:2425] If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'] to specific architectures.
+INFO 09-05 23:00:00 [worker_base.py:243] Injected <class 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_ensure_np_state', '_es_alloc_graph_step', '_es_build_attn_meta', '_es_capture_step_packed', '_es_decode_graph_step', '_es_eager_step_packed', '_es_fill_noise', '_es_install_fused_consumers', '_es_install_state', '_es_refresh_kv_pages', '_es_replay_step_packed', '_es_sigma_eff', '_es_step_body', '_es_update_step_buffers', '_np_build_attn_metadata', '_np_build_attn_metadata_packed', '_np_build_attn_metadata_packed_persistent', '_np_build_attn_metadata_persistent', '_np_capture_step', '_np_capture_step_packed', '_np_commit_clean', '_np_fill_u_buf', '_np_fill_u_buf_all_layers', '_np_fill_u_buf_all_layers_packed', '_np_is_eos', '_np_prefill', '_np_prefill_packed', '_np_replay_step', '_np_replay_step_packed', '_np_run_forward', '_np_sample_clean', '_np_slot_for_position', '_np_step_forward', '_np_step_forward_graph', '_np_step_forward_packed', '_run_np_decode_all_layers', '_topk_store', 'apply_node_update', 'assemble_all_layers_and_apply', 'assemble_and_apply', 'broadcast_layer_weights', 'es_assemble_and_apply', 'es_export_weights', 'es_reset_graphs', 'es_seq_apply', 'es_seq_draw', 'get_worker_ip', 'init_inter_engine_group', 'install_es_layers', 'install_perturb_layers', 'last_changed_frac', 'layer_weight_norm', 'run_es_decode_packed', 'run_np_decode', 'run_np_decode_graphed', 'run_np_decode_packed', 'run_np_decode_packed_graphed']
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 09-05 23:00:00 [parallel_state.py:1208] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+WARNING 09-05 23:00:00 [topk_topp_sampler.py:59] FlashInfer is available, but it is not enabled. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please set VLLM_USE_FLASHINFER_SAMPLER=1.
+INFO 09-05 23:00:00 [gpu_model_runner.py:2602] Starting to load model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B...
+INFO 09-05 23:00:00 [gpu_model_runner.py:2634] Loading model from scratch...
+INFO 09-05 23:00:01 [cuda.py:325] Using Flash Attention backend on V1 engine.
+INFO 09-05 23:00:01 [weight_utils.py:392] Using model weights format ['*.safetensors']
+INFO 09-05 23:00:01 [weight_utils.py:450] No model.safetensors.index.json found in remote.
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.87it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.87it/s]
+
+INFO 09-05 23:00:02 [default_loader.py:267] Loading weights took 0.80 seconds
+INFO 09-05 23:00:02 [gpu_model_runner.py:2653] Model loading took 3.3461 GiB and 1.310794 seconds
+INFO 09-05 23:00:04 [gpu_worker.py:298] Available KV cache memory: 23.51 GiB
+INFO 09-05 23:00:04 [kv_cache_utils.py:1087] GPU KV cache size: 880,368 tokens
+INFO 09-05 23:00:04 [kv_cache_utils.py:1091] Maximum concurrency for 4,096 tokens per request: 214.93x
+2026-09-05 23:00:04,922 - INFO - autotuner.py:256 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-09-05 23:00:05,274 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process ends
+All deep_gemm operations loaded successfully!
+WARNING 09-05 23:00:05 [cudagraph_dispatcher.py:106] cudagraph dispatching keys are not initialized. No cudagraph will be used.
+INFO 09-05 23:00:05 [core.py:210] init engine (profile, create kv cache, warmup model) took 2.44 seconds
+INFO 09-05 23:00:05 [llm.py:306] Supported_tasks: ('generate',)
+Adding requests:   0%|          | 0/4 [00:00<?, ?it/s]Adding requests: 100%|██████████| 4/4 [00:00<00:00, 4774.39it/s]
+Processed prompts:   0%|          | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts:  25%|██▌       | 1/4 [00:00<00:01,  2.40it/s, est. speed input: 79.31 toks/s, output: 76.91 toks/s]Processed prompts: 100%|██████████| 4/4 [00:00<00:00,  2.40it/s, est. speed input: 271.47 toks/s, output: 307.50 toks/s]Processed prompts: 100%|██████████| 4/4 [00:00<00:00,  9.61it/s, est. speed input: 271.47 toks/s, output: 307.50 toks/s]
+[es-decode] held noise: N=4 rank=1 0.01 GiB on cuda:0
+[install] rank=1 held noise 0.01 GiB
+[S0 rank=1] sigma=0 rails == clean: max|d|=1.907e-06 PASS
+[S1 rank=1] antithetic: corr(d+, d-)=-0.9258 per-token |d+ + d-|/|d+ - d-|=0.259 aggregated 3.780 mean|dlogp|=0.0239 FAIL
+[S5 rank=1] redraw same seeds -> payload max|d|=0.000e+00 PASS
+[S2 rank=1] fused consumers vs standalone kernel: payload max|d|=5.563e-02 mean=2.86e-03 (bf16 chaos scale) PASS
+[S3 rank=1] graphed vs eager (held noise): max|d|=0.000e+00 PASS
+[S4 rank=1] es_seq_apply on model.layers.3.mlp.down_proj: max|W_after - bf16(W + sum coef eps)|=4.000e-04 rms_w=0.0399 upd_rms_measured=3.16e-04 delta_rms=3.16e-04 PASS
+[es-decode] held noise: N=4 rank=full 0.61 GiB on cuda:0
+[install] rank=full held noise 0.61 GiB
+[S0 rank=full] sigma=0 rails == clean: max|d|=1.907e-06 PASS
+[S1 rank=full] antithetic: corr(d+, d-)=-0.8929 per-token |d+ + d-|/|d+ - d-|=0.286 aggregated 0.210 mean|dlogp|=0.0207 PASS
+[S5 rank=full] redraw same seeds -> payload max|d|=0.000e+00 PASS
+[S3 rank=full] graphed vs eager (held noise): max|d|=0.000e+00 PASS
+[S4 rank=full] es_seq_apply on model.layers.3.mlp.down_proj: max|W_after - bf16(W + sum coef eps)|=4.000e-04 rms_w=0.0399 upd_rms_measured=3.16e-04 delta_rms=3.16e-04 PASS
+RESULT {"S0_rank1": {"pass_": true, "max_abs": 1.9073486328125e-06}, "S1_rank1": {"pass_": false, "corr": -0.9257820525978513, "asym_token": 0.259237140417099, "asym_fitness": 3.7804417610168457, "mean_abs_dlogp": 0.023928016424179077}, "S5_rank1": {"pass_": true, "max_abs": 0.0}, "S2_fused_vs_kernel": {"pass_": true, "max_abs": 0.05563068389892578, "mean_abs": 0.002862651690520579}, "S3_rank1": {"pass_": true, "max_abs": 0.0}, "S4_rank1": {"pass_": true, "max_abs": 0.0004000067710876465, "rms_w": 0.039878433990119096, "update_rms_measured": 0.00031623021731370856, "delta_rms": 0.0003162269713357091}, "S0_rankfull": {"pass_": true, "max_abs": 1.9073486328125e-06}, "S1_rankfull": {"pass_": true, "corr": -0.8928653476357549, "asym_token": 0.2855234444141388, "asym_fitness": 0.20957331359386444, "mean_abs_dlogp": 0.02066367119550705}, "S5_rankfull": {"pass_": true, "max_abs": 0.0}, "S3_rankfull": {"pass_": true, "max_abs": 0.0}, "S4_rankfull": {"pass_": true, "max_abs": 0.0004000067710876465, "rms_w": 0.039878434050863894, "update_rms_measured": 0.0003162278652811238, "delta_rms": 0.00031624280381947756}}
+SOME_FAIL
+[rank0]:[W905 23:00:40.582016556 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

@@ -32,6 +32,15 @@ es_token:
   update_clip: null
   assemble_chunk: 1024             # token-records per assembly GEMM chunk
 
+  # es-decode (zo_opd_short.md): ONE perturbation per rail HELD for the whole
+  # step, k1 fitness per rail, es-prefill's OpenAI-ES step (es_update.py)
+  rail_mode: token                 # token (es-token-decode, fresh per token) | seq (es-decode)
+  noise_rank: 1                    # int r (dW = sigma/sqrt(r) sum_k a_k b_k^T) | full (packed-bit +-1 matrix)
+  es_alpha: 1.25e-3                # OpenAI-ES step (z-scored), es-prefill C's value
+  es_antithetic: true              # rail 2i+1 = -rail 2i
+  es_normalize: zscore             # zscore | raw
+  ckpt_keep_last: 2                # HF checkpoints kept (peak-then-revert curves: raise it)
+
   # decode driver (graphed packed; eager only as the parity oracle)
   attn_impl: rows                  # rows | shared | fold (rail-aware kernels, es_profile_results.md)
   lm_head_impl: full               # full | stream

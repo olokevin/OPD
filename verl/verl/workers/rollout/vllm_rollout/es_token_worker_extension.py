@@ -37,8 +37,9 @@ from verl.trainer.es_token.rail_attn_kernel import (
 from verl.trainer.es_token.lm_head_kernel import (
     LMHeadWorkspace, lm_head_gather_logit, lm_head_stream)
 from verl.trainer.es_token.fused_rail_kernels import (
-    RailArgs, advance as es_advance, fill_rademacher_rows_t, lm_tail, norm_rail,
-    qkv_rail_norm_rope, silu_mul_rail)
+    MAX_FUSED_RANK, RailArgs, advance as es_advance, fill_rademacher_rows_t, lm_tail,
+    norm_rail, qkv_rail_norm_rope, silu_mul_rail)
+from verl.trainer.es_token.rail_seq_kernels import SeqNoise
 from verl.trainer.es_token.noise_kernel import fill_rademacher_rows
 from verl.trainer.es_token.seeding import (
     build_noise_layout, build_seed_table, draw_token_noise, es_token_seed)
@@ -174,6 +175,20 @@ class ESTokenLinear(torch.nn.Module):
         if st.get("mode") != "perturb_es":
             return out
         x = args[0]
+        if st.get("es_rail_mode") == "seq":
+            # es-decode: ONE perturbation per rail held for the whole step
+            # (rail_seq_kernels.py). Low ranks ride the fused consumers; the
+            # full-rank packed-bit GEMV and larger ranks are standalone launches.
+            sn = st["es_seq_noise"]
+            if (sn.rank == "full" or st.get("es_rail_impl") != "fused"
+                    or int(sn.rank) > MAX_FUSED_RANK):
+                y, bias, was_tuple = _unpack(out)
+                assert rail_supported(x, y), self.name
+                sn.apply_rail(self.name, x, y, st["es_sigma_buf"][self.name],
+                              st["es_width"], st["es_bucket"])
+                return _repack(y, bias, was_tuple)
+            st["es_x"][self.name] = x
+            return out
         if st.get("es_rail_impl") == "fused":
             # Zero-launch rail (fused_rail_kernels.py): the consumer of this
             # output applies the rail; it only needs the GEMM input. Stash the
@@ -217,10 +232,20 @@ def _es_rail_args(st, producer):
     layout = st["es_layout"].get(producer)
     if layout is None:
         return None
+    off_u, _, off_v, d_in = layout
+    if st.get("es_rail_mode") == "seq":
+        sn = st["es_seq_noise"]
+        if sn.rank == "full" or int(sn.rank) > MAX_FUSED_RANK:
+            return None          # applied standalone by ESTokenLinear
+        x = st["es_x"].get(producer)
+        if x is None:
+            raise RuntimeError(f"es fused rail: no stashed input for {producer}")
+        off_a, off_b = sn.offsets(producer)
+        return RailArgs(x, sn.noise, sn.noise, st["es_sigma_buf"][producer],
+                        off_a, off_b, d_in, st["es_width"], rank=int(sn.rank))
     x = st["es_x"].get(producer)
     if x is None:
         raise RuntimeError(f"es fused rail: no stashed input for {producer}")
-    off_u, _, off_v, d_in = layout
     return RailArgs(x, st["es_noise_buf"], st["es_signs_flat"],
                     st["es_sigma_buf"][producer], off_u, off_v, d_in, st["es_width"])
 
@@ -279,7 +304,8 @@ def _es_attn_forward(self, positions, hidden_states):
 
 class WorkerExtension(NPWorkerExtension):
     # ------------------------------------------------------------- install ---
-    def install_es_layers(self, perturb_rules, n_rails, global_seed):
+    def install_es_layers(self, perturb_rules, n_rails, global_seed,
+                          rail_mode="token", noise_rank=1):
         """Wrap every matched linear with ESTokenLinear; build the flat-noise
         layout + fixed Hadamard sign buffers. Idempotent. Returns the resolved
         layer-name list (named_modules order -- identical on every worker, so
@@ -355,8 +381,58 @@ class WorkerExtension(NPWorkerExtension):
             w = self.np_modules[layer_name].wrapped.weight
             self.es_w_rms[layer_name] = float(
                 w.detach().float().pow(2).mean().sqrt().item())
+        # es-decode (rail_mode="seq"): ONE perturbation per rail, held for the
+        # step, resident on the GPU for both the rails and the update.
+        self.es_rail_mode = str(rail_mode)
+        self.es_seq_noise = None
+        if self.es_rail_mode == "seq":
+            rank = "full" if str(noise_rank) == "full" else int(noise_rank)
+            self.es_seq_noise = SeqNoise(self.es_layout, int(n_rails), rank,
+                                         device, self.es_dtype)
+            print(f"[es-decode] held noise: N={n_rails} rank={rank} "
+                  f"{self.es_seq_noise.n_bytes / 2**30:.2f} GiB on {device}", flush=True)
         st["mode"] = "off"
         return list(matched)
+
+    # ----------------------------------------------------------- es-decode ---
+    def es_seq_draw(self, seeds, antithetic=True):
+        """Regenerate this step's held rail noise from N (N/2 antithetic) seeds."""
+        self.es_seq_noise.draw([int(s) for s in seeds], bool(antithetic))
+        torch.cuda.synchronize()
+        return int(self.es_seq_noise.n_bytes)
+
+    def es_seq_apply(self, coeffs, es_cfg):
+        """W_l += sum_n coeffs[n] * eps_{n,l} for every perturbed linear, from
+        the SAME held noise the rails used (OpenAI-ES step; coeffs carry alpha).
+        fp32 master on the host exactly as es_assemble_and_apply."""
+        device = self.model_runner.device
+        coef = torch.as_tensor(list(coeffs), dtype=torch.float32, device=device)
+        fp32_master = bool(es_cfg.get("fp32_master", True))
+        if fp32_master and getattr(self, "es_master", None) is None:
+            self.es_master = {}
+        norms, sq_w, sq_dw, numel = {}, 0.0, 0.0, 0
+        with torch.no_grad():
+            for ln in self.es_layout:
+                dw = self.es_seq_noise.update(ln, coef)          # fp32 [d_out, d_in]
+                weight = self.np_modules[ln].wrapped.weight
+                if fp32_master:
+                    master = self.es_master.get(ln)
+                    if master is None:
+                        master = weight.detach().float().cpu().clone()
+                        self.es_master[ln] = master
+                    master.add_(dw.to("cpu"))
+                    weight.copy_(master.to(weight.device, weight.dtype))
+                else:
+                    weight.add_(dw.to(weight.dtype))
+                norms[ln] = float(dw.norm().item())
+                sq_dw += float(dw.pow(2).sum().item())
+                sq_w += float(weight.float().pow(2).sum().item())
+                numel += dw.numel()
+                del dw
+        torch.cuda.synchronize()
+        return {"norms": norms,
+                "rms_w": (sq_w / max(numel, 1)) ** 0.5,
+                "update_rms_measured": (sq_dw / max(numel, 1)) ** 0.5}
 
     def _es_install_fused_consumers(self, model):
         """rail_impl="fused" (fused_rail_kernels.py): patch, per Qwen3 decoder
@@ -498,6 +574,9 @@ class WorkerExtension(NPWorkerExtension):
             "es_rail_impl": str(rail_impl),
             "es_x": {},
             "es_width": 1 + int(n_sample),
+            "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+            "es_seq_noise": getattr(self, "es_seq_noise", None),
+            "es_bucket": int(bucket),
         })
         return {
             "attn_impl": str(attn_impl),
@@ -736,7 +815,8 @@ class WorkerExtension(NPWorkerExtension):
         tail -> advance -> t += 1. Returns the hidden buffer."""
         from vllm.config.compilation import CUDAGraphMode
         width = 1 + int(gs["n_sample"])
-        fill_rademacher_rows_t(gs["noise_buf"], gs["seed_tbl"], gs["t_cnt"])
+        if getattr(self, "es_rail_mode", "token") != "seq":   # es-decode: noise is held
+            fill_rademacher_rows_t(gs["noise_buf"], gs["seed_tbl"], gs["t_cnt"])
         with torch.no_grad(), set_forward_context(
                 gs["attn_meta"], self.model_runner.vllm_config, num_tokens=gs["total"],
                 cudagraph_runtime_mode=CUDAGraphMode.NONE):
@@ -777,7 +857,8 @@ class WorkerExtension(NPWorkerExtension):
         greedy = temp == 0.0
         if not hasattr(self, "_es_graph_by_bucket"):
             self._es_graph_by_bucket = {}
-        gkey = (bucket, n_sample, attn_impl, rail_impl, "graph", max_tokens, greedy, bool(use_graph))
+        gkey = (bucket, n_sample, attn_impl, rail_impl, "graph", max_tokens, greedy, bool(use_graph),
+                getattr(self, "es_rail_mode", "token"))
         if gkey not in self._es_graph_by_bucket:
             rs = self._es_install_state(bucket, n_sample, device, attn_impl=attn_impl,
                                         rail_impl=rail_impl)
@@ -806,6 +887,9 @@ class WorkerExtension(NPWorkerExtension):
             "es_rail_impl": rail_impl,
             "es_x": {},
             "es_width": width,
+            "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+            "es_seq_noise": getattr(self, "es_seq_noise", None),
+            "es_bucket": int(bucket),
         })
         for ln, sg in sigma_eff.items():
             gs["sigma_buf"][ln].fill_(float(sg))
@@ -924,7 +1008,7 @@ class WorkerExtension(NPWorkerExtension):
         (the sampled tokens' .tolist() in the orchestrator is the only host
         read; ES_FULL_SYNC=1 restores the blanket sync for debugging)."""
         self._es_update_step_buffers(gs, states, n_sample)
-        if not os.environ.get("ES_BENCH_SKIP_NOISE"):
+        if not os.environ.get("ES_BENCH_SKIP_NOISE") and getattr(self, "es_rail_mode", "token") != "seq":
             self._es_fill_noise(gs["noise_buf"], es_cfg, step_t,
                                 slot_rollout_ids)
         gs["graph"].replay()
@@ -973,7 +1057,7 @@ class WorkerExtension(NPWorkerExtension):
             query_lens += [1] * width
             per_row_block_ids += [states[p]["block_ids"]] * width
 
-        if not os.environ.get("ES_BENCH_SKIP_NOISE"):
+        if not os.environ.get("ES_BENCH_SKIP_NOISE") and getattr(self, "es_rail_mode", "token") != "seq":
             self._es_fill_noise(rs["noise_buf"], es_cfg, step_t,
                                 slot_rollout_ids)
 
@@ -1084,7 +1168,7 @@ class WorkerExtension(NPWorkerExtension):
         if use_graph:
             if not hasattr(self, "_es_graph_by_bucket"):
                 self._es_graph_by_bucket = {}
-            gkey = (bucket, n_sample, attn_impl, rail_impl)
+            gkey = (bucket, n_sample, attn_impl, rail_impl, getattr(self, "es_rail_mode", "token"))
             if gkey not in self._es_graph_by_bucket:
                 rs = self._es_install_state(bucket, n_sample, device,
                                             attn_impl=attn_impl, rail_impl=rail_impl)
@@ -1115,6 +1199,9 @@ class WorkerExtension(NPWorkerExtension):
                 "es_rail_impl": rail_impl,
                 "es_x": {},
                 "es_width": width,
+                "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+                "es_seq_noise": getattr(self, "es_seq_noise", None),
+                "es_bucket": int(bucket),
             })
             for ln, s in sigma_eff.items():
                 gs["sigma_buf"][ln].fill_(float(s))

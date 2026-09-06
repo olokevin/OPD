@@ -1027,3 +1027,15 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   (`bp_b1.json`). Figure `figs/es_profile_b1_fused.png`. Results in es_profile_results.md §11–14.
 - Two launcher lessons: the trainer hangs on the decode after an eval (run step timings with
   `EVAL_INTERVAL=0`); `timeout` does not reap the trainer's python (kill by GPU PID).
+
+## [2026-09-05] ingest | es-decode implemented (held per-rail perturbation, full-rank packed bits or rank-r) + B=1 throughput + two ds15b training arms launched
+
+- `verl/trainer/es_token/rail_seq_kernels.py` (bit generation, bit-GEMV, low-rank rail, update
+  kernels, `SeqNoise`), `fused_rail_kernels.py` RB mode, worker `es_seq_draw/es_seq_apply`, trainer
+  seq branch (k1 fitness, `es_update.py` rule), launchers `ds15b/es_decode.sh`, `run_es_decode_arms.sh`.
+- Gates: `check_seq_kernels.py` (36/36), `check_es_decode.py` (S0–S5), SMOKE both arms.
+- Throughput (GPU 4, B=1): es_profile_results.md §15.4 + `figs/es_decode_b1_throughput.png`.
+- Training: GPU 7, full-rank first (step 0 = 1343 s), then rank-1; wandb `es_opd_JustRL_1p5b`.
+- Lessons: bit-GEMV grid must cover the ACTIVE rails (sweep installs N_max); a leading-axis tile
+  reduce in the fused silu kernel cost 6x at N=0 (static-unroll the apply side); per-token
+  antithetic asymmetry at sigma=1e-3 is ~0.27 (second order), the aggregated fitness is what counts.
