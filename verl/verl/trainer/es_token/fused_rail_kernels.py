@@ -107,7 +107,9 @@ if HAVE_TRITON:
                     # tile reduce here cost 6x in the silu kernel, 2026-09-05 audit)
                     for k in tl.static_range(RB):
                         ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
-                        a_k = tl.load(nb + off_u + k * H + idx, mask=hm, other=0.0).to(tl.float32)
+                        # k >= rank: coef is 0 but the address is past this layer's block
+                        # (past the buffer for the last rail/layer): 0 * garbage = NaN -> mask it
+                        a_k = tl.load(nb + off_u + k * H + idx, mask=hm & (k < rank), other=0.0).to(tl.float32)
                         y = y + ck * a_k
                     y = y.to(Y.dtype.element_ty).to(tl.float32)
         if HAS_RES:
@@ -197,10 +199,11 @@ if HAVE_TRITON:
                     for k in tl.static_range(RB):
                         ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
                         ab = nb + off_u + k * DOUT
-                        q1 = q1 + ck * tl.load(ab + q1o, mask=mq, other=0.0).to(tl.float32)
-                        q2 = q2 + ck * tl.load(ab + q2o, mask=mq, other=0.0).to(tl.float32)
-                        k1 = k1 + ck * tl.load(ab + k1o, mask=mk, other=0.0).to(tl.float32)
-                        k2 = k2 + ck * tl.load(ab + k2o, mask=mk, other=0.0).to(tl.float32)
+                        okk = k < rank            # see _norm_rail_kernel: never load past the block
+                        q1 = q1 + ck * tl.load(ab + q1o, mask=mq & okk, other=0.0).to(tl.float32)
+                        q2 = q2 + ck * tl.load(ab + q2o, mask=mq & okk, other=0.0).to(tl.float32)
+                        k1 = k1 + ck * tl.load(ab + k1o, mask=mk & okk, other=0.0).to(tl.float32)
+                        k2 = k2 + ck * tl.load(ab + k2o, mask=mk & okk, other=0.0).to(tl.float32)
                     q1 = q1.to(QKV.dtype.element_ty).to(tl.float32)
                     q2 = q2.to(QKV.dtype.element_ty).to(tl.float32)
                     k1 = k1.to(QKV.dtype.element_ty).to(tl.float32)
@@ -292,8 +295,9 @@ if HAVE_TRITON:
                         for k in tl.static_range(RB):
                             ck = tl.sum(tl.where(rk == k, coef, 0.0), axis=0)
                             ab = NOISE + rail_eff * snoise + off_u + k * (2 * I)
-                            g = g + ck * tl.load(ab + j, mask=m, other=0.0).to(tl.float32)
-                            h = h + ck * tl.load(ab + I + j, mask=m, other=0.0).to(tl.float32)
+                            mkk = m & (k < rank)  # never load past the block (last rail/layer = OOB)
+                            g = g + ck * tl.load(ab + j, mask=mkk, other=0.0).to(tl.float32)
+                            h = h + ck * tl.load(ab + I + j, mask=mkk, other=0.0).to(tl.float32)
                         g = g.to(T).to(tl.float32)
                         h = h.to(T).to(tl.float32)
             sg = _div(g, 1.0 + _exp(-g)).to(T).to(tl.float32)

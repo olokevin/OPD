@@ -492,6 +492,14 @@ class RayESTokenTrainer(RayNPTrainer):
                     den += lp.shape[0]
                     clean_means.append(float((lp[:, 0] - lq).mean()))
                 F = (num / max(den, 1)).numpy()                # [N] F(W+sigma eps_n) - F(W)
+                if not np.all(np.isfinite(F)):
+                    bad = [int(i) for i in np.nonzero(~np.isfinite(F))[0]]
+                    print(f"[es-decode] step {step}: non-finite fitness on rails {bad} -> "
+                          f"zeroing those rails' pairs (no NaN reaches the weights)", flush=True)
+                    F = np.where(np.isfinite(F), F, 0.0)
+                    if es_antithetic:
+                        for i in bad:
+                            F[i ^ 1] = 0.0
                 if es_antithetic:
                     fp_, fm_ = F[0::2], F[1::2]
                     d = 0.5 * (fp_ - fm_)

@@ -701,5 +701,9 @@ Antithetic pairing is mandatory: the even (curvature/noise) part of the prefill 
 as the odd part at σ=1e-3 (1.08) — a one-sided fitness would be dominated by it. (3) Per-layer
 cosines to the true k1 gradient are at the noise floor for both estimators at this sample size
 (8 rollouts; bound √(K/(K+D)) = 1.5e-3), i.e. the run-level signal is what §7's budget law says it is.
-(4) NaN payloads seen in the diagnostic's third decode call are a harness artefact under
-investigation (`nan_bisect`), not σ: σ up to 5e-3 decodes cleanly on both rail paths.
+(4) The NaN payloads were a **real kernel bug, now fixed**: the fused rank-r apply loops are
+statically unrolled to `RB = next_pow2(rank) ≥ 2` and loaded `a_k` for `k ≥ rank` (coefficient 0) —
+for the last rail × last layer that read runs past the noise buffer and `0 × garbage` is NaN whenever
+the garbage is (nondeterministic; always the last rail's whole column; only `rail_impl=fused`; σ up
+to 5e-3 decodes cleanly). Loads are now masked with `k < rank`; the trainer zeroes non-finite rails'
+pairs so a NaN can never reach the weights. The rank-1 search was restarted after re-gating.

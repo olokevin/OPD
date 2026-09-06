@@ -16,11 +16,11 @@
 [lowrank r=16 antithetic] max|d|=0.000e+00 mean=0.00e+00 PASS (tol 0.0)
 [bits_update] max|d|=0.000e+00 mean=0.00e+00 PASS (tol 1e-06)
 [lowrank_update r=4] max|d|=1.397e-09 mean=1.76e-10 PASS (tol 0.0001)
-[timing full-rank rail] N= 8 bucket=1: down+gate_up 0.199 ms/token (41 MB bits -> 208 GB/s; 3.3 TFLOP/s eff)
-[timing full-rank rail] N= 8 bucket=8: down+gate_up 0.207 ms/token (41 MB bits -> 199 GB/s; 25.5 TFLOP/s eff)
-[timing full-rank rail] N=32 bucket=1: down+gate_up 0.545 ms/token (165 MB bits -> 303 GB/s; 4.8 TFLOP/s eff)
-[timing full-rank rail] N=32 bucket=8: down+gate_up 0.563 ms/token (165 MB bits -> 294 GB/s; 37.6 TFLOP/s eff)
-INFO 09-05 23:13:34 [__init__.py:216] Automatically detected platform cuda.
+[timing full-rank rail] N= 8 bucket=1: down+gate_up 0.198 ms/token (41 MB bits -> 208 GB/s; 3.3 TFLOP/s eff)
+[timing full-rank rail] N= 8 bucket=8: down+gate_up 0.207 ms/token (41 MB bits -> 200 GB/s; 25.6 TFLOP/s eff)
+[timing full-rank rail] N=32 bucket=1: down+gate_up 0.546 ms/token (165 MB bits -> 302 GB/s; 4.8 TFLOP/s eff)
+[timing full-rank rail] N=32 bucket=8: down+gate_up 0.564 ms/token (165 MB bits -> 293 GB/s; 37.5 TFLOP/s eff)
+INFO 09-06 12:47:31 [__init__.py:216] Automatically detected platform cuda.
 [fused norm rank=1: residual] max|d|=0.000e+00 mean=0.00e+00 PASS (tol 0.0)
 [fused norm rank=1: normed] max|d|=0.000e+00 mean=0.00e+00 PASS (tol 0.02)
 [fused silu rank=1] max|d|=0.000e+00 mean=0.00e+00 PASS (tol 0.03)
