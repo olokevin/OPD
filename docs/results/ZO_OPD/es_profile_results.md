@@ -707,3 +707,12 @@ for the last rail × last layer that read runs past the noise buffer and `0 × g
 the garbage is (nondeterministic; always the last rail's whole column; only `rail_impl=fused`; σ up
 to 5e-3 decodes cleanly). Loads are now masked with `k < rank`; the trainer zeroes non-finite rails'
 pairs so a NaN can never reach the weights. The rank-1 search was restarted after re-gating.
+
+**Rank-1 search, arm α=1.25e-3 (relaunched 12:48 on the fixed kernels):** 336 s/step (decode 305 —
+4× cheaper than full-rank, 0.94× es-token-decode's 745 with the 0831 kernels), `es/post_update_gain`
++0.6e-3…+3.7e-3 every step, train KL 0.266 → 0.235 by step 10 (full-rank needed 20 steps; C's
+step-10 block 0.248). **Standard ruler @10: MATH-500 0.773, AIME24 0.233** (base 0.751 / 0.150; C @20
+0.803 / —; BP @20 0.823, AIME24 0.267 @60). Checkpoints are scored automatically as they appear
+(`ds15b/ruler_watch.sh` → `results/ruler_scores.tsv`; single-checkpoint tool `ds15b/ruler_ckpt.sh`,
+which also reaps the stale isolated Ray head that made the first re-score fail with a
+session-name mismatch).
