@@ -675,3 +675,31 @@ learns less per step (+2.8 pp vs +5.2 on the ruler at 20; KL −10 % vs −17 %)
 its per-rail fitness spread is 2.6× smaller for the same σ (the detached-history rail sees a weaker
 effect of the same perturbation; §4/§7.2 prediction). 22 % of its step-20 evals hit the cap (C/BP:
 16–17 %). The rank-1 arm follows.
+
+### 15.6 Pivot (2026-09-06 12:40): full-rank arm stopped at step 34, rank-1 search launched; flow diagnostics
+
+The full-rank arm was learning slower than es-prefill C at 4.2× its cost (§15.5) and is not the
+setting to tune; its step-20 checkpoint / ruler (0.779) are kept. GPU 7 now runs
+`run_es_decode_r1_search.sh`: rank-1, N=32, σ=1e-3, eval + checkpoint every 10 steps, arms
+`α=1.25e-3` (40 steps) → `raw α=2.8e-3` (40; `es_normalize=raw` = α × the gradient estimate, so the
+step scales with the signal instead of the fixed random walk; 2.8e-3 matches zscore-1.25e-3 at the
+initial `d_std`) → `α=2.5e-3` (30) → `α=5e-4` (30). Every step now logs `es/post_update_gain`
+(F(W_new) − F(W₀) on the first wave's first 512 tokens, teacher-forced clean-rail re-decode): the
+smoke gave +6.9e-3 / +4.6e-3 (> 0: the step ascends its own surrogate).
+
+**Is the decode-rail fitness a faithful proxy? (`check_es_decode_fitness.py`, GPU 4, 8 sampled rollouts × 512 tok, N=64 held rank-1 rails = 32 antithetic pairs, HF prefill of the SAME noise via hooks)**
+
+| σ | corr(F_dec, F_pre) | corr(d_dec, d_pre) = cos of the two assembled updates | sign agreement | RMS(d) dec / pre | even/odd dec, pre |
+| --- | --- | --- | --- | --- | --- |
+| 3e-4 | +0.40 | **+0.51** | 0.66 | 3.2e-4 / 7.2e-4 = **0.45** | 0.40, 1.56 |
+| 1e-3 | +0.57 | **+0.62** | 0.75 | 9.9e-4 / 2.2e-3 = **0.45** | 0.38, 1.08 |
+
+Reads: (1) the detached-history rail sees the *same direction* as a true prefill of the perturbed
+model with cosine ≈ 0.6 and **45 % of its fitness spread** — es-decode is es-prefill with a noisier
+estimator, not a broken one; that is the whole gap to C (§15.5) and it does not depend on σ. (2)
+Antithetic pairing is mandatory: the even (curvature/noise) part of the prefill fitness is as large
+as the odd part at σ=1e-3 (1.08) — a one-sided fitness would be dominated by it. (3) Per-layer
+cosines to the true k1 gradient are at the noise floor for both estimators at this sample size
+(8 rollouts; bound √(K/(K+D)) = 1.5e-3), i.e. the run-level signal is what §7's budget law says it is.
+(4) NaN payloads seen in the diagnostic's third decode call are a harness artefact under
+investigation (`nan_bisect`), not σ: σ up to 5e-3 decodes cleanly on both rail paths.

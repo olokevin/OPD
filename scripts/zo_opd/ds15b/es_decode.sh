@@ -75,8 +75,10 @@ export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 export TEACHER_MAX_MODEL_LEN=${TEACHER_MAX_MODEL_LEN:-$((1024 + MAX_PROMPT_LENGTH + MAX_RESP_LENGTH))}
 
 export PROJECT_NAME=${PROJECT_NAME:-es_opd_JustRL_1p5b}
+export ES_POST_GAIN_TOKENS=${ES_POST_GAIN_TOKENS:-512}   # es/post_update_gain on the first wave
 _RANK_TAG="r${NOISE_RANK}"; [ "$NOISE_RANK" = "full" ] && _RANK_TAG="full"
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-ds15b_es-decode_${_RANK_TAG}_N${N_SAMPLE}_sig${SIGMA}_a${ES_ALPHA}}
+_NORM_TAG=""; [ "$ES_NORMALIZE" != "zscore" ] && _NORM_TAG="_${ES_NORMALIZE}"
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-ds15b_es-decode_${_RANK_TAG}_N${N_SAMPLE}_sig${SIGMA}_a${ES_ALPHA}${_NORM_TAG}}
 export ES_LOGGER=${ES_LOGGER:-'["console","wandb"]'}
 export LOG_DIR=${LOG_DIR:-logs/ds15b/es_decode}
 

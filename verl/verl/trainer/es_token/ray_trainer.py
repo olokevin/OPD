@@ -374,6 +374,10 @@ class RayESTokenTrainer(RayNPTrainer):
             if es_antithetic:
                 assert int(cfg.n_sample) % 2 == 0, "antithetic es-decode needs an even n_sample"
         ckpt_keep_last = int(cfg.get("ckpt_keep_last", 2))
+        # es-decode: after the update, re-score the FIRST wave's rollouts (first
+        # es_post_gain_tokens tokens, teacher-forced, clean rail only) to log
+        # F(W_new) - F(W_0) on the batch -- es_update.py's post_update_gain.
+        es_post_gain_tokens = int(cfg.get("es_post_gain_tokens", 0) or 0)
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643
         # (<|endoftext|>, declared only in generation_config.json). Opt-in so the
@@ -430,7 +434,10 @@ class RayESTokenTrainer(RayNPTrainer):
             t_dec0 = time.time()
             roll_pids, roll_rids, roll_toks, roll_payload = [], [], [], []
             roll_tp, roll_tids = [], []
+            first_wave_n = None
             for wi, (wave_pids, wave_rids, real_count) in enumerate(waves):
+                if wi == 1:
+                    first_wave_n = len(roll_toks)
                 if ES_DEBUG:
                     print(f"[esdbg s{step} wave {wi} real={real_count}] decode",
                           flush=True)
@@ -452,6 +459,8 @@ class RayESTokenTrainer(RayNPTrainer):
                         roll_tp.append(out["topk_payload"][i])
                         roll_tids.append(out["topk_ids"][i])
             decode_s = time.time() - t_dec0
+            if first_wave_n is None:
+                first_wave_n = len(roll_toks)
 
             if not roll_toks:
                 logger.log(data={"train/step_time": time.time() - t0,
@@ -510,6 +519,28 @@ class RayESTokenTrainer(RayNPTrainer):
                     ray.get([e.collective_rpc.remote("broadcast_layer_weights", args=(ln, 0))
                              for e in self.engines])
                 assemble_s = time.time() - t_asm0
+                post_gain = float("nan")
+                if es_post_gain_tokens > 0 and first_wave_n > 0:
+                    t_pg0 = time.time()
+                    npg = first_wave_n
+                    force = [list(roll_toks[j][:es_post_gain_tokens]) for j in range(npg)]
+                    cfg_pg = dict(es_cfg, n_sample=0, max_tokens=es_post_gain_tokens,
+                                  force_tokens=force, b_pack_buckets=[npg])
+                    out_pg = ray.get(self.engines[0].collective_rpc.remote(
+                        "run_es_decode_packed",
+                        args=(roll_pids[:npg], sp, cfg_pg, roll_rids[:npg], use_graph)))[0]
+                    num_pg, den_pg = 0.0, 0
+                    for j in range(npg):
+                        Tj = min(len(out_pg["clean_tokens"][j]), len(force[j]))
+                        if Tj == 0:
+                            continue
+                        lp_new = out_pg["payload"][j][:Tj, 0].double()
+                        lp0 = roll_payload[j][:Tj, 0].double()
+                        A = logqs[j][:Tj].double() - lp0
+                        num_pg += float((A * (lp_new - lp0)).sum())
+                        den_pg += Tj
+                    post_gain = num_pg / max(den_pg, 1)
+                    assemble_s += time.time() - t_pg0
                 upd_rms = float(np.sqrt(np.sum(coef_eff ** 2)))
                 rms_w = float(_res["rms_w"])
                 self._es_cum_sq = getattr(self, "_es_cum_sq", 0.0) + upd_rms ** 2
@@ -524,7 +555,7 @@ class RayESTokenTrainer(RayNPTrainer):
                     "train/dW_norm_max": float(max(_res["norms"].values())),
                     "train/dW_norm_mean": float(np.mean(list(_res["norms"].values()))),
                     "train/update_footprint": upd_rms / rms_w,
-                    "es/post_update_gain": float("nan"),
+                    "es/post_update_gain": post_gain,      # F(W_new)-F(W_0), first wave, >0 = ascent
                     "es/cum_footprint": float(np.sqrt(self._es_cum_sq)) / rms_w,
                     "es/fitness_plus_mean": float(fp_.mean()),
                     "es/fitness_minus_mean": float(fm_.mean()),

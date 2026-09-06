@@ -40,6 +40,7 @@ es_token:
   es_antithetic: true              # rail 2i+1 = -rail 2i
   es_normalize: zscore             # zscore | raw
   ckpt_keep_last: 2                # HF checkpoints kept (peak-then-revert curves: raise it)
+  es_post_gain_tokens: 0           # seq mode: re-score the first wave's first K tokens after the update (es/post_update_gain); 0 = off
 
   # decode driver (graphed packed; eager only as the parity oracle)
   attn_impl: rows                  # rows | shared | fold (rail-aware kernels, es_profile_results.md)
