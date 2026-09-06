@@ -34,6 +34,13 @@ for arm in ${ARMS:?set ARMS="dense fura fura_zoact lora"}; do
     fura)       MODE=fura       SIG=0.0125   ALP=0.0036084  RANK=1  ;;
     fura_zoact) MODE=fura_zoact SIG=0.05     ALP=0.014434   RANK=1  ;;
     lora)       MODE=lora       SIG=0.015385 ALP=0.0076925  RANK=44 ;;
+    lora_r1)    MODE=lora       SIG=0.0022   ALP=0.0254040  RANK=1  ;;
+    # `isobtt` IS "fura + ISO": fura's block-wise SVD with A_j = U_j diag(S_j) frozen and the
+    # small core R_j constrained to O(b) by a Cayley step, so each block's spectrum is exactly
+    # preserved.  sigma is a RELATIVE FOOTPRINT for the ISO modes, not a noise std (section
+    # 10.4), hence 5e-2; alpha = sigma/2 * sqrt(10/30) is the section-16.4 motion correction.
+    # Never LR-searched at N=10 -- this is the principled default, not a tuned point.
+    isobtt)     MODE=isobtt     SIG=0.05     ALP=0.014434   RANK=1  ;;
     *) echo "[skip] unknown arm $arm"; continue ;;
   esac
   NAME="aligned-${arm}$([ "$arm" = lora ] && echo "-r${RANK}")_rs${TB}_sig${SIG}_a${ALP}_N10_it${ITERS}"

@@ -2503,3 +2503,242 @@ uniformly over all rows/columns/layers). Two consequences for this thread:
   Probe logs `logs/es/probe_sgdmask{,_nz}_gpu0.log`; ES logs `logs/es/sgdmask_es_gpu0.log`,
   `logs/es/sgdmask_nz_chain_gpu0.log`; figure `figs/n10_sgdmask.png` via
   `collect_es_curves.py` + `plot_es_curves.py`.
+
+## 19. The leaderboard on the paper-aligned data protocol
+
+> The §17 ranking, re-measured with the **official data protocol** instead of the fixed
+> 64-problem batch. Each arm keeps *its own* best (σ, α) from §17 — only the data changes.
+> GPUs 6/7, 2026-09-02/03. Launcher `scripts/es/chain_aligned_pop10.sh`.
+
+### 19.1 Why this had to be run
+
+Every number in §7–§18 was measured on **one fixed 64-problem batch, never refreshed** —
+16× smaller than the official `--batch-size 1024` and resampled never instead of every
+iteration ([§12](#12-alignment-with-the-official-implementation)). That protocol lets ES
+memorise: [§11.1](#111-the-64-problem-batch-is-the-ceiling-not-the-method) measured `dense`'s
+train-minus-held-out gap swinging **+3.9 → −6.1 pp**, and every arm flattening by step ~40.
+So the whole leaderboard was open to the charge that it ranked *which method memorises 64
+problems best*.
+
+**Design.** Only the data protocol moves: `train_batch_size=1024`, resampled every iteration
+from the full **8,890**-problem pool, 100 iterations, N=10. ⚠️ `TRAIN_MAX_SAMPLES=-1` is
+required — the default truncates the pool to 64, and the resample guard
+`train_batch_size < len(train_data)` then **silently falls back to the fixed batch**.
+Both logs confirm `Training batch: 1024 problems resampled per iteration from a pool of 8890`.
+
+**Remaining deviation:** train token budget stays **1,536** (paper 3,000). [§3](#3-setup-actually-used-and-deviations)
+measured that 1,536 keeps 98.4% of the base model's correct answers (p99 = 2,030); at batch
+1024 the paper's 3,000 would roughly double an already 15 GPU-h arm. Held-out eval keeps 3,000.
+
+### 19.2 Results
+
+<!-- ALIGNED:RESULTS BEGIN -->
+
+| # | Method | σ / α | Base | **Plateau (≥40)** | Best @ step | trainable | GPU-h |
+|---|---|---|---|---|---|---|---|
+| 1 | `fura` | 1.25e-2 / 3.61e-3 | 53.2 | **73.89 ± 0.25** | 75.0 @ 90 | 1.28% | 14.9 |
+| 2 | `dense` | 1e-3 / 2.89e-4 | 51.6 | **72.83 ± 0.55** | 74.2 @ 90 | 100% | 15.9 |
+| 3 | `isobtt` (fura + ISO) | 5e-2 / 1.44e-2 | 53.2 | **72.80 ± 0.40** | 74.4 @ 70 | **0.64%** | 15.1 |
+| 4 | `fura_zoact` r=1 | 5e-2 / 1.44e-2 | 53.2 | **72.46 ± 0.46** | 73.8 @ **100** | **0.011%** | 15.2 |
+| 5 | `lora r=44` | 1.538e-2 / 7.69e-3 | 51.6 | **71.23 ± 0.52** | 73.0 @ 50 | 1.28% | 14.8 |
+| 6 | `lora r=1` | 2.2e-3 / 2.54e-2 | 51.6 | **60.91 ± 1.76** ✗ | 69.6 @ 30 | 0.029% | 15.2 |
+
+✗ diverging — 69.6 @ 30 → 57.8 @ 70 → 54.6 @ 100; see reading 3 below.
+
+MATH-500 curves:
+
+| step | 0 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `fura` | 53.2 | 69.6 | 73.4 | 73.2 | 72.8 | 73.8 | 73.8 | 73.8 | 74.2 | **75.0** | 73.8 |
+| `dense` | 51.6 | 70.6 | 72.4 | 69.2 | 70.4 | 71.2 | 73.6 | 73.0 | 73.8 | **74.2** | 73.6 |
+| `fura_zoact` | 53.2 | 65.0 | 69.0 | 70.4 | 73.0 | 70.8 | 72.4 | 70.8 | 72.8 | 73.6 | **73.8** |
+| `isobtt` | 53.2 | 67.6 | 69.4 | 71.4 | 71.2 | 73.4 | 72.2 | **74.4** | 72.0 | 73.0 | 73.4 |
+| `lora r=44` | 51.6 | 68.8 | 71.2 | 70.6 | 71.0 | **73.0** | 71.8 | 72.6 | 70.4 | 70.8 | 69.0 |
+| `lora r=1` | 51.6 | 63.6 | 64.0 | **69.6** | 68.4 | 64.0 | 63.6 | 57.8 | 58.4 | 59.6 | 54.6 |
+
+<!-- ALIGNED:RESULTS END -->
+
+### 19.3 Reading
+
+**1. The ranking survives, unchanged.** `fura` > `dense` > `fura_zoact` > `lora r=44` on
+both protocols, and every arm *gains*:
+
+| arm | fixed 64 | aligned 1024 | Δ |
+|---|---|---|---|
+| `fura` | 73.17 ± 0.33 | **73.89 ± 0.25** | +0.72 |
+| `dense` | 72.68 ± 0.43 | **72.83 ± 0.55** | +0.15 |
+| `fura_zoact` | 71.36 ± 0.64 | **72.46 ± 0.46** | +1.10 |
+| `lora r=44` | 70.68 ± 0.60 | **71.23 ± 0.52** | +0.55 |
+
+So §17's conclusions are **not** artefacts of the memorising batch. ⚠️ But the adjacent gaps
+are small — `fura`−`dense` = 1.06 ± 0.60, `dense`−`fura_zoact` = 0.37 ± 0.72,
+`fura_zoact`−`lora` = 1.23 ± 0.69. Only `fura` vs `lora` (2.66 ± 0.58) separates cleanly.
+What is solid is that the *order* reproduces across two protocols, not any single gap.
+
+**2. The memorisation ceiling is gone.** Three of four arms post their best at step 90–100
+and are still rising, where every fixed-batch arm was flat by 40. The §11.1 ceiling was the
+batch, exactly as claimed — and it means these plateaus are still lower bounds at 100
+iterations (the paper runs 500).
+
+**2b. Freezing the spectrum exactly still costs nothing.** `isobtt` — fura's block-wise SVD
+with `A_j` frozen and the small core `R_j` held in `O(b)` by a Cayley step — lands at
+**72.80 ± 0.40 from 0.64% of the weights**, statistically tied with full `dense`'s 72.83
+(−0.03 ± 0.68) and above `fura_zoact`. The constraint held exactly: `max|RᵀR − I|` stayed at
+**1.0e-6** (fp32 round-off) for all 100 iterations. So [§10](#10-iso-fixed-spectrum-es)'s
+result reproduces on the aligned protocol — all the gain is frame rotation, none of it needs
+the singular values to move.
+
+**3. Both LoRA arms fail to transfer, and they are the only ones that do.** `lora r=44`
+*declines*: 73.0 @ 50 → 69.0 @ 100. It is the
+only arm that peaks early and walks back down, which is the α-too-large signature — its
+α/σ = 0.5 was chosen on the fixed batch ([§17.5](#175-lora-the-σ-search-and-rank-1-rescued-by-87-pp))
+where it was the best of four. `lora r=1` is worse — **69.6 @ 30 → 54.6 @ 100**, a clear
+divergence, at `reward_std` **0.0075**, less than half the aligned healthy band: it takes large
+steps on weak signal. **Four of four structured arms transfer their fixed-batch σ/α cleanly;
+two of two LoRA arms do not.** That is consistent with [§17.2](#172-lora-es-is-not-linear-in-σ-and-that-caps-rank-1-structurally):
+the bilinear parameterisation's effective step is `σ·ε_B A₀ + σ²·ε_B ε_A`, so it depends on
+the reward landscape in a way the linear modes' does not, and a step calibrated on one data
+distribution does not carry to another. Both LoRA arms need their own σ/α search here.
+
+**4. ⚠️ The `reward_std` band of [§17.1](#171-σ-is-set-by-trainreward_std-not-by-weight-space-footprint)
+is batch-size-dependent and does not transfer.** At batch 1024 the same σ gives:
+
+| arm | `reward_std` @ batch 64 | @ batch 1024 | ratio |
+|---|---|---|---|
+| `dense` | 0.0383 | 0.0156 | 0.41 |
+| `fura` | 0.0394 | 0.0174 | 0.44 |
+| `fura_zoact` | 0.0519 | 0.0237 | 0.46 |
+| `lora r=44` | 0.0482 | 0.0210 | 0.44 |
+
+A strikingly consistent **≈0.44×** — larger than the 0.25× that pure 1/√B sampling would
+predict, so part of the spread is genuine perturbation signal that does *not* average away.
+**The healthy band at batch 1024 is ≈0.016–0.024**, and anyone tuning a new arm here with
+§17.1's 0.040–0.055 would set σ far too high. Quote the band with its batch size.
+
+## 20. BP `fura` — the small-core subspace under true gradients, on the dense-SGD protocol
+
+> The BP counterpart of the ES `fura` arm, run on **exactly the §18.3 dense SGD-GRPO protocol**
+> (Qwen2.5-Math-7B, the fixed 64-problem batch, GRPO n=8 T=1.0, 1536-token rollouts, vanilla SGD,
+> 10 steps, greedy MATH-500 at 3,000 tokens) so that fura-vs-dense is a comparison of the
+> *subspace* under the same first-order optimiser. Dense reference: lr 0.1 → 52.4 / **72.4 @5** /
+> 72.2 @10. LR searched from **10× the dense LR** in both directions (0.3 / 1.0 / 2.0 / 3.0), plus a per-step-eval
+> rerun of the dense reference. GPU 2, 2026-09-05/06.
+> Launcher `scripts/es/run_bp_fura_math.sh`, chain `scripts/es/chain_bp_fura_lr.sh`, table
+> `scripts/es/collect_bp_fura.py`. wandb `BP-q2p5-7b`, runs `sgd-fura_math-lv3to5-b64_lr*_n8_fp32_st10`.
+
+### 20.1 Setup — what differs from the dense reference, and why
+
+| knob | dense reference (§18.3) | BP `fura` | why |
+|---|---|---|---|
+| adapter | none (all 7.62 B) | `blocktt`, `output_one_block`, rank full, small core trains, `s_merged_to=frozen`, `factorize_by_head=False`, `train_bias=False` | per input block j, `W[:, blk_j] = A_j R_j`, `A_j = U_j S_j` frozen, `R_j = Vh_j` (b×b) trained — the ES `fura` factorisation (3584 → 56×64, 18944 → 128×148) |
+| trainable | 100 % | **117.0 M = 1.54 %** | HF keeps q/k/v and gate/up as separate Linears, so 6+1 cores per layer vs ES fura's 3+1 on vLLM's fused weights (97.8 M); same discrepancy §13.1 accepted for `isobtt` |
+| params dtype | bf16 (the §18 object of study) | **fp32 master**, bf16 compute (FSDP2 mixed precision) | the cores have entries ~0.1 whose bf16 half-ULP (~5e-4) is ~40× the per-entry SGD step at lr 1, so bf16 cores would silently drop the update |
+| FSDP | FSDP1 | FSDP2 | blocktt's mixed trainable/frozen params break FSDP1's writeback |
+| eval cadence | steps 0/5/10 | **every step** | convergence-speed question |
+| optimiser | SGD lr 0.1, no momentum, wd 0, clip 1.0 | same, **lr ∈ {1.0, 0.3, 3.0, 0.1}** | see below |
+| base reads | 52.4 | 51.4 | bf16 export of the fp32 `A_j R_j` product; within the ±2.2 pp eval SE of 51.6/52.4 |
+
+**Why fura needs a larger LR under SGD.** The update to the small core is `ΔR_j = −η A_jᵀ G_j`, so
+in weight space `ΔW_j = −η U_j S_j² U_jᵀ G_j`: the gradient is projected onto each block's b-dimensional
+column space (≈ √(b/out) ≈ 0.13 of its norm survives) and re-weighted by S². Measured: **grad norm
+0.033 at step 1 vs 0.66 for dense** (20× smaller, clip 1.0 never engages), so at lr 1.0 fura's
+per-step weight motion is roughly 2× dense's at 0.1. That is the analytic reason "start at 10×"
+is the right bracket, not just a convention.
+
+### 20.2 Results
+
+<!-- BPFURA:RESULTS BEGIN -->
+
+Greedy MATH-500 (verl `ttrl_math` grader, 3,000 tokens) every step. `train` = GRPO rollout score of
+the batch *before* that step's update. Every run is one seed; the T=1 rollouts differ per run.
+
+| step | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **dense SGD lr 0.1**, §18.3 run (evals @5/10) | 52.4 | | | | | 72.4 | | | | | 72.2 |
+| **dense SGD lr 0.1**, rerun with per-step evals | 52.4 | **73.6** | 75.0 | 73.0 | 75.0 | 75.2 | 77.6 | 77.4 | **78.2** | 76.6 | 76.2 |
+| dense rerun `train` | | 0.32 | 0.55 | 0.62 | 0.60 | 0.64 | 0.62 | 0.61 | 0.64 | 0.65 | 0.66 |
+| dense rerun grad norm | | 0.66 | 0.19 | 0.17 | 0.13 | 0.13 | 0.14 | 0.14 | 0.12 | 0.11 | 0.12 |
+| fura SGD lr 0.3 (3×) | 51.4 | 55.0 | 59.8 | 59.4 | 62.6 | 66.0 | 64.4 | 69.2 | 69.0 | 69.4 | 71.2 |
+| **fura SGD lr 1.0** (10×) | 51.4 | 58.8 | 62.8 | 68.4 | 72.0 | 73.0 | 73.2 | 73.0 | 73.4 | 72.6 | 73.4 |
+| fura lr 1.0 `train` | | 0.31 | 0.43 | 0.39 | 0.49 | 0.53 | 0.51 | 0.57 | 0.54 | 0.56 | 0.56 |
+| fura lr 1.0 grad norm | | 0.033 | 0.037 | 0.035 | 0.034 | 0.025 | 0.028 | 0.028 | 0.026 | 0.021 | 0.025 |
+| **fura SGD lr 2.0** (20×) | 51.4 | 63.8 | 69.6 | 73.8 | **76.0** | 74.2 | 73.4 | 75.6 | 74.8 | 73.2 | 72.6 |
+| fura lr 2.0 `train` | | 0.31 | 0.46 | 0.47 | 0.53 | 0.54 | 0.59 | 0.58 | 0.59 | 0.62 | 0.63 |
+| fura SGD lr 3.0 (30×) | 51.4 | 62.6 | 72.4 | 73.8 | 74.2 | **9.6** ✗ | 0.0 ✗ | – | – | – | – |
+| fura lr 3.0 `train` | | 0.31 | 0.41 | 0.56 | 0.57 | 0.56 | 0.03 | | | | |
+
+Plateau = mean ± sd of the evals from the first step ≥ 72 onwards. Timing is per step on GPU 2
+(gen / update / greedy eval), all runs on the same GPU except the §18.3 dense run (GPU 0).
+
+| arm | trainable | first ≥ 72 | best | plateau | final @10 | train @10 | s/step (gen / update / eval) | wall |
+|---|---|---|---|---|---|---|---|---|
+| dense lr 0.1, §18.3 run | 100 % | ≤ 5 | 72.4 @5 | 72.3 (5, 10) | 72.2 | 0.61 | 203 (48 / 119 / 53) | 40 min (3 evals) |
+| **dense lr 0.1, rerun** | 100 % | **1** | **78.2 @8** | **75.8 ± 1.6** (1–10) | **76.2** | 0.66 | **133 (38 / 73 / 46)** | 36 min (11 evals) |
+| fura lr 0.3 | 1.54 % | – (71.2 @10, rising) | 71.2 @10 | – | 71.2 | 0.47 | 149 | 39 min |
+| fura lr 1.0 | 1.54 % | 4 | 73.4 @8 | 72.9 ± 0.5 (4–10) | 73.4 | 0.56 | 152 (49 / 75 / 56) | 38 min |
+| **fura lr 2.0** | 1.54 % | **3** | **76.0 @4** | **74.3 ± 1.2** (4–10) | 72.6 | 0.63 | 149 (47 / 75 / 66) | 40 min |
+| fura lr 3.0 | 1.54 % | 2 | 74.2 @4 | ✗ destroyed @5 | 0.0 @6 | – | 150 | killed @6 |
+
+<!-- BPFURA:RESULTS END -->
+
+### 20.3 Reading
+
+1. **Final score: fura lands inside the dense run-to-run spread, not above it.** Two dense runs
+   at identical settings read **72.2 and 76.2 @10** (plateaus 72.3 and 75.8 ± 1.6) — the T=1
+   rollouts differ per run and that alone moves every eval by 3–4 pp. fura's best LR gives
+   74.3 ± 1.2 (lr 2.0) and 72.9 ± 0.5 (lr 1.0), i.e. between the two dense runs and ~1.5 pp under
+   the better one. The honest statement is **fura ≈ dense within single-seed noise, with no
+   evidence it is better** — the ES-side "fura ≥ dense" (§17/§19) does not carry over to BP on
+   this evidence, and a second seed of each arm is needed before any ±2 pp claim.
+2. **Convergence: dense is faster in steps and in wall-clock.** With per-step evals dense goes
+   **52.4 → 73.6 in one SGD step** (train 0.32 → 0.55, grad norm 0.66) and is at plateau by
+   step 2; fura needs **3 steps at lr 2.0** (73.8) and **4 at lr 1.0** (72.0) to cross 72, with
+   a 20× smaller gradient (0.033) that the higher LR only partly compensates. Per-step cost is the
+   same (update 75 s vs 73 s — the frozen 7.6 B cores save the weight-grad GEMMs but the fp32
+   master and the BTT forward give it back), so time-to-72 is **≈ 2.5 min vs ≈ 7.5 min**. The
+   §13.5 "BP is far cheaper than ES" point stands for both; the subspace does not make BP faster.
+3. **The LR window is 10–20× the dense LR, and it is a cliff on the high side.** 0.3 (3×) is
+   clearly starved (71.2 @10, still rising); 3.0 (30×) climbs fastest of all (72.4 @2, 74.2 @4,
+   train 0.57 @4 — the dense train curve exactly) and then **one update takes it 74.2 → 9.6 →
+   0.0** with entropy 0.20 → 1.9. That is the §11.2 shape of the ES `fura` sweep (12.5× in, 40×
+   out, "fastest early climb before degrading") reproduced under true gradients: the small-core
+   update `ΔW = −η U S² Uᵀ G` is re-weighted by S², so the largest-singular-value directions take
+   steps ~2× the mean and overshoot first. Why the window sits at 10–20× rather than the analytic
+   ~5× (§13.4's √b rule): the gradient's projection onto the block column spaces keeps only
+   ~13 % of its norm, so a larger η is needed for the same weight-space motion (§20.1).
+4. **lr 2.0 drifts after its peak; lr 1.0 does not.** At 2.0 train climbs to 0.63 while held-out
+   slides 76.0 @4 → 72.6 @10; at 1.0 held-out holds 73 ± 0.5 through step 10 at train 0.56. The
+   dense rerun keeps rising to step 8 at train 0.66, so this is not simply "fixed-batch
+   overfitting" (§11.1) — the 20× step is at the edge of the window and walks the weights back
+   downhill after the first few updates. **Recipe on this protocol: lr 2.0 for ≤ 5 steps, lr 1.0
+   for longer.** Both should be re-checked on the resampled protocol (§19), where the ES `fura`
+   arm keeps improving to step 90.
+5. **Against ES, the gap is the optimiser, not the subspace.** ES `fura` at N=10 needs ~20
+   iterations / 0.7 GPU-h to cross 72 (§17); BP `fura` does it in 3–4 steps / ≈ 8 min / 0.13
+   GPU-h, and dense BP in one step. The §13/§18 zeroth-vs-first-order gap holds on fura's own
+   subspace: ≈ 5× in GPU-hours, 5–7× in steps.
+6. **Method caveat for every number on this page: one seed.** The two dense runs are the first
+   same-config repeat in the BP leg and differ by more than the per-eval SE (2.2 pp) at every
+   step. §17–§19's ±0.5 pp "plateau SE" is the within-run eval spread, not the seed-to-seed
+   spread; ranking claims at the 1–2 pp level need a second seed.
+
+### 20.4 Reference
+
+* Logs `logs/es/bp_fura_lr{1.0,0.3,3.0,0.1}_gpu2.log`, chain log `logs/es/chain_bp_fura_gpu2.out`.
+  The dense reference is `logs/es/sgdmask_sgd_gpu0.log` (§18.8); its per-step-eval rerun is
+  `logs/es/bp_dense_sgd_tf1_gpu2.log` (`TEST_FREQ=1 SAVE_FREQ=0 DEVICES=2 bash scripts/es/run_sgd_mask.sh`,
+  wandb `sgd-dense_math-lv3to5-b64_lr0.1_n8_bf16_st10_tf1`). The lr 0.1 fura run was dropped from
+  the chain once 0.3 had shown under-stepping; lr 2.0 was added once 3.0 had diverged.
+* **GPU choice.** The run was asked for on GPU 4, but a 15-minute memory sample showed the colleague
+  job idling there at 8.6 GB with ~20 s spikes to **62 GB** — a 7B run (78 GB peak here) would OOM one
+  of the two. GPU 2's job stayed at 2.7 GB over 17 minutes of sampling, so the chain runs there.
+* **verl memory leak fixed on the way** (`verl/workers/sharding_manager/fsdp_vllm.py`): with a PEFT
+  adapter that overrides `export_for_vllm`, the dense export dict stayed referenced through the
+  rollout, so `del params` freed nothing — 30 GB of fp32 export sat next to vLLM's KV cache and the
+  GPU read **92 GB** at a 0.40 vLLM budget. The refs are now dropped before `del params` and the
+  blocktt export is cast to bf16; the same run now peaks at **78 GB** with a 0.35 budget. This also
+  affected the §13 `iso*` arms (bf16 export, ~15 GB).
+* Two launch gotchas are in memory (`bp-fura-launch-gotchas`): a transient `ray start` timeout when
+  another session's Ray holds the default dashboard ports, and `kill $!` after `nohup setsid sh -c`
+  killing only the exited parent (a queued follow-up survived and briefly launched a second chain
+  onto the same GPU; both were killed and the chain relaunched once, 23:53).

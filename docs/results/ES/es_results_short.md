@@ -68,7 +68,50 @@ before reading them as a verdict on random-vs-structured projections.
 **Ranks 1–6 are one tie.** The only separable results are that rank-1 `zoact` is a little
 behind and the two LoRA arms are slow.
 
-## Leaderboard — N=10 (current)
+## Leaderboard — paper-aligned data protocol (the one to quote)
+
+**batch 1024 resampled every iteration** from the 8,890-problem pool, 100 iterations, N=10 —
+the official protocol, not the fixed 64-problem batch every other table on this page uses.
+Each arm keeps *its own* best (σ, α) from the N=10 searches below; only the data changes.
+Full write-up: [es_results.md §19](es_results.md#19-the-leaderboard-on-the-paper-aligned-data-protocol).
+
+| # | Method | σ / α | Base | **Plateau (≥40)** | Best @ step | trainable | GPU-h |
+|---|---|---|---|---|---|---|---|
+| 1 | `fura` | 1.25e-2 / 3.61e-3 | 53.2 | **73.89 ± 0.25** | 75.0 @ 90 | 1.28% | 14.9 |
+| 2 | `dense` | 1e-3 / 2.89e-4 | 51.6 | **72.83 ± 0.55** | 74.2 @ 90 | 100% | 15.9 |
+| 3 | **`isobtt`** (fura + ISO) | 5e-2 / 1.44e-2 | 53.2 | **72.80 ± 0.40** | 74.4 @ 70 | **0.64%** | 15.1 |
+| 4 | **`fura_zoact` r=1** | 5e-2 / 1.44e-2 | 53.2 | **72.46 ± 0.46** | 73.8 @ **100** | **0.011%** | 15.2 |
+| 5 | `lora r=44` | 1.538e-2 / 7.69e-3 | 51.6 | **71.23 ± 0.52** | 73.0 @ 50 | 1.28% | 14.8 |
+| 6 | `lora r=1` | 2.2e-3 / 2.54e-2 | 51.6 | **60.91 ± 1.76** ✗ | 69.6 @ 30 | 0.029% | 15.2 |
+
+✗ **diverging** (69.6 @ 30 → 57.8 @ 70 → **54.6 @ 100**), a monotone slide over the last 70 iterations.
+
+**The fixed-batch ranking survives**, and every arm gains: `fura` +0.72, `dense` +0.15,
+`fura_zoact` **+1.10**, `lora r=44` +0.55. So the fixed-64 leaderboard was not just ranking
+"which method memorises 64 problems best". Adjacent gaps are still inside noise
+(`dense`−`fura_zoact` = 0.37 ± 0.72); what is solid is that the *order* reproduces.
+
+**The memorisation ceiling is gone** — three of four arms post their best at step 90–100 and
+are still rising, where every fixed-batch arm was flat by 40. These are lower bounds; the
+paper runs 500 iterations.
+
+**`isobtt` ties full `dense` from 0.64% of the weights** (72.80 vs 72.83, −0.03 ± 0.68), with
+`max|RᵀR − I|` = 1.0e-6 for all 100 iterations — so the §10 "freezing the entire spectrum
+costs nothing" result survives the protocol change intact.
+
+⚠️ **Both LoRA arms fail to transfer, and they are the only ones that do.** `lora r=44`
+declines (73.0 @ 50 → 69.0 @ 100); `lora r=1` diverges outright (69.6 @ 30 → 54.6 @ 100) at
+`reward_std` 0.0075, under half the healthy band — large steps on weak signal. **Four of four
+structured arms carry their fixed-batch σ/α over cleanly; two of two LoRA arms do not**, which
+fits §17.2: the bilinear `σ·ε_B A₀ + σ²·ε_B ε_A` step depends on the data distribution in a way
+the linear modes' does not. Both need their own σ/α search on this protocol.
+
+⚠️ **The `reward_std` band is batch-size-dependent.** At batch 1024 the same σ gives ≈0.44×
+the batch-64 spread (consistently, across all four arms), so the healthy band here is
+**0.016–0.024**, not 0.040–0.055. Tuning a new arm at batch 1024 against the old band would
+set σ far too high. Always quote the band with its batch size.
+
+## Leaderboard — N=10, fixed 64-problem batch
 
 Best configuration per method, after the α/σ searches of
 [es_results.md §17](es_results.md#17-n10-as-the-default-step-size-search-two-calibrated-hybrids-and-what-actually-sets-σ).
@@ -87,6 +130,8 @@ Ranked by plateau = mean over steps ≥ 40; per-eval SE 2.24 pp.
 | 8 | **`sgdmask thr=1e-5`** | 1e-3 / 2.89e-4 | 51.6 | 66.36 ± 0.61 | 68.6 @ 60 | 80 | 3.1 | **0.0026%** |
 | 9 | `lora r=1` | 2.2e-3 / 6.35e-3 | 51.6 | 63.76 ± 1.31 ‡ | 68.4 @ 80 | 80 | 2.8 | 0.029% |
 | – | *SGD-GRPO (BP), 5 steps* | lr 0.1 | 52.4 | **72.4** (72.2 @ 10) | | 5 | **0.28** | 100% |
+| – | *SGD-GRPO (BP) rerun, per-step evals* | lr 0.1 | 52.4 | **75.8 ± 1.6** (1–10) | **78.2 @ 8** | 10 | 0.37 | 100% |
+| – | ***fura*-BP (SGD, small core), 10 steps* | lr **2.0** / 1.0 | 51.4 | **74.3 ± 1.2** / 72.9 ± 0.5 | 76.0 @ 4 / 73.4 @ 8 | 10 | 0.42 | 1.54% |
 
 ‡ still rising at the last eval — these are lower bounds, not plateaus.
 `fura`/`fura_zoact` start from 53.2 (bf16 BTT reconstruction); read their deltas against that.
@@ -110,7 +155,13 @@ changed entry (0.15%) adds +1 pp and a slope. The mask is bf16 rounding with str
 |w| of a moved entry is 1.8e-3 (`thr=1e-5`) or 3.8e-5 (`thr=0`) against 1.6e-2 model-wide, and
 both masks hit the `reward_std` band at the same σ=1e-3 as `dense` — **190× less footprint,
 same spread**. The SGD run itself is the BP reference this page lacked: **72.4 greedy in 5
-steps / 0.28 GPU-h**, 10× cheaper than the best ES arm for +0.3 pp.
+steps / 0.28 GPU-h**, 10× cheaper than the best ES arm for +0.3 pp. **The same protocol with the `fura` small core under SGD
+([§20](es_results.md#20-bp-fura--the-small-core-subspace-under-true-gradients-on-the-dense-sgd-protocol))
+needs 10–20× the dense LR (the block-projected gradient is 20× smaller), crosses 72 at step 3–4
+where dense does it in one step, and plateaus at 74.3 ± 1.2 (lr 2.0) / 72.9 ± 0.5 (lr 1.0) —
+between the two dense runs (72.3 and 75.8), so ≈ dense within single-seed noise, not above it;
+lr 3.0 is destroyed at step 5. A same-config dense repeat moved every eval by 3–4 pp, so
+1–2 pp rankings on this page need a second seed.**
 
 ![N=10 curves: SGD-mask arms against the leaderboard](figs/n10_sgdmask.png)
 
@@ -222,3 +273,4 @@ top-r captures most of it, so the same σ is far too large. Re-tuning by `reward
 | Population size N=10 vs N=30 | §16 |
 | **What sets σ; the two calibrated hybrids; α/σ searches** | **§17** |
 | **SGD-mask ES; the bf16 SGD-GRPO reference run; what the paper's sparsity is** | **§18** |
+| **BP `fura` (blocktt small core, SGD) on the dense-SGD protocol; LR window 10–20×, cliff at 30×** | **§20** |
