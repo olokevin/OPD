@@ -71,6 +71,17 @@ es-token-decode is closed on this setting: the machinery demonstrably optimizes 
 teacher objective it is given (three objectives, three monotone loss curves) and none of it
 survives the random-walk damage on the accuracy landscape beyond a ~20–40-step transient.
 
+**Head-to-head vs es-prefill (the closing comparison).** Same information budget (N scalars/step
+— per-token fresh noise multiplies targets, not probes), but: cost ~1.7× per sequence even with
+the fused kernels (8.7 vs 5.0 s/seq at N=32) and ~2.2× with the 0831 kernels; weaker signal per
+scalar (detached-history direct term vs the prefill rail's full-trajectory gradient); and 3–4×
+less displacement tolerance — the es-token arms reverted at ~4–5 % cumulative displacement where
+es-prefill F was still climbing, holding its 0.82 plateau to ~9–10 %. Standard-ruler standing:
+base 0.751 → es-token-decode 0.803 @60 → es-prefill 0.815–0.829 @60 → BP 0.846 @60, with BP also
+~4× cheaper per sequence than es-prefill. es-prefill strictly dominates es-token-decode on every
+measured axis; the per-token thread's residual value is the kernel work (shared-KV attention,
+streaming LM head, fused rail ops).
+
 ## 2026-09-01 — the DeepSeek/JustRL setting: forward-only rails vs BP, closed out
 
 > New reference pair (thunlp/OPD's): student `DeepSeek-R1-Distill-Qwen-1.5B` ← teacher
