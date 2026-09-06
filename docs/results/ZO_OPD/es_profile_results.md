@@ -656,3 +656,22 @@ every 20 steps, 80 steps, checkpoints every 20 (`ckpt_keep_last=10`). Launched 2
 Full-rank step 0: **1343 s** = decode 1317 / teacher 14.6 / apply 10.3; `train/L_clean_mean` 0.266,
 `es/d_snr` 0.12, MATH-500 greedy @0 = 68.8 %, held-out clean loss 0.361. Expected ≈ 30 h for the arm;
 the rank-1 arm (≈ 12 h) follows. Results go to [zo_opd_short.md](zo_opd_short.md) when the runs finish.
+
+**Check-in at step 31 (2026-09-06 11:30), standard ruler on the step-20 checkpoint** (`VAL_ONLY` via
+`EXTRA_HYDRA_ARGS="trainer.val_only=True" bp_opd.sh`, GPU 4; `validation_log/ruler_es-decode_full_N32_step20/`):
+
+| | BP (256 seq) | es-prefill C (64 seq) | es-token-decode | **es-decode full** |
+| --- | --- | --- | --- | --- |
+| MATH-500 n=2@T=0.6 @20 (base 0.751) | 0.823 | 0.803 | — (0.803 @60) | **0.779** (AIME24 0.200) |
+| train KL @0 → 20s → 30 | 0.245 → 0.064 → 0.040 | 0.270 → 0.225 → 0.219 | 0.248 → 0.229 → 0.224 | 0.266 → 0.239 → 0.229 |
+| held-out probe @0 → 20 | — | — | 0.361 → 0.313 | 0.361 → 0.344 |
+| `es/d_std` (per-rail fitness spread) | — | 1.5e-3 → 1.1e-3 | — | **5.8e-4 → 4.2e-4** |
+| `es/d_snr` | — | 0.16–0.28 | — | 0.15–0.23 |
+| cum. displacement @30 (C's normalisation) | — | 3.6 % | — | ≈ 3.2 % (identical 3.1e-4/step) |
+| s/step · s/seq | 330 · 1.29 | 320 · 5.0 | 745 · 11.7 | 1335 · 20.9 |
+
+Read: at the same α, N and displacement schedule as es-prefill C, the held full-rank decode rail
+learns less per step (+2.8 pp vs +5.2 on the ruler at 20; KL −10 % vs −17 %) at 4.2× the step cost —
+its per-rail fitness spread is 2.6× smaller for the same σ (the detached-history rail sees a weaker
+effect of the same perturbation; §4/§7.2 prediction). 22 % of its step-20 evals hit the cap (C/BP:
+16–17 %). The rank-1 arm follows.
