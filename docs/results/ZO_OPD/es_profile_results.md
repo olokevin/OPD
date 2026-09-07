@@ -716,3 +716,11 @@ step-10 block 0.248). **Standard ruler @10: MATH-500 0.773, AIME24 0.233** (base
 (`ds15b/ruler_watch.sh` → `results/ruler_scores.tsv`; single-checkpoint tool `ds15b/ruler_ckpt.sh`,
 which also reaps the stale isolated Ray head that made the first re-score fail with a
 session-name mismatch).
+
+**Arm 1 result (rank-1, z-scored α=1.25e-3, 40 steps, 336 s/step):** standard ruler MATH-500
+**0.773 @10 → 0.786 @20 → 0.785 @30 → 0.772 @39** (AIME24 0.233 / 0.233 / 0.233 / 0.200); greedy
+67.0 / 67.6 / 66.0 / 69.8 / 68.4; probe 0.344 → 0.383 → 0.318 → 0.341 → 0.333; train KL 0.266 → ~0.24;
+`es/post_update_gain` positive on 33 of 40 steps (mean ≈ +1.2e-3). Peak +3.5 pp at step 20–30 and
+turnover by step 39 at 5.0 % cumulative displacement — the §7 budget law at a lower peak than
+es-prefill C (0.829 @60, +7.8 pp), i.e. the 0.45-amplitude estimator spends the same random-walk
+budget for less. Same step (20): full 0.779 < r1 0.786 < C 0.803 < BP 0.823.
