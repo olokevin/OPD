@@ -1039,3 +1039,15 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
 - Lessons: bit-GEMV grid must cover the ACTIVE rails (sweep installs N_max); a leading-axis tile
   reduce in the fused silu kernel cost 6x at N=0 (static-unroll the apply side); per-token
   antithetic asymmetry at sigma=1e-3 is ~0.27 (second order), the aggregated fitness is what counts.
+
+## [2026-09-07] ingest | es-decode verdict: strictly dominated, does not match es-prefill/BP (why-it-fails analysis)
+
+- Ran the rank-1 lr/hyperparam search (zscore a1.25e-3, raw a2.8e-3, N=128, a5e-4 queued) + full-flow
+  debug after the full-rank arm; standard-ruler peak 0.786 (r1, +3.5 pp) vs es-prefill C 0.829 vs BP
+  0.859. Mechanism (es_profile_results.md §16): held decode rail rides the CLEAN KV -> per-rail k1
+  fitness spread es/d_std ~0.5e-3 vs es-prefill ~1.5e-3 (3x) at same sigma; offline fitness cosine
+  0.6 / amplitude 0.45; gap independent of rank(full=r1)/N(32=128)/alpha/normalisation. Gap-2 (ES vs
+  BP) is the known forward-only displacement budget. es-decode strictly dominated -> use es-prefill/BP.
+- Flow bug fixed: OOB loads in the fused rank-r apply loops (k>=rank read past the noise buffer ->
+  last rail NaN) + non-finite fitness guard. Ruler scoring tools (ruler_ckpt.sh/ruler_watch.sh,
+  val_only scratch to /tmp). Run stopped by user at N=128 step 12. Peak ckpt kept (r1 zscore step_20).

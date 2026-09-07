@@ -733,3 +733,72 @@ shrink instead of forcing the fixed random walk) changed the *dynamics*, not the
 plateau as the z-scored arm (~0.785), ≈4 pp under es-prefill C. The greedy/sampled split (greedy
 +3.4 pp, sampled ~flat) is the same one the §7.2 es-rl run showed — greedy-repetition unsticking,
 not distillation. Levers left: N=128 (information per step) and α=5e-4 (slow high-ceiling arm).
+
+## 16. Why es-decode fails to match es-prefill / BP (2026-09-07, run stopped at N=128 step 12)
+
+Every es-decode arm learns a little and stalls well short of es-prefill, never near BP. Standard ruler
+(MATH-500, n=2 @ T=0.6, 7168; base 0.751), `results/ruler_scores.tsv`:
+
+| arm | @10 | @20 | @30 | @39 | peak vs base |
+| --- | --- | --- | --- | --- | --- |
+| es-decode r1, zscore α=1.25e-3 | 0.773 | **0.786** | 0.785 | 0.772 | +3.5 pp |
+| es-decode r1, raw α=2.8e-3 | 0.762 | 0.776 | 0.770 | 0.775 | +2.5 pp |
+| es-decode r1, N=128 α=1.25e-3 | 0.770 | (stopped @12) | | | — |
+| es-decode full-rank α=1.25e-3 | | 0.779 | | | +2.8 pp |
+| **es-prefill C** (reference) | | 0.803 | | 0.815 | **+7.8 pp @60 (0.829)** |
+| **BP** (reference) | | 0.823 | | 0.843 | **+9.5 pp @120 (0.859)** |
+
+The cause is two nested gaps, both measured, neither closable by tuning.
+
+### Gap 1 — es-decode vs es-prefill (~4 pp): the detached-history rail is a 3× weaker estimator
+
+The held decode rail attends the **clean** rollout's KV, so a rail's weight perturbation changes only
+the current token's logits — it never sees its own effect on the history. The per-rail k1 fitness
+spread `es/d_std` (the ES signal itself; same definition and σ=1e-3 in both trainers) measures this
+directly, **in the live runs**:
+
+| run | `es/d_std` (steps 1–10) |
+| --- | --- |
+| es-prefill C (true prefill of the perturbed model) | **~1.5e-3** |
+| es-decode, r1 zscore / r1 raw / r1 N=128 / **full-rank** — all | **~0.5e-3** |
+
+Ratio ≈ **0.33** in-run (offline `check_es_decode_fitness.py`: fitness cosine **0.6**, spread ratio
+**0.45**). The z-scored step re-normalises to a fixed displacement, so es-decode walks the same (in
+fact larger, 7.8e-3 vs 5.8e-3 per step) distance in weight space while its rail carries ⅓ the coherent
+gradient — the remainder is random walk. Everything downstream follows:
+
+- own-batch surrogate ascent `es/post_update_gain` **1.3e-3** (es-decode) vs **2.8e-3** (es-prefill);
+- train KL(student‖teacher) `L_clean` 0.266 → ~0.24 (−10 %, noisy) vs es-prefill → 0.19 (−32 %) vs BP → 0.004;
+- ruler peaks at 0.786 and turns over by step 39 at ~5 % cumulative displacement (the §7 ES budget law).
+
+**The gap is fixed by the evaluation, not any knob** — the four levers all leave `es/d_std` and the
+ruler ceiling put:
+
+| lever | swept | effect on d_std | ruler |
+| --- | --- | --- | --- |
+| perturbation rank | rank-1 → full matrix | 0.5e-3 = 0.5e-3 | 0.786 vs 0.779 |
+| rail count N | 32 → 128 | 0.5e-3 = 0.5e-3 | 0.786 vs 0.770 @10 |
+| step normalisation | zscore → raw | — | 0.785 vs 0.775 |
+| α | 1.25e-3 (± via raw) | — | flat plateau |
+
+N only shrinks the √N sampling error of the fitness *mean*, not the per-rail spread; rank changes the
+perturbation subspace but not how the detached rail attenuates it; α / normalisation move the dynamics,
+not the ceiling. **The bottleneck is signal-per-rail, and it is set by riding the clean KV.**
+
+### Gap 2 — es-prefill (hence es-decode) vs BP: the forward-only displacement budget
+
+Already established (2026-09-01, es_rails_formulation.md §7): no forward-only rail config is comparable
+to BP on this setting — at the 16 k cap BP is +6 pp / +23 pp AIME24, every ES arm ≤ +1.8 pp. ES coherent
+motion per step ≈ 1/40 of a BP step; matching a BP run needs ~10⁶–10⁷ rail forwards. es-decode inherits
+this **and** adds the 3× attenuation of Gap 1 on top.
+
+### Conclusion
+
+es-decode is **strictly dominated**: es-prefill's estimator degraded 3× by the detached-history
+evaluation, at 2–4× the per-step cost (full-rank), and es-prefill itself does not match BP. No setting
+in {rank, N, α, normalisation} closes it, because signal-per-rail is fixed by the clean-KV evaluation.
+To recover the full-history signal the perturbation must propagate through the sequence — which is
+exactly es-prefill (weights held for a whole teacher-forced prefill) or es-token-prefill. **Recommendation:
+use es-prefill for forward-only OPD, BP when backward is affordable; es-decode has no operating niche.**
+The kernels (rank-r fused rail, full-rank packed-bit GEMV, in-graph step) are correct and fast and stay
+available behind `rail_mode=seq`; the negative learning result is a property of the estimator, not the code.

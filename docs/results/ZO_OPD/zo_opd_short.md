@@ -113,6 +113,17 @@ The update reuses the noise still resident on the GPU (no regeneration); fp32 ma
 Decode cost at B=1 (R1-Distill-1.5B, es_profile_results.md §15): held rank-1/4 ≈ es-token-decode's
 rails; full-rank adds the bit traffic + unpack, ≈ N × 0.16 GB per token.
 
+**Verdict (2026-09-07, es_profile_results.md §16): es-decode does NOT match es-prefill or BP, and is
+strictly dominated.** Standard ruler MATH-500 (base 0.751): es-decode peaks **0.786** (r1, +3.5 pp)
+vs es-prefill C **0.829** (+7.8) vs BP **0.859** (+9.5). Mechanism, measured in-run: the held rail
+attends the CLEAN KV, so its per-rail k1 fitness spread `es/d_std` is **~0.5e-3 vs es-prefill's
+~1.5e-3 (3×) at the same σ** — the detached-history rail carries ⅓ the coherent gradient; z-scoring
+spends the same displacement budget for it, so ⅔ is random walk. The 3× gap is **independent of
+perturbation rank (full = rank-1), N (32 = 128), α, and step normalisation** — signal-per-rail is set
+by riding the clean KV, not by any knob. To keep the full-history signal the perturbation must
+propagate → that IS es-prefill. Use es-prefill (forward-only) or BP; es-decode has no niche. Kernels
+stay available behind `rail_mode=seq`.
+
 **es-token-prefill** (not implemented; analysed in es_rails_formulation.md §4): fresh per-position
 `ΔW_t` *inside a prefill* via the rank-1 rail op as a per-position output adjustment
 (`y_t += σ(v_tᵀx_t)u_t`). Unlike decode rails the perturbation at `t` propagates to positions > t,
