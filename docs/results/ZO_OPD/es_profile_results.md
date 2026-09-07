@@ -724,3 +724,12 @@ session-name mismatch).
 turnover by step 39 at 5.0 % cumulative displacement — the §7 budget law at a lower peak than
 es-prefill C (0.829 @60, +7.8 pp), i.e. the 0.45-amplitude estimator spends the same random-walk
 budget for less. Same step (20): full 0.779 < r1 0.786 < C 0.803 < BP 0.823.
+
+**Arm 2 result (rank-1, raw/adaptive-step α=2.8e-3, 40 steps):** ruler MATH-500 **0.762 @10 → 0.776
+@20 → 0.770 @30 → 0.775 @39** (AIME24 0.20/0.25/0.217/0.233); greedy climbed monotonically 67.8 →
+68.8 → 70.4 → 71.2 → 70.2 and train KL reached the lowest of any arm (0.224 @37). But the standard
+ruler is flat at ~0.77 — `es_normalize=raw` (step ∝ the gradient estimate, so weak-signal steps
+shrink instead of forcing the fixed random walk) changed the *dynamics*, not the *ceiling*: same
+plateau as the z-scored arm (~0.785), ≈4 pp under es-prefill C. The greedy/sampled split (greedy
++3.4 pp, sampled ~flat) is the same one the §7.2 es-rl run showed — greedy-repetition unsticking,
+not distillation. Levers left: N=128 (information per step) and α=5e-4 (slow high-ceiling arm).
