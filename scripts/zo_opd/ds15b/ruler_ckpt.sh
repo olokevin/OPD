@@ -12,8 +12,13 @@ LOG=$LOG_DIR/${TAG}_driver.log
 for pid in $(pgrep -f "ray_ruler_gpu${GPU}"); do [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null; done
 sleep 2
 rm -rf /tmp/ray_ruler_gpu${GPU}
-EXTRA_HYDRA_ARGS="trainer.val_only=True" TRAIN_GPU=$GPU ACTOR_MODEL_PATH=$CK EXPERIMENT_NAME=ruler_$TAG \
+# val_only writes nothing worth keeping; steer default_local_dir to /tmp so ruler
+# runs never accumulate on /data, and delete that scratch afterwards.
+SCRATCH=/tmp/ruler_scratch_gpu${GPU}_$$
+EXTRA_HYDRA_ARGS="trainer.val_only=True trainer.default_local_dir=$SCRATCH trainer.save_freq=-1" \
+  TRAIN_GPU=$GPU ACTOR_MODEL_PATH=$CK EXPERIMENT_NAME=ruler_$TAG \
   LOG_DIR=$LOG_DIR RAY_TMPDIR=/tmp/ray_ruler_gpu${GPU} bash scripts/zo_opd/ds15b/bp_opd.sh > "$LOG" 2>&1
+rm -rf "$SCRATCH"
 m=$(grep -o "val-core/MATH-500/acc/mean@2:[^ ]*" "$LOG" | tail -1 | grep -o "[0-9.]*)" | tr -d ')')
 a=$(grep -o "val-core/AIME24/acc/mean@2:[^ ]*" "$LOG" | tail -1 | grep -o "[0-9.]*)" | tr -d ')')
 echo -e "$TAG\t${m:-NA}\t${a:-NA}\t$(date '+%F %T')" >> scripts/zo_opd/es_profile/results/ruler_scores.tsv
