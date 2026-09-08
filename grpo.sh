@@ -396,7 +396,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
     actor_rollout_ref.rollout.n=$N_RESPONSES \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=${VAL_DO_SAMPLE:-True} \
     ++actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
     actor_rollout_ref.rollout.val_kwargs.n=$VAL_N \
     actor_rollout_ref.rollout.val_kwargs.temperature=$VAL_TEMPERATURE \
