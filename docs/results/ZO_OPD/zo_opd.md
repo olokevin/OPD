@@ -14,17 +14,17 @@ Design: [../plans/es_token_trainer.md](../../plans/es_token_trainer.md) · subsy
 Wall-clock is settled and positive. Learning is settled too as of 2026-08-25/26 (§11): **BP-OPD
 learns on the fixed setting, es_token does not.** Each row is one session below.
 
-| Session               | What it records                                                                                                                                                                                                                                                                                                                                                                   | One OPD step (batch 64 × 1024, N=8)                           |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| **2026-06-09**  | Build + all 5 gates PASS (σ=0 ≡ stock greedy, graphed ≡ eager bit-for-bit, staggered-EOS, 19 CPU tests, e2e smoke). First headline vs NP-V3 (2472 s) and BP-OPD (62.7 s).                                                                                                                                                                                                      | **145.8 s** — ES/BP 2.33×                              |
-| **2026-08-21**  | Profiling. Gradient cosine sits at**0.86–0.99× the rank-1 weight-probe bound** `sqrt(K/(K+d_out·d_in))`; rails ≡ repeats at equal K. Clean decode through the custom graphed driver is only **4% over stock vLLM** at equal concurrency — the residual gap is *concurrency*, not driver overhead.                                                            | **147.5 s** — 2.39× (reproduces June within 1.2%)      |
-| **2026-08-22**  | The fixed `N=0→1` rail cost (+3.41 ms) was **CUDA-graph node count** (1568 nodes/token at ~2.3 µs), not the RNG. Fused Triton rail kernel → rail op 10.8× cheaper.                                                                                                                                                                                                    | **89.6 s** — 1.45×                                     |
-| **2026-08-22b** | Rademacher noise drawn**directly in the destination dtype** via a Triton Philox kernel, shared by decode and assembly (gated byte-for-byte); fill 13.5× cheaper.                                                                                                                                                                                                           | **83.8 s** — 1.35×                                     |
-| **2026-08-23**  | Scratch-KV reserved to (prompt +`max_tokens`) instead of `max_model_len` → `pack_width` 4→64, a 64-prompt batch in **one wave**. Cumulative 3.46× on the step, 5.10× on decode.                                                                                                                                                                                   | **42.7 s** — 0.69× vs BP's *cold* step (§10 corrects this) |
-| **2026-08-23b** | First training runs. Shipped `lr=1e-3` **degrades** the model (probe KL 0.22→1.16, MATH-500 5%→0%). Measurement trap: `train/L_clean_mean` is data-driven noise and cannot rank LRs; only the fixed 16-prompt heldout probe can, and its floor is ±8%.                                                                                                               | —                                                             |
-| **2026-08-23c** | **NEGATIVE.** 150 steps at `lr=1e-4`: probe 0.2126→0.2228, entirely inside the noise floor; MATH-500 shows no trend. Bracket is 1e-3 destroys / 1e-4 does nothing, with no recipe found between. **Not ES-specific** — the BP-OPD baseline was equally flat, implicating the setup (every rollout hits the 1024-token cap without EOS) rather than the algorithm. | 37.2 s/step, 92.9 min total                                    |
-| **2026-08-25/26** | **The setting where BP-OPD learns.** Student `Qwen/Qwen3-1.7B` (non-thinking) ← `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`, NERSC hyperparameters verbatim. The old "neither learns" result was `enable_thinking` defaulting **true** on a hybrid Qwen3 student, so every rollout hit the cap mid-`<think>`. Apples-to-apples n=8 eval: **BP up on 4/4** benchmarks (MATH-500 0.7250→0.7532, AMC23 0.3931→0.4172), **es_token inside noise on all four** (`RMS(dW)` only 0.18%). BP tracks the 8-GPU reference exactly to step 60 then plateaus at the 3072 cap. Ships `fp32_master`, es_token HF checkpointing, `enable_thinking`, prompt-length filter, `teacher_max_model_len`. §11 | BP 126.0 s vs ES 130.7 s/step (4.2× per sequence) |
-| **2026-08-24** | **CORRECTION.** The BP reference every ratio above was divided by (61.86 s) is BP's **cold step 1**. `compute_rm_score` is 29.15 s at step 1 and **3.80 s median over the next 137 steps**; a from-scratch microbenchmark of the reward path predicts 3.03 s. So BP's teacher phase was never slow, and the honest verdict is **ES/BP = 1.48×**, not 0.69×. | ES 37.17 vs BP **25.11 s** steady |
+| Session                 | What it records                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | One OPD step (batch 64 × 1024, N=8)                                  |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| **2026-06-09**    | Build + all 5 gates PASS (σ=0 ≡ stock greedy, graphed ≡ eager bit-for-bit, staggered-EOS, 19 CPU tests, e2e smoke). First headline vs NP-V3 (2472 s) and BP-OPD (62.7 s).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | **145.8 s** — ES/BP 2.33×                                     |
+| **2026-08-21**    | Profiling. Gradient cosine sits at**0.86–0.99× the rank-1 weight-probe bound** `sqrt(K/(K+d_out·d_in))`; rails ≡ repeats at equal K. Clean decode through the custom graphed driver is only **4% over stock vLLM** at equal concurrency — the residual gap is *concurrency*, not driver overhead.                                                                                                                                                                                                                                                                                                                                                                                                                  | **147.5 s** — 2.39× (reproduces June within 1.2%)             |
+| **2026-08-22**    | The fixed `N=0→1` rail cost (+3.41 ms) was **CUDA-graph node count** (1568 nodes/token at ~2.3 µs), not the RNG. Fused Triton rail kernel → rail op 10.8× cheaper.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **89.6 s** — 1.45×                                            |
+| **2026-08-22b**   | Rademacher noise drawn**directly in the destination dtype** via a Triton Philox kernel, shared by decode and assembly (gated byte-for-byte); fill 13.5× cheaper.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | **83.8 s** — 1.35×                                            |
+| **2026-08-23**    | Scratch-KV reserved to (prompt +`max_tokens`) instead of `max_model_len` → `pack_width` 4→64, a 64-prompt batch in **one wave**. Cumulative 3.46× on the step, 5.10× on decode.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | **42.7 s** — 0.69× vs BP's *cold* step (§10 corrects this) |
+| **2026-08-23b**   | First training runs. Shipped `lr=1e-3` **degrades** the model (probe KL 0.22→1.16, MATH-500 5%→0%). Measurement trap: `train/L_clean_mean` is data-driven noise and cannot rank LRs; only the fixed 16-prompt heldout probe can, and its floor is ±8%.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | —                                                                    |
+| **2026-08-23c**   | **NEGATIVE.** 150 steps at `lr=1e-4`: probe 0.2126→0.2228, entirely inside the noise floor; MATH-500 shows no trend. Bracket is 1e-3 destroys / 1e-4 does nothing, with no recipe found between. **Not ES-specific** — the BP-OPD baseline was equally flat, implicating the setup (every rollout hits the 1024-token cap without EOS) rather than the algorithm.                                                                                                                                                                                                                                                                                                                                                       | 37.2 s/step, 92.9 min total                                           |
+| **2026-08-25/26** | **The setting where BP-OPD learns.** Student `Qwen/Qwen3-1.7B` (non-thinking) ← `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`, NERSC hyperparameters verbatim. The old "neither learns" result was `enable_thinking` defaulting **true** on a hybrid Qwen3 student, so every rollout hit the cap mid-`<think>`. Apples-to-apples n=8 eval: **BP up on 4/4** benchmarks (MATH-500 0.7250→0.7532, AMC23 0.3931→0.4172), **es_token inside noise on all four** (`RMS(dW)` only 0.18%). BP tracks the 8-GPU reference exactly to step 60 then plateaus at the 3072 cap. Ships `fp32_master`, es_token HF checkpointing, `enable_thinking`, prompt-length filter, `teacher_max_model_len`. §11 | BP 126.0 s vs ES 130.7 s/step (4.2× per sequence)                    |
+| **2026-08-24**    | **CORRECTION.** The BP reference every ratio above was divided by (61.86 s) is BP's **cold step 1**. `compute_rm_score` is 29.15 s at step 1 and **3.80 s median over the next 137 steps**; a from-scratch microbenchmark of the reward path predicts 3.03 s. So BP's teacher phase was never slow, and the honest verdict is **ES/BP = 1.48×**, not 0.69×.                                                                                                                                                                                                                                                                                                                                                 | ES 37.17 vs BP**25.11 s** steady                                |
 
 **Bottom line (updated 2026-08-26, see §11):** the "neither method learns" verdict below was a
 **setup** artefact — `enable_thinking` defaulted to true on a hybrid Qwen3 student, so every rollout
@@ -43,12 +43,12 @@ linears, Qwen3-4B teacher co-located with the Qwen3-1.7B student on one H100 NVL
 
 ### The optimisation progression (cold step-1 bench)
 
-| variant | decode | teacher | grad + update | **step** |
-|---|---:|---:|---:|---:|
-| ES v0 — PyTorch rails, `randint` noise, `pack_width=4` | 129.59 | 4.22 | 13.65 | **147.54** |
-| ES + fused Triton rail kernel (§6) | 72.00 | 3.95 | 13.56 | **89.59** |
-| ES + direct Rademacher noise (§7) | 68.44 | 4.23 | 11.03 | **83.80** |
-| ES + budget-sized scratch-KV, `pack_width` 4→64 (§8) | **25.40** | 3.99 | 13.18 | **42.67** |
+| variant                                                    |          decode | teacher | grad + update |   **step** |
+| ---------------------------------------------------------- | --------------: | ------: | ------------: | ---------------: |
+| ES v0 — PyTorch rails,`randint` noise, `pack_width=4` |          129.59 |    4.22 |         13.65 | **147.54** |
+| ES + fused Triton rail kernel (§6)                        |           72.00 |    3.95 |         13.56 |  **89.59** |
+| ES + direct Rademacher noise (§7)                         |           68.44 |    4.23 |         11.03 |  **83.80** |
+| ES + budget-sized scratch-KV,`pack_width` 4→64 (§8)    | **25.40** |    3.99 |         13.18 |  **42.67** |
 
 Cumulative: step **147.54 → 42.67 s (3.46×)**, decode **129.59 → 25.40 s (5.10×)**. These rows are
 cold-vs-cold on one harness, so they measure the optimisations against each other correctly.
@@ -60,12 +60,12 @@ concluded es_token had overtaken BP. It has not — §10 shows 25 s of that 61.8
 warm-up. Both columns below are **medians over a full run**, same launcher
 (`scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`), same batch 64 × 1024, T=1.0, same GPU:
 
-| phase | ES-token (146 steps) | BP-OPD (135 steps) | ES / BP |
-|---|---:|---:|---:|
-| decode / `gen` | 23.06 | 9.85 | 2.34× |
-| teacher scoring | 3.10 | 3.80 (`rm_score`) | 0.82× |
-| grad + update | 10.89 (assemble) | 9.63 (`log_prob` + `adv` + `update_actor`) | 1.13× |
-| **one step** | **37.17** | **25.11** | **1.48×** |
+| phase              | ES-token (146 steps) |                               BP-OPD (135 steps) |          ES / BP |
+| ------------------ | -------------------: | -----------------------------------------------: | ---------------: |
+| decode /`gen`    |                23.06 |                                             9.85 |           2.34× |
+| teacher scoring    |                 3.10 |                              3.80 (`rm_score`) |           0.82× |
+| grad + update      |     10.89 (assemble) | 9.63 (`log_prob` + `adv` + `update_actor`) |           1.13× |
+| **one step** |      **37.17** |                                  **25.11** | **1.48×** |
 
 **Reading it by phase:**
 
@@ -407,13 +407,13 @@ N=8 rises 526 → 1,030 tok/s.
 **One full OPD step** (batch 64 × 1024, N=8, all 112 linears, co-located 4B teacher, same GPU and
 config as §4):
 
-|                                     | before           | after             | speedup                                |
-| ----------------------------------- | ---------------- | ----------------- | -------------------------------------- |
-| **step_time**                 | 147.54 s         | **89.59 s** | **1.65×**                       |
-| decode                              | 129.59 s         | 72.00 s           | 1.80× (16 waves, 7.85 → 4.25 s each) |
-| teacher                             | 4.22 s           | 3.95 s            | —                                     |
-| assemble                            | 13.65 s          | 13.56 s           | —                                     |
-| peak GPU mem                        | 85,129 MiB       | 85,107 MiB        | —                                     |
+|                                                       | before           | after             | speedup                                |
+| ----------------------------------------------------- | ---------------- | ----------------- | -------------------------------------- |
+| **step_time**                                   | 147.54 s         | **89.59 s** | **1.65×**                       |
+| decode                                                | 129.59 s         | 72.00 s           | 1.80× (16 waves, 7.85 → 4.25 s each) |
+| teacher                                               | 4.22 s           | 3.95 s            | —                                     |
+| assemble                                              | 13.65 s          | 13.56 s           | —                                     |
+| peak GPU mem                                          | 85,129 MiB       | 85,107 MiB        | —                                     |
 | **ratio vs BP-OPD** (61.86 s — cold, see §10) | **2.39×** | **1.45×**  |                                        |
 
 Correctness is unchanged and checked three ways: the 19 CPU tests still pass; `check_rail_op_parity.py`
@@ -514,14 +514,14 @@ Rail overhead over clean-only decode at N=1: 3.408 → 0.481 → **0.461 ms**.
 
 **One full OPD step** (batch 64 × 1024, N=8, all 112 linears, co-located 4B teacher):
 
-|                                     | original | + fused rail | **+ direct noise** | total            |
-| ----------------------------------- | -------- | ------------ | ------------------------ | ---------------- |
-| **step_time**                 | 147.54 s | 89.59 s      | **83.80 s**        | **1.76×** |
-| decode                              | 129.59 s | 72.00 s      | 68.44 s                  | 1.89×           |
-| teacher                             | 4.22 s   | 3.95 s       | 4.23 s                   | —               |
-| assemble                            | 13.65 s  | 13.56 s      | **11.03 s**        | 1.24×           |
-| `n_token_records`                 | 65,536   | 65,536       | 65,536                   | —               |
-| `weight_sync_ok`                  | 1.0      | 1.0          | 1.0                      | —               |
+|                                                       | original | + fused rail | **+ direct noise** | total            |
+| ----------------------------------------------------- | -------- | ------------ | ------------------------ | ---------------- |
+| **step_time**                                   | 147.54 s | 89.59 s      | **83.80 s**        | **1.76×** |
+| decode                                                | 129.59 s | 72.00 s      | 68.44 s                  | 1.89×           |
+| teacher                                               | 4.22 s   | 3.95 s       | 4.23 s                   | —               |
+| assemble                                              | 13.65 s  | 13.56 s      | **11.03 s**        | 1.24×           |
+| `n_token_records`                                   | 65,536   | 65,536       | 65,536                   | —               |
+| `weight_sync_ok`                                    | 1.0      | 1.0          | 1.0                      | —               |
 | **ratio vs BP-OPD** (61.86 s — cold, see §10) | 2.39×   | 1.45×       | **1.35×**         |                  |
 
 `L_clean_mean` is 0.2556177764199674 in all three runs — the clean trajectory never moved.
@@ -599,12 +599,12 @@ gates still pass unchanged.
 
 **One full OPD step** (batch 64 × 1024, N=8, all 112 linears, co-located 4B teacher):
 
-|                                     | `pack_width=4` | **`pack_width=64`** | speedup                |
-| ----------------------------------- | ---------------- | --------------------------- | ---------------------- |
-| **step_time**                 | 83.80 s          | **42.67 s**           | **1.96×**       |
-| decode                              | 68.44 s          | 25.40 s                     | 2.69× (16 waves → 1) |
-| teacher                             | 4.23 s           | 3.99 s                      | —                     |
-| assemble                            | 11.03 s          | 13.18 s                     | —                     |
+|                                                       | `pack_width=4` | **`pack_width=64`** | speedup                |
+| ----------------------------------------------------- | ---------------- | --------------------------- | ---------------------- |
+| **step_time**                                   | 83.80 s          | **42.67 s**           | **1.96×**       |
+| decode                                                | 68.44 s          | 25.40 s                     | 2.69× (16 waves → 1) |
+| teacher                                               | 4.23 s           | 3.99 s                      | —                     |
+| assemble                                              | 11.03 s          | 13.18 s                     | —                     |
 | **ratio vs BP-OPD** (61.86 s — cold, see §10) | 1.35×           | **0.69×**            |                        |
 
 Cumulative over §6–§8: one step **147.54 → 42.67 s (3.46×)**, decode **129.59 → 25.40 s (5.10×)**.
@@ -724,14 +724,14 @@ full-vocab logits — `use_fused_kernels=False` in this config, and `compute_ent
 one micro-batch (8 seqs × 1112 tok, the shipped `reward.micro_batch_size_per_gpu=8`) on the real
 Qwen3-4B teacher says otherwise:
 
-| stage | ms / micro-batch | s / step (×8) | share |
-|---|---:|---:|---:|
-| transformer fwd + lm_head | 324.7 | 2.60 | 85.8% |
-| `logits.div_(teacher_temperature)` | 1.6 | 0.01 | 0.4% |
-| `_compute_entropy_safe` (logging only) | 21.1 | 0.17 | 5.6% |
-| `logprobs_from_logits` | 1.7 | 0.01 | 0.4% |
-| teacher top-K + overlap masks | 29.4 | 0.24 | 7.8% |
-| **total** | **378.5** | **3.03** | 100% |
+| stage                                    | ms / micro-batch | s / step (×8) | share |
+| ---------------------------------------- | ---------------: | -------------: | ----: |
+| transformer fwd + lm_head                |            324.7 |           2.60 | 85.8% |
+| `logits.div_(teacher_temperature)`     |              1.6 |           0.01 |  0.4% |
+| `_compute_entropy_safe` (logging only) |             21.1 |           0.17 |  5.6% |
+| `logprobs_from_logits`                 |              1.7 |           0.01 |  0.4% |
+| teacher top-K + overlap masks            |             29.4 |           0.24 |  7.8% |
+| **total**                          |  **378.5** | **3.03** |  100% |
 
 The logits tensor is 8,896 × 151,936 bf16 = 2.52 GiB per micro-batch, but all the full-vocab
 reductions together are **0.42 s of a step**. Wrapping the teacher in the FSDP1
@@ -742,9 +742,9 @@ nothing either — 333 ms warm, versus 325 ms unwrapped.
 
 `logs/train/bp_opd_20260823_010128.log`, per-step `timing_s/compute_rm_score`:
 
-| step | 1 | 2 | 3 | 4 | … | 138 | median (steps 4+) |
-|---|---:|---:|---:|---:|---|---:|---:|
-| `rm_score` (s) | **29.15** | 3.82 | 3.86 | 4.82 | | 3.57 | **3.80** |
+| step             |               1 |    2 |    3 |    4 | … |  138 | median (steps 4+) |
+| ---------------- | --------------: | ---: | ---: | ---: | -- | ---: | ----------------: |
+| `rm_score` (s) | **29.15** | 3.82 | 3.86 | 4.82 |    | 3.57 |    **3.80** |
 
 29.15 s once, then 3.80 s median (min 3.46, max 7.31) — matching the 3.03 s microbenchmark to within
 the co-tenancy overhead. Step 1 pays the teacher's first CPU→GPU param fetch, kernel autotune, and
@@ -757,12 +757,12 @@ that already holds vLLM's 55% reservation. The `es_token_vs_bp.txt` record does 
 Steady-state medians, both runs from `scripts/zo_opd/launch_zo_opd_q34b_1p7b.sh`, batch 64 × 1024,
 T=1.0, same GPU, first 3 steps dropped:
 
-| phase | ES-token (146 steps) | BP-OPD (135 steps) | ES / BP |
-|---|---:|---:|---:|
-| decode / `gen` | 23.06 | 9.85 | 2.34× |
-| teacher | 3.10 | 3.80 | 0.82× |
-| grad + update | 10.89 | 9.63 | 1.13× |
-| **step** | **37.17** | **25.11** | **1.48×** |
+| phase           | ES-token (146 steps) | BP-OPD (135 steps) |          ES / BP |
+| --------------- | -------------------: | -----------------: | ---------------: |
+| decode /`gen` |                23.06 |               9.85 |           2.34× |
+| teacher         |                 3.10 |               3.80 |           0.82× |
+| grad + update   |                10.89 |               9.63 |           1.13× |
+| **step**  |      **37.17** |    **25.11** | **1.48×** |
 
 - **ES/BP is 1.48×, not 0.69×.** The claim "es_token is faster than BP-OPD" (§8.3) is withdrawn.
 - **BP's teacher phase was never a cost centre** — 3.80 s, ~20% *more* than ES's 3.10 s, not 8–10×.
@@ -798,17 +798,17 @@ Raw records: `scripts/zo_opd/results/es_token_bp_teacher_cold.txt`.
 Hyperparameters are taken verbatim from `slurm/opd/full/opd_2node_env.sh`, the 8×A100 run behind
 wandb `nersc_opd_qwen4b_1p7b/opd_full_dapo_lr1e-6`:
 
-| | value |
-|---|---|
-| student | `Qwen/Qwen3-1.7B` (**non-thinking**) |
-| teacher | `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500` |
-| data | `datasets/dapo-math-17k.parquet`; val AIME25 + AMC23 + AIME24 |
-| estimator | `token_reward_direct`, top-K 16, `only_stu`, `student_p` |
-| T student/teacher | 1.0 / 1.0 |
-| batch / rollout n | 64 / 4 → 256 seqs, ONE optimizer step per training step |
-| LR, KL, loss agg | 1e-6, 0.0, token-mean |
-| **`MODEL_DTYPE`** | **bfloat16** (yes, really — see §6) |
-| val | n=8, T=1.0, top-p 0.95 |
+|                           | value                                                           |
+| ------------------------- | --------------------------------------------------------------- |
+| student                   | `Qwen/Qwen3-1.7B` (**non-thinking**)                    |
+| teacher                   | `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`               |
+| data                      | `datasets/dapo-math-17k.parquet`; val AIME25 + AMC23 + AIME24 |
+| estimator                 | `token_reward_direct`, top-K 16, `only_stu`, `student_p`  |
+| T student/teacher         | 1.0 / 1.0                                                       |
+| batch / rollout n         | 64 / 4 → 256 seqs, ONE optimizer step per training step        |
+| LR, KL, loss agg          | 1e-6, 0.0, token-mean                                           |
+| **`MODEL_DTYPE`** | **bfloat16** (yes, really — see §6)                     |
+| val                       | n=8, T=1.0, top-p 0.95                                          |
 
 **`+data.apply_chat_template_kwargs.enable_thinking=False` is load-bearing.** Qwen3-1.7B is a hybrid
 model; without it every rollout opens a `<think>` block and overruns the budget. This is the single
@@ -825,13 +825,13 @@ plus `trainer.max_actor_ckpt_to_keep=1` (required at `SAVE_FREQ=10`; verl otherw
 Offline re-scoring of all three checkpoints under an **identical** protocol
 (`scripts/zo_opd/paper_align/eval_math.py`, n=8, T=1.0, top-p 0.95, 3072 tokens, non-thinking):
 
-| benchmark | base Qwen3-1.7B | **BP-OPD** step279 | **ZO-ES-token** step169 |
-|---|---:|---:|---:|
-| AMC23 acc@8 | 0.3931 ±0.043 | **0.4172** | 0.3916 |
-| AIME24 acc@8 | 0.0958 ±0.037 | 0.1042 | **0.1250** |
-| AIME25 acc@8 | 0.0875 ±0.041 | **0.1250** | 0.0792 |
-| MATH-500 acc@8 | 0.7250 ±0.016 | **0.7532** | 0.7265 |
-| MATH-500 resp len | 837 | 1241 | 843 |
+| benchmark         | base Qwen3-1.7B | **BP-OPD** step279 | **ZO-ES-token** step169 |
+| ----------------- | --------------: | -----------------------: | ----------------------------: |
+| AMC23 acc@8       |  0.3931 ±0.043 |         **0.4172** |                        0.3916 |
+| AIME24 acc@8      |  0.0958 ±0.037 |                   0.1042 |              **0.1250** |
+| AIME25 acc@8      |  0.0875 ±0.041 |         **0.1250** |                        0.0792 |
+| MATH-500 acc@8    |  0.7250 ±0.016 |         **0.7532** |                        0.7265 |
+| MATH-500 resp len |             837 |                     1241 |                           843 |
 
 - **BP is up on 4/4** (+2.4 / +0.8 / +3.8 / +2.8 pp). Each gain alone is only ~1–1.5σ; the evidence
   is the *consistency* (4/4 same direction ≈ 6% by chance) plus the in-run curve below.
@@ -840,13 +840,13 @@ Offline re-scoring of all three checkpoints under an **identical** protocol
 
 **BP in-run vs the NERSC reference** (`val-core/*/acc/mean@8`):
 
-| step | AMC23 ours@3072 | AMC23 ref@7168 |
-|---|---:|---:|
-| 0 | 0.405 | — |
-| 60 | **0.450** | 0.453 |
-| 100 | 0.420 | 0.465 |
-| 160 | 0.429 | **0.538** |
-| 260 | 0.431 | — |
+| step | AMC23 ours@3072 |  AMC23 ref@7168 |
+| ---- | --------------: | --------------: |
+| 0    |           0.405 |              — |
+| 60   | **0.450** |           0.453 |
+| 100  |           0.420 |           0.465 |
+| 160  |           0.429 | **0.538** |
+| 260  |           0.431 |              — |
 
 Ours **tracks the reference exactly through step 60**, then plateaus while the reference keeps
 climbing. The split is the token budget: the reference's `response_length/mean` grows to 3583, past
@@ -861,16 +861,16 @@ weight magnitude. The update is real but far too small/noisy to move the model i
 
 ### 11.3 Code changes shipped this session
 
-| file | change | why |
-|---|---|---|
-| `verl/trainer/es/task_utils.py` | `template_kwargs` → `apply_chat_template` | the es prompt path had **no** `enable_thinking`, so a hybrid Qwen3 student silently ran in thinking mode |
-| `es_token_worker_extension.py` | `fp32_master` (host-resident) | vLLM holds weights in bf16; a sub-ulp SGD step rounds away. Master is on the **host**: 5.65 GB of GPU is not available on this box |
-| `es_token_worker_extension.py` | `es_export_weights()` | pull perturbed weights for checkpointing |
-| `es_token/ray_trainer.py` | `_save_hf_checkpoint()` | es_token wrote **no checkpoints at all**; splits fused `qkv_proj`→q/k/v `[2048,1024,1024]` and `gate_up_proj`→gate/up `[6144,6144]` back to HF |
-| `es_token/ray_trainer.py` | `max_prompt_length` filter | mirrors BP's `filter_overlong_prompts`; see §4 |
-| `np/ray_trainer.py` | `teacher_max_model_len` | teacher sized its KV for the model's full 32k context |
-| `on_policy_distillation.sh` | `REWARD_MODEL_DTYPE`, `VAL_BEFORE_TRAIN`, `PPO_MAX_TOKEN_LEN_PER_GPU` | teacher can stay bf16 while the actor runs fp32; step-0 baseline |
-| `paper_align/eval_math.py` | `--enable-thinking` | otherwise the eval measures a different model than was trained |
+| file                              | change                                                                      | why                                                                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verl/trainer/es/task_utils.py` | `template_kwargs` → `apply_chat_template`                              | the es prompt path had**no** `enable_thinking`, so a hybrid Qwen3 student silently ran in thinking mode                                               |
+| `es_token_worker_extension.py`  | `fp32_master` (host-resident)                                             | vLLM holds weights in bf16; a sub-ulp SGD step rounds away. Master is on the**host**: 5.65 GB of GPU is not available on this box                       |
+| `es_token_worker_extension.py`  | `es_export_weights()`                                                     | pull perturbed weights for checkpointing                                                                                                                      |
+| `es_token/ray_trainer.py`       | `_save_hf_checkpoint()`                                                   | es_token wrote**no checkpoints at all**; splits fused `qkv_proj`→q/k/v `[2048,1024,1024]` and `gate_up_proj`→gate/up `[6144,6144]` back to HF |
+| `es_token/ray_trainer.py`       | `max_prompt_length` filter                                                | mirrors BP's `filter_overlong_prompts`; see §4                                                                                                             |
+| `np/ray_trainer.py`             | `teacher_max_model_len`                                                   | teacher sized its KV for the model's full 32k context                                                                                                         |
+| `on_policy_distillation.sh`     | `REWARD_MODEL_DTYPE`, `VAL_BEFORE_TRAIN`, `PPO_MAX_TOKEN_LEN_PER_GPU` | teacher can stay bf16 while the actor runs fp32; step-0 baseline                                                                                              |
+| `paper_align/eval_math.py`      | `--enable-thinking`                                                       | otherwise the eval measures a different model than was trained                                                                                                |
 
 New launchers: `scripts/zo_opd/nersc_align/{bp_opd_nersc.sh,es_opd_nersc.sh,final_eval.sh}`.
 
@@ -909,13 +909,13 @@ New launchers: `scripts/zo_opd/nersc_align/{bp_opd_nersc.sh,es_opd_nersc.sh,fina
 
 Both single GPU, batch 64, 3072 tokens, medians over the run (first step dropped):
 
-| phase | BP-OPD | ZO-ES-token |
-|---|---:|---:|
-| generation / decode | 45.9 | 93.3 |
-| teacher | 25.5 | ~9 |
-| grad + update | 50.6 | 31.7 |
-| **step** | **126.0** | **130.7** |
-| sequences per step | 256 (64×4) | 64 (64×1) |
+| phase                  |           BP-OPD |              ZO-ES-token |
+| ---------------------- | ---------------: | -----------------------: |
+| generation / decode    |             45.9 |                     93.3 |
+| teacher                |             25.5 |                       ~9 |
+| grad + update          |             50.6 |                     31.7 |
+| **step**         |  **126.0** |          **130.7** |
+| sequences per step     |      256 (64×4) |               64 (64×1) |
 | **per sequence** | **0.49 s** | **2.04 s (4.2×)** |
 
 Per *step* they are near parity; per *sequence* es_token is ~4× BP. An earlier reading of 6.6× was
@@ -951,8 +951,7 @@ inflated by `assemble_chunk=256` — that was a setting, not a property of the e
    Either shard the teacher across 2 GPUs or serve it out-of-process.
 
 Raw records: `logs/nersc_{bp,es}.log`, `logs/final_eval/{base,bp_step279,es_step169}.json`.
-Checkpoints: BP `global_step_279` (merged to HF via `verl/scripts/legacy_model_merger.py merge
---backend fsdp`), ES `.../singlegpu_es_opd_r3072_lr1e-5_resume30/es_token_*/step_169`.
+Checkpoints: BP `global_step_279` (merged to HF via `verl/scripts/legacy_model_merger.py merge --backend fsdp`), ES `.../singlegpu_es_opd_r3072_lr1e-5_resume30/es_token_*/step_169`.
 
 ---
 
@@ -970,10 +969,10 @@ Checkpoints: BP `global_step_279` (merged to HF via `verl/scripts/legacy_model_m
 
 Direct diff of every tensor, trained checkpoint vs base (`Qwen/Qwen3-1.7B`):
 
-| | RMS(ΔW) global | rel. to RMS(W) | per-linear rel. | elements actually changed |
-|---|---:|---:|---:|---:|
-| **BP** `step_279` | 1.56e-5 | 2.67e-4 | 3.7e-4 – 7.2e-4 | **0.9 – 2.1 %** |
-| **ES** `step_169` | 3.26e-5 | 5.30e-4 | 9.0e-4 – 1.17e-3 | **20.1 – 33.3 %** |
+|                           | RMS(ΔW) global | rel. to RMS(W) |   per-linear rel. | elements actually changed |
+| ------------------------- | --------------: | -------------: | ----------------: | ------------------------: |
+| **BP** `step_279` |         1.56e-5 |        2.67e-4 |  3.7e-4 – 7.2e-4 |    **0.9 – 2.1 %** |
+| **ES** `step_169` |         3.26e-5 |        5.30e-4 | 9.0e-4 – 1.17e-3 |  **20.1 – 33.3 %** |
 
 All 196 HF keys matched on the ES side with no unmatched-key warning, so the fused
 `qkv_proj`→q/k/v and `gate_up_proj`→gate/up split in `_save_hf_checkpoint` is correct.
@@ -989,10 +988,10 @@ ulp rounds back. BP at ~1.4 % reproduces the §11.6 measurement; it learns anywa
 
 Per-step, per-parameter update size:
 
-| | rule | RMS(ΔW) / step | footprint = RMS(ΔW)/RMS(W) |
-|---|---|---:|---:|
-| BP-OPD | AdamW, lr 1e-6 (Adam normalises, so the step ≈ lr) | 1.0e-6 | 3.0e-5 |
-| ES-token | plain SGD, lr 1e-5, `dW_norm_mean` 742 → ~1400 | 4.1e-6 | **6.5e-5 → 1.3e-4** |
+|          | rule                                                | RMS(ΔW) / step | footprint = RMS(ΔW)/RMS(W) |
+| -------- | --------------------------------------------------- | --------------: | --------------------------: |
+| BP-OPD   | AdamW, lr 1e-6 (Adam normalises, so the step ≈ lr) |          1.0e-6 |                      3.0e-5 |
+| ES-token | plain SGD, lr 1e-5,`dW_norm_mean` 742 → ~1400    |          4.1e-6 |  **6.5e-5 → 1.3e-4** |
 
 **ES already takes a 2–4× larger step than BP** (2.2× at step 0, ~4.3× once `dW_norm` settles).
 Raising the LR to "catch up with BP" is arguing the wrong direction — see §12.5 for the reference
@@ -1004,14 +1003,14 @@ that *does* matter. (BP's row uses Adam's normalisation property, `|m/√v| ≲ 
 `es_grad_audit.py`, fp32, real DAPO-Math prompts, real teacher `log q`, 576 probe positions
 × 8 rails, all 196 linears perturbed exactly as in training:
 
-| σ | mean \|Δlogp\| per rail | max | IW clamped | IW underflow | cos(dW, g_direct) |
-|---|---:|---:|---:|---:|---:|
-| 1e-5 | 0.0002 | 0.006 | 0 | 0 | ≈0 |
-| 1e-4 | 0.0017 | 0.062 | 0 | 0 | ≈0 |
-| 1e-3 | 0.0174 | 0.582 | 0 | 0 | ≈0 |
-| 3e-3 | 0.0542 | 1.453 | 0 | 0 | ≈0 |
-| **1e-2 (shipping)** | 0.3216 | 4.862 | 0.001 | 0.002 | ≈0 |
-| 3e-2 | 11.84 | — | 0 | **0.659** | ≈0 |
+| σ                        | mean\|Δlogp\| per rail |   max | IW clamped |    IW underflow | cos(dW, g_direct) |
+| ------------------------- | ----------------------: | ----: | ---------: | --------------: | ----------------: |
+| 1e-5                      |                  0.0002 | 0.006 |          0 |               0 |               ≈0 |
+| 1e-4                      |                  0.0017 | 0.062 |          0 |               0 |               ≈0 |
+| 1e-3                      |                  0.0174 | 0.582 |          0 |               0 |               ≈0 |
+| 3e-3                      |                  0.0542 | 1.453 |          0 |               0 |               ≈0 |
+| **1e-2 (shipping)** |                  0.3216 | 4.862 |      0.001 |           0.002 |               ≈0 |
+| 3e-2                      |                   11.84 |    — |          0 | **0.659** |               ≈0 |
 
 σ=1e-2 sits just inside the usable band (σ=3e-2 collapses: 66 % of importance weights
 underflow). But **the cosine is flat and ≈0 across three orders of magnitude of σ** — a
@@ -1025,13 +1024,13 @@ The rails are perturbed only at the current decode step and read the clean row's
 can only ever see the **detached-history** gradient `g_direct`, not BP's `g_full`. Measured on
 identical token positions:
 
-| layer | cos(g_direct, g_full) |
-|---|---:|
-| `layers.0.mlp.down_proj` | +0.28 |
-| `layers.7.self_attn.o_proj` | +0.24 |
-| `layers.14.self_attn.k_proj` | +0.07 |
-| `layers.21.self_attn.o_proj` | +0.92 |
-| `layers.27.mlp.down_proj` | +1.00 |
+| layer                          | cos(g_direct, g_full) |
+| ------------------------------ | --------------------: |
+| `layers.0.mlp.down_proj`     |                 +0.28 |
+| `layers.7.self_attn.o_proj`  |                 +0.24 |
+| `layers.14.self_attn.k_proj` |                 +0.07 |
+| `layers.21.self_attn.o_proj` |                 +0.92 |
+| `layers.27.mlp.down_proj`    |                 +1.00 |
 
 Positive everywhere and near-perfect in the late layers. Myopia costs something in the early
 layers but is **not** what stops the run.
@@ -1054,10 +1053,10 @@ cos ≈ sqrt(ρ·N / D_total)    (all layers — the other layers' gradient ener
 
 Measured against prediction, at N=8:
 
-| regime | predicted | measured | ratio to the §1 "K-bound" |
-|---|---:|---:|---:|
-| one layer (`layers.0.mlp.down_proj`, d=12.6 M) | sqrt(8/12.6e6) = **8.0e-4** | **+7.0e-4** | 0.04× |
-| all 196 linears (D = 1.41 B) | 7.5e-5 | ≲2e-4 (at the 1/√d floor) | 0.00–0.02× |
+| regime                                           |                        predicted |                    measured | ratio to the §1 "K-bound" |
+| ------------------------------------------------ | -------------------------------: | --------------------------: | -------------------------: |
+| one layer (`layers.0.mlp.down_proj`, d=12.6 M) | sqrt(8/12.6e6) =**8.0e-4** |           **+7.0e-4** |                     0.04× |
+| all 196 linears (D = 1.41 B)                     |                           7.5e-5 | ≲2e-4 (at the 1/√d floor) |               0.00–0.02× |
 
 The one-layer prediction lands within 13 %. **The per-token machinery buys no gradient
 information over sequence-level ES at the same rail count** — it multiplies targets, not
@@ -1074,11 +1073,11 @@ that moving FuRA from −12.25 pp to +0.82 pp was a scale change, not a directio
 There are **two different footprints** and es_token is mis-set on both, in opposite directions.
 Both are relative to `RMS(W)` (Qwen3-1.7B linears 0.033; Qwen2.5-Math-7B 0.020):
 
-| | *probe* footprint ‖ΔW_probe‖/‖W‖ | *update* footprint per step |
-|---|---:|---:|
-| `es` dense (paper ES, +20 pp) | 5.0e-2 | `α/√N` = 5e-4/√30 = **4.6e-3** |
-| `es` iso (footprint-matched, +20 pp) | 5.0e-2 | 2.5e-2/√30 = **4.6e-3** |
-| **`es_token` (the flat 200-step run)** | **0.30** (σ/RMS(W) = 0.01/0.033) | **6.5e-5 → 1.3e-4** |
+|                                                | *probe* footprint ‖ΔW_probe‖/‖W‖ |             *update* footprint per step |
+| ---------------------------------------------- | --------------------------------------: | ----------------------------------------: |
+| `es` dense (paper ES, +20 pp)                |                                  5.0e-2 | `α/√N` = 5e-4/√30 = **4.6e-3** |
+| `es` iso (footprint-matched, +20 pp)         |                                  5.0e-2 |             2.5e-2/√30 =**4.6e-3** |
+| **`es_token` (the flat 200-step run)** | **0.30** (σ/RMS(W) = 0.01/0.033) |                **6.5e-5 → 1.3e-4** |
 
 **es_token probes 6× too far and steps 35–70× too short.** The probe number is exact and
 shape-independent: a rank-1 Rademacher perturbation has ‖ΔW‖_F = σ·√(d_out·d_in) and
@@ -1117,27 +1116,27 @@ Neither is the cause of the flat run; both are real. Both are now **config knobs
 reproduce the old decode exactly**, so the LR sweep below stays interpretable and the next run is
 a one-line switch:
 
-| knob | default (= old behaviour) | fix |
-|---|---|---|
-| `es_token.top_p` / `ES_TOP_P` | `1.0` | `0.95` — matches BP's rollout and every eval (verified equal to HF's `TopPLogitsWarper` to 6e-8) |
-| `es_token.use_generation_config_eos` / `ES_EOS_FROM_GENCFG` | `false` | `true` — also stops on `151643` |
+| knob                                                            | default (= old behaviour) | fix                                                                                                   |
+| --------------------------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `es_token.top_p` / `ES_TOP_P`                               | `1.0`                   | `0.95` — matches BP's rollout and every eval (verified equal to HF's `TopPLogitsWarper` to 6e-8) |
+| `es_token.use_generation_config_eos` / `ES_EOS_FROM_GENCFG` | `false`                 | `true` — also stops on `151643`                                                                  |
 
 ### 12.7 Shipped, and the relaunch
 
 **Shipped** — two per-step metrics, because the run was previously blind to exactly the
 quantity that decides it (`es_token_worker_extension.py`, `es_token/ray_trainer.py`):
 
-| metric | meaning |
-|---|---|
-| `train/update_footprint` | RMS(lr·dW)/RMS(W), averaged over perturbed layers — the §12.5(b) number |
+| metric                     | meaning                                                                                                                                                         |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `train/update_footprint` | RMS(lr·dW)/RMS(W), averaged over perturbed layers — the §12.5(b) number                                                                                      |
 | `train/dW_cos_prev_mean` | cos(dW_t, dW_{t−1}) on a fixed 100 k-coordinate sketch, averaged over the 112 perturbed layers — the coherent fraction of the estimate; ≈0 means random walk |
 
 **First 20 steps of the sweep — and the metric's detection limit.** Over 21/20 logged steps:
 
-| arm | n | mean | per-step std | mean / SE |
-|---|---:|---:|---:|---:|
-| lr 1e-4 | 21 | +3.80e-5 | 2.77e-4 | **+0.63 σ** |
-| lr 1e-3 | 20 | −1.60e-5 | 3.78e-4 | **−0.19 σ** |
+| arm     |  n |      mean | per-step std |           mean / SE |
+| ------- | -: | --------: | -----------: | ------------------: |
+| lr 1e-4 | 21 |  +3.80e-5 |      2.77e-4 |  **+0.63 σ** |
+| lr 1e-3 | 20 | −1.60e-5 |      3.78e-4 | **−0.19 σ** |
 
 No detectable coherence in either arm. The metric is **well calibrated**: two independent isotropic
 vectors sketched at 100 k coordinates give cos std 1/√1e5 = 3.16e-3, and averaging over 112 layers
@@ -1155,10 +1154,10 @@ the offline audit's ≲2e-4.
 demonstrably learns), `scripts/zo_opd/nersc_align/es_opd_nersc.sh`, 200 steps, everything else
 identical to the flat run so the LR is the only variable:
 
-| GPU | LR | footprint (measured @ step 0 → est. steady) | rationale |
-|---|---|---:|---|
-| 6 | 1e-4 | **6.50e-4** → ~1.3e-3 | ~1/7 of `dense` ES's per-iteration motion |
-| 7 | 1e-3 | **6.50e-3** → ~1.3e-2 | brackets `dense` ES's 4.6e-3 from above |
+| GPU | LR   | footprint (measured @ step 0 → est. steady) | rationale                                   |
+| --- | ---- | -------------------------------------------: | ------------------------------------------- |
+| 6   | 1e-4 |                 **6.50e-4** → ~1.3e-3 | ~1/7 of `dense` ES's per-iteration motion |
+| 7   | 1e-3 |                 **6.50e-3** → ~1.3e-2 | brackets `dense` ES's 4.6e-3 from above   |
 
 Both arms report identical `L_clean_mean` (0.30247) and `dW_norm_mean` (741.7) at step 0, so LR
 is the only difference between them. Logs: `logs/lrsweep/opd_es_token_lr1e-{4,3}_*.log`,
@@ -1173,11 +1172,11 @@ step's update, so there was no zero-update reference on this protocol; one was m
 separately (`eval_math.py`, same MATH-500 parquet, same `ttrl_math` grader, greedy n=1, 3072
 tokens, non-thinking — so it is directly comparable):
 
-| | base (0 updates) | step 0 (after 1 update) | step 20 |
-|---|---:|---:|---:|
-| **base reference** | **73.60 ± 1.97** | — | — |
-| lr 1e-4 | | 73.8 | 72.4 |
-| lr 1e-3 | | **70.6** | **69.4** |
+|                          |        base (0 updates) | step 0 (after 1 update) |        step 20 |
+| ------------------------ | ----------------------: | ----------------------: | -------------: |
+| **base reference** | **73.60 ± 1.97** |                      — |             — |
+| lr 1e-4                  |                         |                    73.8 |           72.4 |
+| lr 1e-3                  |                         |          **70.6** | **69.4** |
 
 lr 1e-4 sits on top of base. lr 1e-3 is 3.0–4.2 pp below it at both reads — ~1.5–2 σ each, so not
 individually decisive, but consistent in sign and already 3 pp down after a *single* update.
@@ -1186,10 +1185,10 @@ individually decisive, but consistent in sign and already 3 pp down after a *sin
 steps the model has moved `√S ×` the per-step footprint — which is directly comparable to the
 probe footprints §13.2 measured on the same model:
 
-| arm | displacement @ step 20 | @ step 200 | nearest §13.2 probe point |
-|---|---:|---:|---|
-| lr 1e-4 | √20 × 6.5e-4 = 2.9e-3 | 9.2e-3 | below 1.6e-2 (KL 1.10×) → expect flat |
-| lr 1e-3 | √20 × 6.5e-3 = 2.9e-2 | **9.2e-2** | 3.3e-2 (KL 1.36×) → **9.2e-2 ≈ the 9.8e-2 cliff** |
+| arm     |  displacement @ step 20 |       @ step 200 | nearest §13.2 probe point                                |
+| ------- | ----------------------: | ---------------: | --------------------------------------------------------- |
+| lr 1e-4 | √20 × 6.5e-4 = 2.9e-3 |           9.2e-3 | below 1.6e-2 (KL 1.10×) → expect flat                   |
+| lr 1e-3 | √20 × 6.5e-3 = 2.9e-2 | **9.2e-2** | 3.3e-2 (KL 1.36×) →**9.2e-2 ≈ the 9.8e-2 cliff** |
 
 So the two experiments agree quantitatively, and the standing prediction is that **lr 1e-4 ends
 flat and lr 1e-3 ends degraded, possibly badly**. If that holds, the honest conclusion is not
@@ -1203,14 +1202,14 @@ Recorded here before the endpoint so it can be falsified: the endpoint may still
 
 Both arms ran the full 200 steps. MATH-500 greedy n=1, base reference **73.60 ± 1.97**:
 
-| step | 0 | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 199 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+| step              | 0    | 20   | 40   | 60   | 80   | 100  | 120  | 140  | 160  | 180  | 199            |
+| ----------------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | -------------- |
 | **lr 1e-4** | 73.8 | 72.4 | 73.8 | 71.2 | 71.6 | 73.0 | 71.2 | 71.2 | 72.2 | 70.4 | **70.8** |
 | **lr 1e-3** | 70.6 | 69.4 | 66.8 | 67.4 | 67.0 | 63.6 | 60.8 | 59.8 | 61.0 | 59.8 | **57.4** |
 
-| arm | OLS slope | t | end vs base |
-|---|---:|---:|---:|
-| lr 1e-4 | **−1.28 pp / 100 steps** | −3.2 | −2.8 |
+| arm     |                       OLS slope |      t |      end vs base |
+| ------- | ------------------------------: | -----: | ---------------: |
+| lr 1e-4 | **−1.28 pp / 100 steps** |  −3.2 |            −2.8 |
 | lr 1e-3 | **−6.52 pp / 100 steps** | −11.4 | **−16.2** |
 
 **Correction to §12.7's prediction.** It said lr 1e-4 would end *flat*. It does not — the decline is
@@ -1222,9 +1221,9 @@ only because its damage rate (~10× smaller again) is below the ±2 pp resolutio
 **The random-walk model is confirmed by direct measurement.** Displacement of the lr 1e-4 step-199
 checkpoint from base (`check_weight_displacement.py`):
 
-| | predicted | measured |
-|---|---:|---:|
-| coherent accumulation (`S × footprint`) | 0.13 – 0.20 | — |
+|                                              |                  predicted |                               measured |
+| -------------------------------------------- | -------------------------: | -------------------------------------: |
+| coherent accumulation (`S × footprint`)   |               0.13 – 0.20 |                                     — |
 | **random walk (`√S × footprint`)** | **9.2e-3 – 1.4e-2** | **1.05e-2** per perturbed linear |
 
 (footprint 6.5e-4 at step 0 rising to ~1.0e-3; `√200` = 14.1. Global ratio 5.36e-3, diluted by the
@@ -1275,13 +1274,13 @@ is exactly `α/√N`.
 unperturbed reference** (all rails share the generation seed, so at σ=0 the rollouts are
 identical and the spread is exactly 0 — every bit of spread at σ>0 is perturbation-induced):
 
-| σ | KL(π‖q) | vs σ=0 | fitness spread | resp_len | probe footprint σ/RMS(W) |
-|---|---:|---:|---:|---:|---:|
-| **0 (reference)** | **0.2838** | 1.00× | 0.0 | 499 | — |
-| 1e-3 | 0.3116 | 1.10× | 0.0115 | 505 | 1.6e-2 |
-| 2e-3 | 0.3865 | 1.36× | 0.0398 | 500 | 3.3e-2 |
-| **3e-3 (chosen)** | **0.6420** | **2.26×** | **0.0879** | 472 | **4.9e-2** |
-| 6e-3 | 4.945 | **17.4×** | 7.44 | 417 | 9.8e-2 |
+| σ                      |        KL(π‖q) |          vs σ=0 |   fitness spread | resp_len | probe footprint σ/RMS(W) |
+| ----------------------- | ---------------: | ---------------: | ---------------: | -------: | ------------------------: |
+| **0 (reference)** | **0.2838** |           1.00× |              0.0 |      499 |                        — |
+| 1e-3                    |           0.3116 |           1.10× |           0.0115 |      505 |                    1.6e-2 |
+| 2e-3                    |           0.3865 |           1.36× |           0.0398 |      500 |                    3.3e-2 |
+| **3e-3 (chosen)** | **0.6420** | **2.26×** | **0.0879** |      472 |          **4.9e-2** |
+| 6e-3                    |            4.945 | **17.4×** |             7.44 |      417 |                    9.8e-2 |
 
 Three things fall out.
 
@@ -1306,25 +1305,25 @@ far) and update footprint 6.5e-5–1.3e-4 (35–70× too short).
 
 ### 13.3 Four bugs found bringing it up
 
-| symptom | cause | fix |
-|---|---|---|
-| `Cannot schedule RayWorkerWrapper ... {'GPU': 1.0} cannot fit into [{'GPU': 0.5}]` | vLLM's `ray` executor spawns a worker demanding a WHOLE GPU, so a co-located teacher's bundle can never be granted | `es.distributed_executor_backend=uni` (in-process worker) + `es.engine_gpu_fraction` |
-| `Free memory on device (9.37/93.1 GiB)` — engine on the wrong card | `ESNcclLLM.__init__` popped `CUDA_VISIBLE_DEVICES` unconditionally; with `uni` there is no child worker to re-derive the device, so vLLM went to physical GPU0 | `ES_KEEP_CUDA_VISIBLE=1` (the identical gate `NPNcclLLM` already had) |
-| ~48 s/iteration of CPU | the sympy task-reward grader ran on all 30 rails, though it is only a diagnostic here | graded on ONE rail per iteration; `accuracy` is NaN elsewhere and excluded from the mean |
-| teacher never torn down | `_cleanup` only killed student engines | teacher engine + its placement group reaped first |
+| symptom                                                                              | cause                                                                                                                                                                | fix                                                                                       |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `Cannot schedule RayWorkerWrapper ... {'GPU': 1.0} cannot fit into [{'GPU': 0.5}]` | vLLM's `ray` executor spawns a worker demanding a WHOLE GPU, so a co-located teacher's bundle can never be granted                                                 | `es.distributed_executor_backend=uni` (in-process worker) + `es.engine_gpu_fraction`  |
+| `Free memory on device (9.37/93.1 GiB)` — engine on the wrong card                | `ESNcclLLM.__init__` popped `CUDA_VISIBLE_DEVICES` unconditionally; with `uni` there is no child worker to re-derive the device, so vLLM went to physical GPU0 | `ES_KEEP_CUDA_VISIBLE=1` (the identical gate `NPNcclLLM` already had)                 |
+| ~48 s/iteration of CPU                                                               | the sympy task-reward grader ran on all 30 rails, though it is only a diagnostic here                                                                                | graded on ONE rail per iteration;`accuracy` is NaN elsewhere and excluded from the mean |
+| teacher never torn down                                                              | `_cleanup` only killed student engines                                                                                                                             | teacher engine + its placement group reaped first                                         |
 
 ### 13.4 Configuration
 
-| | value |
-|---|---|
-| student / teacher / data | identical to [§11.1](#111-the-working-setting--copy-this-do-not-re-derive-it) |
-| perturbation | `dense` — every `named_parameter`, fp32 master |
-| N (population) | **30** |
-| σ / α | **3.0e-3 / 1.5e-3** |
-| T / top-p | 1.0 / 0.95 (top-p for parity with BP's rollout and every eval, §12.6) |
-| batch | 24 prompts, **resampled** per iteration from the 17 k pool |
-| max_tokens | 2048 (train), 3072 (eval) |
-| eval | MATH-500 greedy, every 10 iterations |
+|                          | value                                                                      |
+| ------------------------ | -------------------------------------------------------------------------- |
+| student / teacher / data | identical to[§11.1](#111-the-working-setting--copy-this-do-not-re-derive-it) |
+| perturbation             | `dense` — every `named_parameter`, fp32 master                        |
+| N (population)           | **30**                                                               |
+| σ / α                  | **3.0e-3 / 1.5e-3**                                                  |
+| T / top-p                | 1.0 / 0.95 (top-p for parity with BP's rollout and every eval, §12.6)     |
+| batch                    | 24 prompts,**resampled** per iteration from the 17 k pool            |
+| max_tokens               | 2048 (train), 3072 (eval)                                                  |
+| eval                     | MATH-500 greedy, every 10 iterations                                       |
 
 **`num_engines` must be 1.** `ES_KEEP_CUDA_VISIBLE=1` — required so the `uni` executor puts vLLM
 on the pinned card instead of physical GPU0 (§13.3) — makes every engine actor inherit the *same*
@@ -1335,28 +1334,28 @@ To use two cards, run two **separate single-engine jobs**.
 **Running (2026-08-29), one arm per GPU** — the σ pair §13.2 could not separate on one iteration,
 now run to 120 iterations each at N=30, batch 16, 1536 tokens:
 
-| GPU | σ | α | rationale |
-|---|---|---|---|
-| 6 | 3.0e-3 | 1.5e-3 | footprint-matched to `dense`/`iso` (probe 4.9e-2, motion 4.5e-3) |
-| 7 | 2.0e-3 | 1.0e-3 | the §13.2 fallback — keeps the population at 1.36× the reference instead of 2.26× |
+| GPU | σ     | α     | rationale                                                                             |
+| --- | ------ | ------ | ------------------------------------------------------------------------------------- |
+| 6   | 3.0e-3 | 1.5e-3 | footprint-matched to `dense`/`iso` (probe 4.9e-2, motion 4.5e-3)                  |
+| 7   | 2.0e-3 | 1.0e-3 | the §13.2 fallback — keeps the population at 1.36× the reference instead of 2.26× |
 
 **The §13.2 probe under-measured σ, because it ran at 512 tokens.** First production iteration
 (N=30, batch 16, **1536** tokens) vs the probe (N=8, batch 16, **512** tokens), same σ:
 
-| σ | probe KL @512 | production KL @1536 | production spread |
-|---|---:|---:|---:|
-| 2.0e-3 | 0.386 (1.36× ref) | **0.400** (1.41×) | 0.081 |
-| 3.0e-3 | 0.642 (2.26× ref) | **0.936** (3.30×) | **1.758** |
+| σ     |      probe KL @512 |      production KL @1536 | production spread |
+| ------ | -----------------: | -----------------------: | ----------------: |
+| 2.0e-3 | 0.386 (1.36× ref) | **0.400** (1.41×) |             0.081 |
+| 3.0e-3 | 0.642 (2.26× ref) | **0.936** (3.30×) |   **1.758** |
 
 **The σ=0 reference is length-invariant; only the perturbation compounds.** Re-measured at 1536
 tokens: **0.2878** (resp_len 1142), against 0.2838 at 512 — unchanged, as expected for a per-token
 mean on the clean model. So the whole length effect sits in the perturbation:
 
-| σ | KL/ref @512 | KL/ref @1536 |
-|---|---:|---:|
-| 0 | 1.00 | 1.00 (0.2878) |
-| 2.0e-3 | 1.36× | **1.39×** |
-| 3.0e-3 | 2.26× | **3.25×** |
+| σ     | KL/ref @512 |     KL/ref @1536 |
+| ------ | ----------: | ---------------: |
+| 0      |        1.00 |    1.00 (0.2878) |
+| 2.0e-3 |      1.36× | **1.39×** |
+| 3.0e-3 |      2.26× | **3.25×** |
 
 σ=2e-3 is stable across lengths; σ=3e-3 degrades badly, and its fitness spread is **22× larger**
 than σ=2e-3's — heavy-tailed, with individual rails blown out rather than informatively perturbed.
@@ -1374,8 +1373,8 @@ the 17 min/iteration estimated from the probe, so 120 iterations is ~8 h, not ~3
 every iteration* (16 problems from a pool of 17,917), so `kl_mean` moves with the draw, not just
 with the weights. First three iterations:
 
-| iter | 1 | 2 | 3 |
-|---|---:|---:|---:|
+| iter    |      1 |      2 |      3 |
+| ------- | -----: | -----: | -----: |
 | σ=3e-3 | 0.9358 | 0.7093 | 0.6710 |
 | σ=2e-3 | 0.4004 | 0.4634 | 0.3837 |
 
@@ -1396,17 +1395,17 @@ accuracy fitness gives in [ES §15.5](../ES/es_results.md), which is the point o
 The first two arms (σ=3e-3 / 2e-3, N=30, 30 iterations) were **killed at iteration 30**. They were
 minimising the fitness successfully and getting *worse* at the task:
 
-| | eval @0 | @10 | @20 | @30 | KL/ref @1 → @30 | resp_len @1 → @30 |
-|---|---:|---:|---:|---:|---:|---:|
-| σ=3e-3 | 73.2 | 74.8 | 73.8 | **68.2** | 3.25 → 1.30 | 893 → 1438 (**+61 %**) |
-| σ=2e-3 | 73.2 | 73.4 | 73.4 | **71.4** | 1.39 → 0.94 | 1069 → 1408 (**+32 %**) |
+|         | eval @0 |  @10 |  @20 |            @30 | KL/ref @1 → @30 |             resp_len @1 → @30 |
+| ------- | ------: | ---: | ---: | -------------: | ---------------: | -----------------------------: |
+| σ=3e-3 |    73.2 | 74.8 | 73.8 | **68.2** |     3.25 → 1.30 |  893 → 1438 (**+61 %**) |
+| σ=2e-3 |    73.2 | 73.4 | 73.4 | **71.4** |     1.39 → 0.94 | 1069 → 1408 (**+32 %**) |
 
 The mechanism is unambiguous:
 
-| | length slope | t | corr(length, KL) | % of the 1536 cap at iter 30 |
-|---|---:|---:|---:|---:|
-| σ=3e-3 | +20.8 tok/iter | +14.9 | **−0.884** | 94 % |
-| σ=2e-3 | +14.7 tok/iter | +10.9 | **−0.874** | 92 % |
+|         |   length slope |     t |  corr(length, KL) | % of the 1536 cap at iter 30 |
+| ------- | -------------: | ----: | ----------------: | ---------------------------: |
+| σ=3e-3 | +20.8 tok/iter | +14.9 | **−0.884** |                         94 % |
+| σ=2e-3 | +14.7 tok/iter | +10.9 | **−0.874** |                         92 % |
 
 **The fitness was a per-token MEAN** — `−mean_t[log π_n(y_t) − log q(y_t)]`. A rail lowers that by
 appending easy, low-KL filler that dilutes the high-KL reasoning tokens, so ES selects for length:
@@ -1441,11 +1440,11 @@ Raw records: `logs/esseq/meanagg_sig{3e-3,2e-3}.log`. Relaunched at the same two
 
 The `opd_kl_agg=sum` rerun was killed at iteration 14/10. It failed the opposite way:
 
-| aggregation | length slope | t | length | per-token KL |
-|---|---:|---:|---:|---:|
-| `mean` σ=3e-3 | **+20.8**/iter | +14.9 | 893 → 1438 (+61 %) | — |
-| `sum` σ=3e-3 | **−60.1**/iter | −12.8 | 893 → **197** (−78 %) | 0.490 → 0.447 |
-| `sum` σ=2e-3 | **−30.9**/iter | −5.8 | 1069 → 754 (−29 %) | 0.357 → **0.452** |
+| aggregation      |          length slope |      t |                       length |            per-token KL |
+| ---------------- | --------------------: | -----: | ---------------------------: | ----------------------: |
+| `mean` σ=3e-3 |  **+20.8**/iter |  +14.9 |          893 → 1438 (+61 %) |                      — |
+| `sum` σ=3e-3  | **−60.1**/iter | −12.8 | 893 →**197** (−78 %) |          0.490 → 0.447 |
+| `sum` σ=2e-3  | **−30.9**/iter |  −5.8 |         1069 → 754 (−29 %) | 0.357 →**0.452** |
 
 **Root cause.** The per-token log-ratio is *positive* on average — it is the base per-token KL,
 ≈0.29 — so the sequence total is ≈ `0.29 × length`. Minimising the sum therefore minimises length,
@@ -1479,18 +1478,6 @@ buys exact length-neutrality.
 New metric: `train/kl_per_tok` — the length-normalised view, which under a fixed trajectory can no
 longer be gamed and so is a usable progress signal. `train/resp_len` now reports the **clean**
 policy's length, i.e. genuine policy drift rather than within-iteration selection.
-
----
-
-# ZO-NP (zeroth-order node-perturbation) OPD — results
-
-Student `Qwen/Qwen3-1.7B`, teacher `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`.
-Loss = per-token reverse-KL to the teacher over the student top-K=16 set (`reward_weight_mode=student_p`).
-Trainer: `verl/verl/trainer/np/` (custom n_sample-wide perturbed vLLM decode); driver
-`scripts/zo_opd/zo_np_train.sh`. Offline gradient harness: `verl/verl/trainer/zo_np/grad_check.py`
-(`scripts/zo_opd/zo_np.sh`). Full working notes: `scripts/zo_opd/results/{ANALYSIS,SCALING_FIX_AND_LR}.md`.
-
----
 
 ## Session 2026-08-31/09-01 — rail-aware kernels: shared-KV attention + streaming LM head, and the measured free-rail frontier
 
@@ -1564,6 +1551,194 @@ fixed +0.47 ms; graph-capture the LM head + payload path (0.4–1.0 ms of eager 
 rows-tiled RMSNorm (0.35 → 0.9 ms at 136 rows — now larger than attention on the new path); then
 re-run `bench_es_token_vs_bp.sh` with `attn_impl=fold, lm_head_impl=stream` at 8×B=8 waves. None of
 this changes the estimator: the systems claim now holds, the learning question ([es_rails_formulation.md](es_rails_formulation.md)) stays open.
+
+## 2026-09-07 BP es-prefill and es-decode setting audit
+
+> Question: are es-prefill and es-decode the same experiment except for *where* the rail is evaluated
+> (a prefill of the perturbed model vs decode rails riding the clean KV), and how does each relate to
+> the BP reference? **Objective gradient at W₀: identical across all three. Pipeline: BP and es-prefill
+> share verl end to end (rollout, teacher, parameter set, dtype); es-decode differs from both in seven
+> places, two of which confound the "3× weaker `d_std`" attribution in
+> [es_profile_results.md §16](es_profile_results.md).**
+> Sources: `scripts/zo_opd/ds15b/{bp_opd,es_opd,es_decode}.sh`, `on_policy_distillation.sh`,
+> `verl/verl/trainer/ppo/es_update.py`, `verl/verl/workers/fsdp_workers.py` (`_es_params`, k=0 score),
+> `verl/verl/trainer/es_token/ray_trainer.py` (seq branch), `rail_seq_kernels.py`,
+> `es_token_worker_extension.py`, run logs `OPD-estoken/logs/ds15b/{es/C,es_decode}`.
+
+### Shared pipeline (verified in code)
+
+| item | BP (`bp_opd.sh`) | es-prefill (`es_opd.sh` → `algorithm.es_update`) | es-decode (`es_decode.sh` → `es_token`, `rail_mode=seq`) |
+|---|---|---|---|
+| student / teacher / data | R1-Distill-1.5B ← JustRL-1.5B, DAPO-Math-17k | same | same |
+| lengths | prompt ≤ 1024 (overlong dropped), response ≤ 7168 | same | same |
+| advantage | `A_t = log q(y_t) − log π_0(y_t)`, k1, K=0, teacher T=1, frozen (`token_reward_direct`) | same tensor | same (`A = lq − lp[:,0]`) |
+| objective followed | `Σ_{b,t} A_t log π(y_t) / Σ m`, PPO-clipped PG (clip 0.2, ratio ≈ 1), `token-mean` | rail fitness `F_n = Σ_{b,t} A_t (log π_n − log π_0) / Σ m`: same gradient at W₀ | same formula (`num/den`) |
+| no IW, no +1 score term, no KL loss, no task reward, entropy 0 | ✓ | ✓ | ✓ |
+| trained / perturbed set | all 1.78 B params | all 1.78 B (`_es_params` = `requires_grad`) | **decoder linears only, ≈ 1.31 B** |
+| dtype | fp32 master, bf16 forward + backward (FSDP) | fp32 master, bf16 forward | fp32 host master, bf16 live weights |
+| rollout | vLLM, T=1.0, **top_p=1** | same engine, same params | **own decoder, T=1.0, top_p=0.95** |
+| teacher | FSDP HF bf16, param-offloaded, T=1 | same | vLLM `prompt_logprobs`, bf16, T=1 |
+
+### Batch and update
+
+| item | BP | es-prefill | es-decode |
+|---|---|---|---|
+| prompts × rollouts / step | 64 × 4 = **256 seqs** | 16 × 4 = 64 seqs | 64 × 1 = 64 seqs |
+| updates / step | 4 Adam steps, each on 64 seqs (`ppo_mini_batch` 16 prompts), 1 epoch | 1 ES step on all 64 seqs | 1 ES step on all 64 seqs |
+| step rule | Adam, lr 1e-6 constant, wd 0.01 | `d=(F₊−F₋)/2`, `W += α/n_pairs Σ d/RMS(d)·ε`, α 1.25e-3 | same code, α 1.25e-3 |
+| probes | backward | N=32 (16 antithetic pairs), σ 1e-3, Gaussian | N=32 (16 pairs), σ 1e-3, Rademacher ±1, full or rank-1 |
+| probe / update footprint (σ/RMS(W) · per step) | — | 1.87 % · 6.0e-3 | 2.51 % · 7.8e-3 |
+| tokens scored / step | ~1.7 M | ~420 k | ~407 k |
+| data order | `shuffle=False`, 64 prompts/step | `shuffle=False`, 16 prompts/step | sequential 64/step, last 16 held out |
+| schedule | 1 epoch (~280 steps) | 300 planned | 40–80 |
+| in-run eval · ckpt | MATH-500 + AIME24, n=2 @ T=0.6, top-p 0.95, every 20 · keep 1 | same | MATH-500 greedy, every 10–20 · keep 5–10; 16-prompt held-out probe |
+| s / step · s / seq | 329–433 · 1.3–1.7 | 322 · 5.0 | 330 (r1) / 1340 (full) · 5–21 |
+
+BP vs es-prefill differ only in batch (256 vs 64 seqs, 4 Adam updates vs 1 ES step) and estimator;
+everything else is the same verl pipeline. All three were scored offline on the same ruler
+(`ruler_ckpt.sh`, MATH-500 n=2 @ T=0.6), so in-run eval differences do not touch the headline numbers.
+
+### Discrepancies that matter (es-decode vs the verl pair)
+
+| # | item | BP = es-prefill | es-decode | matters? |
+|---|---|---|---|---|
+| 1 | **perturbed / trained set** | all 1.78 B: embed 233 M, untied lm_head 233 M, linears, norms, qkv biases | decoder linears ≈ 1.31 B | **yes.** `d_std ≈ σ‖g‖` over the perturbed set, and es-prefill's probe includes the lm_head/embedding gradient. Same σ, α ⇒ relative step 6.0e-3 vs 7.8e-3 per step; es-decode spends the ~5 % displacement budget in ~40 steps, es-prefill in ~70 |
+| 2 | **prompt batching** | n=4 rollouts per prompt (16 prompts es-prefill, 64 BP) | 64 prompts × n=1 | **yes** (es-prefill vs es-decode): the batch-mean gradient over 16 distinct prompts carries more sampling noise than over 64 → larger ‖g‖ and `d_std` with no extra signal |
+| 3 | **rollout top-p** | 1.0 (verl default; C's log: `'temperature': 1.0, 'top_k': -1, 'top_p': 1`) | 0.95 | moderate. [zo_opd.md §12.6](zo_opd.md)'s "0.95 = parity with BP's rollout" holds for the evals only. Mean lengths end up close (6.5–6.9 k vs 6.4 k) |
+| 4 | noise distribution | Gaussian N(0,1), full-rank (es-prefill) | Rademacher ±1: full-rank (packed bits) or rank-1 `a bᵀ` (main arm) | small. `E[(aᵀGb)²] = ‖G‖²_F`, so `d_std` is rank-invariant (measured: same) |
+| 5 | rail numerics | `W₀+σε` on the fp32 master, FSDP casts to bf16 (σ=1e-3 ≈ 4 bf16 ulps at \|w\|≈0.05); HF + flash-attn | `σ·ε·x` added as a separate fp32-accumulated term (exact); Triton seq attention + streaming LM head | small; adds noise to es-prefill, not es-decode |
+| 6–7 | schedule, in-run eval, data order | see the batch table | | none for the ruler |
+
+es-token-decode differs further: fresh rank-1 noise per token, sampled-token IW loss with the +1
+score term (`student_iw`), plain SGD `lr` instead of the z-scored α, `token_agg=mean`, non-antithetic
+Hadamard rails — so it is not a controlled comparison against es-prefill at all; es-decode is.
+
+### Read
+
+- **Objective and update target are the same.** The premise "only the KV conditioning differs" holds at
+  the estimator level, and BP follows the same gradient with a backward instead of rails.
+- **The 3× `d_std` gap is not a clean measurement of the clean-KV effect.** Items 1 and 2 both raise
+  es-prefill's per-rail spread for reasons unrelated to history propagation (lm_head/embedding
+  gradient inside the probe; 4× fewer distinct prompts). The offline `check_es_decode_fitness.py`
+  ratio of 0.45 (vs 0.33 in-run) is consistent with part of the in-run gap being confound.
+- **"Same α" was not the same relative step**: es-decode moved 1.3× further per step, which by itself
+  moves its peak earlier (~step 20 vs ~60).
+
+### Next step — one control run
+
+es-prefill with the ES parameter set restricted to the decoder linears (set `requires_grad=False`
+on `embed_tokens`, `lm_head`, norms and biases so `_es_params` skips them), 64 prompts × n=1,
+`actor_rollout_ref.rollout.top_p=0.95`. Compare `es/d_std` at steps 1–10 with es-decode r1's
+0.5e-3. Drops toward 0.5e-3 → the clean-KV story shrinks; stays at 1.5e-3 → the attribution stands.
+
+## 2026-09-07 aligned pair: es-prefill vs es-decode (rank-1) at the standing ES setting, vs BP
+
+> The controlled experiment the audit above asked for: every setting matched, the only difference is
+> *where* the rail is evaluated (prefill of the perturbed model vs decode rails on the clean KV).
+> Standing ES defaults from here on (also in CLAUDE.md): **64 prompts / step (one rollout each), N=32
+> perturbations, non-antithetic (plain random, mean baseline), T=0 / top-p 1.0 for the training rollout
+> AND the eval (greedy, n=1)**. Launcher
+> `scripts/zo_opd/ds15b/aligned_es_pair.sh` (`ARM=prefill|decode`); wandb `es_opd_JustRL_1p5b`;
+> runs `ds15b_es-prefill_layers_T0_b64n1_N32rand_sig1e-3_a1.25e-3` (GPU 6) and
+> `ds15b_es-decode_r1_T0_b64n1_N32rand_sig1e-3_a1.25e-3` (GPU 7), launched 2026-09-07 22:10 (a first
+> attempt at T=1.0 / sampled eval ran 25 steps and was stopped — its readouts are kept below).
+> Logs `logs/ds15b/aligned/{prefill,decode}.log`. Checkpoints under `/home/yequan/ckpt_scratch`
+> (rolling keep=1: `/data` was 100 % full at launch).
+
+### Hyper-parameters
+
+| knob | BP (reference run, 2026-08-31) | es-prefill (aligned) | es-decode rank-1 (aligned) |
+|---|---|---|---|
+| student / teacher / data | R1-Distill-1.5B ← JustRL-1.5B, DAPO-Math-17k | same | same |
+| prompts × rollouts / step | 64 × 4 = 256 seqs | **64 × 1 = 64 seqs** | **64 × 1 = 64 seqs** |
+| steps | 1 epoch ≈ 280 | 280 (1 epoch) | 280 (1 epoch) |
+| max prompt / response | 1024 (overlong dropped) / 7168 | same | same |
+| rollout sampling | vLLM, T=1.0, top-p 1.0 | **T=0 (greedy), top-p 1.0**; log-probs at T=1 (`_es_logprob_temperature`) | **T=0 (greedy), top-p 1.0** (arms of 09-05: T=1.0 / 0.95) |
+| gradient source | backward | **N=32 rails, non-antithetic**, Gaussian, mean baseline | **N=32 rails, non-antithetic**, Rademacher rank-1 `a bᵀ`, mean baseline |
+| σ (per element) | — | 1e-3 | 1e-3 |
+| step rule | Adam lr 1e-6, wd 0.01, 4 mini-batches × 64 seqs | z-scored ES, α 1.25e-3: `W += α/N Σ_n (F_n − F̄)/std(F) · ε_n` | same code (`es_update.py` rule inside `es_token`) |
+| per-element update RMS | — | α/√32 = 2.2e-4 | 2.2e-4 |
+| perturbed / trained set | all 1.78 B params | **decoder blocks only** — `algorithm.es_perturb_set=layers`: 28 FSDP layer units, 1,310,339,072 elements (linears + their norms/biases), embed / lm_head / final norm excluded | 112 decoder linears (qkv, o, gate_up, down) ≈ 1.31 B |
+| advantage / objective | k1, K=0: PPO-PG on `A_t = log q − log π_0` | k1 rail fitness `Σ A_t Δlog π / Σ m` | same |
+| held-out probe | — | frozen step-1 batch re-scored every 5 steps (`es/probe_fitness`) | **off** (`heldout_probe_size=0`; the 09-05 arms removed 16 prompts) |
+| post-update gain | — | one extra rail at W_new | first wave, 512 tokens |
+| in-run eval | MATH-500 + AIME24, n=2 @ T=0.6, top-p 0.95, 7168, every 20 (+ step 0) | **greedy n=1, top-p 1.0**, 7168, every 20 (`val_kwargs.do_sample=False`; key `val-core/<bench>/acc/mean@1`) | **greedy n=1, top-p 1.0**, 7168, every 20 via the new `RayESTokenTrainer._evaluate_model`, same keys |
+| checkpoints | every 20 | every 20, keep 1 (fp32 FSDP) | every 20, keep 1 (HF bf16) |
+| data order | `shuffle=False`, 64 prompts / step | same | sequential, 64 / step, no prompts held out |
+| dtype | fp32 master, bf16 fwd+bwd | fp32 master, bf16 forward | fp32 host master, bf16 weights |
+| expected s / step | 329–433 | ≈ 85 + 32 × 7.5 ≈ 325 | ≈ 330 |
+
+Footprint bookkeeping differs by 1.5× between the two trainers and must be corrected before comparing:
+es-prefill's `rms_w` runs over its 28 layer units (**0.0598** — the q/k biases and RMSNorm weights are
+large, RMS ≈ 4, and dominate Σw² despite being 0.01 % of the elements), es-decode's over the 112
+linears (**0.0399**; both numbers verified directly on the HF checkpoint, all-params 0.0536). The
+per-element σ and α are identical by construction; quote both arms' probe/update footprints against
+the linears' 0.0399 (σ → 2.5 %, α/√32 → 5.5e-3 per step; es-prefill's logged 1.67 % / 3.7e-3 × 1.5).
+
+Still not matched (cannot be, without new code): noise distribution (Gaussian full-rank vs Rademacher
+rank-1; `d_std` was measured rank-invariant), rail numerics (FSDP bf16 cast of `W₀+σε` vs an exact
+fp32 `σ·ε·x` term), and the ~0.02 % of perturbed elements that are norms/biases on the es-prefill side.
+
+Launch gotchas (2026-09-07): (1) `datasets/DAPO-Math-17k/DAPO-Math.parquet` is a symlink to
+`../dapo-math-17k.parquet` that existed only in the `OPD-estoken` worktree — recreated here (gitignored);
+(2) `/data` hit 0 bytes free during launch and huggingface_hub fails on a tiny `refs/` write even for
+cached models → the launcher sets `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`; (3) `heldout_probe_size=0`
+made `prompts[-0:]` the whole training set (a 17.9 k-prompt greedy probe at every eval) — fixed.
+
+Smoke gates (2026-09-07 19:30, `SMOKE=1`): es-prefill logs `[ES] perturbing 28/29 tensors
+(1,310,339,072 local elements, set=layers)`, first/last = `model.layers.0/27` flat params; es-decode
+matches 112 layers, draws held rank-1 noise for N rails, and its new eval logs per-benchmark keys.
+
+### Reference curves (pass@1 = `acc/mean@2`, in-run, from the 2026-08-31 logs)
+
+| step | 0 | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 | 220 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BP MATH-500 | 0.751 | 0.823 | 0.843 | 0.846 | 0.848 | 0.844 | **0.859** | 0.850 | 0.851 | **0.861** | 0.858 | 0.845 |
+| BP AIME24 | 0.150 | 0.317 | 0.267 | 0.267 | 0.367 | 0.317 | 0.250 | 0.367 | 0.333 | **0.400** | 0.350 | 0.283 |
+| es-prefill C MATH-500 (16×4, all params, antithetic) | 0.751 | 0.803 | 0.815 | **0.829** | 0.817 | 0.817 | 0.825 | 0.795 | 0.807 | | | |
+| es-prefill C AIME24 | 0.150 | 0.267 | 0.283 | 0.283 | 0.150 | 0.150 | 0.183 | 0.167 | 0.300 | | | |
+
+### Discarded first attempt (T=1.0 rollout, n=2 @ T=0.6 eval; stopped at step 25 / 27)
+
+Same pair otherwise. Kept because it is the only matched `d_std` readout at the sampled setting:
+
+| | step 0 | step 1 | steps 1–10 median |
+|---|---|---|---|
+| es-prefill (layers, 64×1, non-antithetic, T=1.0) | — | 1.06e-3 | **1.16e-3** (0.90–1.29e-3) |
+| es-decode r1 (same) | 5.7e-4 | 7.7e-4 | **0.62e-3** (0.45–0.77e-3) |
+
+Removing the confounds cut es-prefill's spread from ~1.5e-3 to ~1.16e-3 — about half the old 3× gap was
+the parameter set / batching; a **1.9×** gap remained, attributable to the clean-KV evaluation. Evals
+(n=2 @ T=0.6): step 0 0.751 / 0.150 (verl path) vs 0.761 / 0.183 (es_token path, same weights —
+sampling noise); step 20 es-prefill 0.787 / 0.200, es-decode 0.775 / 0.300. Wall clock 369 vs 313 s/step.
+Logs `logs/ds15b/aligned/{prefill_T1_stopped_step25,decode_T1_stopped_step27}.log`.
+
+### Results (aligned pair, T=0 protocol) — filled in as evals land
+
+pass@1 = greedy accuracy (`val-core/<bench>/acc/mean@1`), every 20 steps.
+
+| step | es-prefill MATH-500 | es-prefill AIME24 | es-decode MATH-500 | es-decode AIME24 |
+|---|---|---|---|---|
+| 0 | 0.670 | 0.133 | 0.648 | 0.233 |
+
+Step 0 is the same weights, so the row measures the **evaluator offset**: verl's vLLM rollout worker vs
+the es_token engine's `generate` (its wrapped linears/attention idle) take different bf16 kernel paths,
+greedy trajectories diverge, and MATH-500 lands 2.2 pp apart (AIME24: 3 of 30 problems). Read each arm
+against its own step 0; the final checkpoints get one common greedy re-score (`ruler_ckpt.sh`) at the end.
+
+`es/d_std` at T=0 (control readout): pending.
+
+---
+
+# ZO-NP (zeroth-order node-perturbation) OPD — results
+
+Student `Qwen/Qwen3-1.7B`, teacher `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`.
+Loss = per-token reverse-KL to the teacher over the student top-K=16 set (`reward_weight_mode=student_p`).
+Trainer: `verl/verl/trainer/np/` (custom n_sample-wide perturbed vLLM decode); driver
+`scripts/zo_opd/zo_np_train.sh`. Offline gradient harness: `verl/verl/trainer/zo_np/grad_check.py`
+(`scripts/zo_opd/zo_np.sh`). Full working notes: `scripts/zo_opd/results/{ANALYSIS,SCALING_FIX_AND_LR}.md`.
+
+---
 
 ## Session 2026-06-02 — gradient scaling, LR search, and a self-amplifying divergence
 
@@ -1667,3 +1842,30 @@ The `/σ`-only form trained **cleanly and monotonically** at **lr=3e-2** over th
 
 **wandb** (`zo_opd_qwen4b_1p7b`): `/std/σ` — a1rmd3vt(2e-5), l0gsgnc6(6e-5), ul4tt5n3(2e-4), pz36he7i(6e-4),
 6bjqk1a7(2e-3), mt9un3ge(2e-4 b8), bkbs4fms(6e-4 b8). `(L_q−mean)/σ` — h4hk3tex(3e-2) and siblings.
+
+## [2026-09-07] Storage: intermediate ES step snapshots pruned
+
+`/data` was full. Under `/data/yequan/compress_train/OPD/checkpoint/`, every
+`step_N` snapshot **except each run's last one** was deleted (−42.9 GiB). All 11
+ES runs keep a final, re-evaluable 1.5B model:
+
+| Run | kept |
+| --- | --- |
+| `ds15b_es-decode_r1_N32_sig1e-3_a1.25e-3` | `step_39` |
+| `ds15b_es-decode_r1_N32_sig1e-3_a2.8e-3_raw` | `step_39` |
+| `ds15b_es-decode_r1_N128_sig1e-3_a1.25e-3` | `step_10` |
+| `ds15b_es-decode_full_N32_sig1e-3_a1.25e-3` | `step_20` |
+| `ds15b_es-token-decode_N32_sig1e-3_lr9e-3` | `step_149` |
+| `ds15b_es-token-decode_N32_sig1e-3_lr4e-3` | `step_60` |
+| `ds15b_es-token-decode_N32_sig1e-3_lr2.2e-2_topk16` | `step_40` |
+| `ds15b_es-token-decode_N32_sig1e-3_lr2.2e-2_topk16rkl` | `step_149` |
+| `singlegpu_es_opd_r3072_lr1e-4` | `step_199` |
+| `singlegpu_es_opd_r3072_lr1e-5` | `step_30` |
+| `singlegpu_es_opd_r3072_lr1e-5_resume30` | `step_169` |
+
+What is gone is the mid-run trajectory (`step_10/20/30`, `step_140`, `step_180`),
+so a *post-hoc* eval-vs-step curve can no longer be recomputed from weights. The
+in-run eval points and loss curves are still in wandb, and no optimizer state was
+stored in these dirs, so nothing was resumable to begin with. Going forward,
+these runs write one snapshot per 10 steps — prune to the final one once a run's
+verdict is recorded.

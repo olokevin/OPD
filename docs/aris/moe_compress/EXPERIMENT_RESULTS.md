@@ -106,3 +106,31 @@ User clarified: use the ORIGINAL OpenThoughts3 dataset's own reasoning traces (Q
 | OLMoE-native | 0.338 | 0.349 |
 
 **Original QwQ traces = best calibration for both** (nystrom +0.024 vs native; nystrom_combined 0.384 best). Quality ordering: original-QwQ > Qwen-rollout > native. **Trace richness/length matters more than strict on-policy match** — long high-quality reasoning exercises expert activations best. `*_origot3_s0` ckpts → v3 recovery training.
+
+## [2026-09-07] Storage: compressed checkpoints deleted, metrics are the record
+
+`/data` hit 100% full, so all 27 compressed checkpoints under
+`/data/yequan/moe_compress/ckpts/` had their weight files deleted (253 G → 100 M).
+**No results were lost**: every run's `metrics/<tag>.json` already holds the full
+step-0 eval (mmlu / gsm8k / arc_challenge / hellaswag, values + raw), and each
+ckpt dir keeps its `config.json`, `model.safetensors.index.json` and tokenizer,
+so the compressed architecture is still self-describing.
+
+**Consequence for the pending recovery leg.** `scripts/moe_compress/run_recovery.sh`
+loads `$CKPT/<method>_r<retain><CKPT_SUFFIX>`, and the `*_origot3_s0` ckpts this
+page earmarks for "v3 recovery training" are among those deleted. They must be
+regenerated first — the compression is deterministic given `--seed`, so this
+reproduces them exactly:
+
+```bash
+# one method/retain; ~9-13 min each for the two origot3 nystrom variants
+CUDA_VISIBLE_DEVICES=<gpu> PYTHONPATH=src:verl HF_HOME=/data/yequan/huggingface \
+  /home/yequan/miniconda3/envs/verl/bin/python -m moe_compress.compress_olmoe \
+  --method nystrom --retain 0.50 --seed 0 --calib-seqs 256 \
+  --save-dir /data/yequan/moe_compress/ckpts/nystrom_r0.50_origot3_s0 \
+  --metrics-json /data/yequan/moe_compress/metrics/nystrom_r0.50_origot3_s0.json
+```
+
+Regeneration cost for the whole atlas is the `compress_sec` column already
+recorded in each metrics file: 13 s (magnitude) to 66 min (svd_llm_v2), ~5.5 h
+for all 27 sequentially. Regenerate on demand rather than keeping 253 G resident.

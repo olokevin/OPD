@@ -1137,3 +1137,58 @@ Restored from HEAD and verified byte-identical. Anchor table edits on unique tex
 - Flow bug fixed: OOB loads in the fused rank-r apply loops (k>=rank read past the noise buffer ->
   last rail NaN) + non-finite fitness guard. Ruler scoring tools (ruler_ckpt.sh/ruler_watch.sh,
   val_only scratch to /tmp). Run stopped by user at N=128 step 12. Peak ckpt kept (r1 zscore step_20).
+
+## [2026-09-07] ingest | zo_opd_short: dated 2026-09-07 es-decode section + es-prefill-vs-es-token table; es-token rows in the headline ruler table
+
+- Top section: setting, sweep (alpha / N / rank), per-arm ruler results, the measured 3x d_std
+  mechanism, one-table es-prefill vs es-token-decode vs es-decode comparison, bottom line.
+- Headline ruler table (2026-09-01 section) now carries es-token-decode 0.803 @60 and es-decode
+  0.786 / 0.779 @20 next to BP / es-prefill.
+
+
+## [2026-09-07] query | es-prefill vs es-decode setting audit: loss/update identical, 7 setting discrepancies (param set, prompt batching, top-p) confound the 3x d_std attribution
+
+- New page results/ZO_OPD/es_prefill_vs_es_decode_settings.md; caveat block added to zo_opd_short.md's
+  es-decode "Why" paragraph; index row added. Proposed one control run (es-prefill on decoder linears
+  only, 64 x n=1, top_p 0.95) to isolate the clean-KV effect.
+
+## [2026-09-07] ingest | setting audit: BP column added; section "2026-09-07 BP es-prefill and es-decode setting audit" in zo_opd.md rewritten with BP / es-prefill / es-decode tables (pipeline, batch+update, discrepancies)
+
+- results/ZO_OPD/es_prefill_vs_es_decode_settings.md and the zo_opd.md section now share one body;
+  index row updated.
+
+## [2026-09-07] lint | standalone audit page removed (rule: query answers live as sections in existing pages); CLAUDE.md gains the rule + ZO-OPD ES defaults (64 prompts, N=32 non-antithetic)
+
+## [2026-09-07] ingest | aligned pair launched (es-prefill layers-only vs es-decode rank-1; 64 prompts, N=32 non-antithetic): hyper-parameter table + reference curves in zo_opd.md, headline block in zo_opd_short.md
+
+- Code: `algorithm.es_perturb_set` (verl), per-benchmark sampled eval in `RayESTokenTrainer._evaluate_model`
+  (`eval_n/temperature/top_p/max_tokens`), list-valued `data.val_files` for es_token, `heldout_probe_size=0`
+  bug fixed (prompts[-0:] was the whole set), `aligned_es_pair.sh`. Checkpoints on /home (`/data` full).
+
+## [2026-09-07] ingest | aligned pair restarted on the pasted protocol (T=0 / top-p 1.0 train + eval, greedy n=1); T=1 attempt (25 steps) recorded as a discarded readout; CLAUDE.md + memory defaults updated
+
+## [2026-09-07] cleanup | /data 100% full -> 1.9 TB free; qfura checkpoints become cores
+
+Reclaimed 1.87 TB. Deletions were gated on the results being recorded elsewhere:
+
+| What | Freed | What still holds the result |
+| --- | ---: | --- |
+| Mixtral codefeedback8k qfura x4 (`fura/lift/`) | 348 G | `last/humaneval/eval.log` + response jsonl |
+| `moe_compress/ckpts` (27 compressed OLMoE models) | 253 G | `moe_compress/metrics/*.json` (4-task step-0 evals) |
+| `compress_train/sft/math` (32 runs) | 188 G | `eval.log` (`Result <score>`) + `model_predictions.jsonl` |
+| ES intermediate `step_N` snapshots | 43 G | wandb; each run keeps its final snapshot |
+| Llama-3-70B qfura dense merges x4 | 1.04 T | extracted BTT cores, 3.8 GB each |
+
+The 70B qfura checkpoints were 259 GB each for ~1.02 B trained params. The
+trained core is recoverable because the merge is `W_j = L_j^T M_j` per input
+block with `L` a deterministic function of the pretrained weights; solving for
+`M` reconstructs to 5.7e-07. Tooling and the format live in the sibling repo
+(`lora-without-regret`, commit ecd0e12), which now also defaults qfura training
+to saving the core and reassembling at eval time.
+
+Filed as dated sections in: [moe_compress EXPERIMENT_RESULTS](aris/moe_compress/EXPERIMENT_RESULTS.md),
+[compress_sft](results/compress_sft.md), [ZO_OPD](results/ZO_OPD/zo_opd.md).
+
+**Action outstanding:** the `*_origot3_s0` ckpts earmarked for moe_compress v3
+recovery training were deleted; regenerate before that leg (command in the
+EXPERIMENT_RESULTS section, ~9-13 min each, deterministic given `--seed 0`).

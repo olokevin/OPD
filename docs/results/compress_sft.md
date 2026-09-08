@@ -93,3 +93,20 @@ bash scripts/compress_sft/sweep_sft_ckpts.sh \
   /data/yequan/compress_sft/sft/qwen3_4b_base/forward_r0.7 1 100
 ```
 Mid-training **val-loss** growth is live in wandb via `val_size`/`eval_steps` (tier-1).
+
+## [2026-09-07] Storage: SFT weights deleted, eval logs + predictions kept
+
+`/data` was full. All 32 model weight files under
+`/data/yequan/compress_train/sft/math/` were deleted (188 G → 56 M). Every run
+was verified to have a recorded score first — the check was that
+`grep -r "^Result " <run>` matches — so each run still keeps:
+
+- `last/math/gsm8k/eval.log` with its `Result <score>, total: 1319` line,
+- `last/math/gsm8k/model_predictions.jsonl` (so relaxed/alternate scoring can
+  still be recomputed without the model),
+- `training.log`, `err.log`, `sys_metrics.json`, `last/config.json`.
+
+The 31 Llama-3.2-3B runs (full / full-calib_svd_v2{,_combined} × target {1B,2B} ×
+calsrc {c4, training_data} × lr, plus the blocktt calib_v2 grid) are therefore
+still fully comparable from the logs; only re-generation from the tuned weights
+would need a retrain. Nothing here was mid-flight.
