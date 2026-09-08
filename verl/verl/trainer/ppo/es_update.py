@@ -45,8 +45,15 @@ def _fitness_fn(trainer, batch):
     adv = batch.batch["advantages"]
     denom = mask.sum().clamp(min=1.0)
     if adv.dim() == 3:
-        base = batch.batch["student_top_k_log_probs"].float()
-        ids = batch.batch["student_top_k_ids"]
+        # For teacher-indexed strategies (only_tch / union / union-intersection) the advantage
+        # is aligned to `union_top_k_ids`, NOT the student's own top-K -- gathering at the wrong
+        # ids would silently score a different objective than the one BP maximises.
+        if "union_top_k_ids" in batch.batch.keys():
+            base = batch.batch["union_top_k_log_probs"].float()
+            ids = batch.batch["union_top_k_ids"]
+        else:
+            base = batch.batch["student_top_k_log_probs"].float()
+            ids = batch.batch["student_top_k_ids"]
         m = mask.unsqueeze(-1)
         sub = batch.select(batch_keys=["input_ids", "attention_mask", "position_ids", "responses"])
         sub.batch["target_ids"] = ids
@@ -67,6 +74,56 @@ def _fitness_fn(trainer, batch):
             lp = out.batch["old_log_probs"].float().to(base.device)
             return float(((lp - base) * adv * m).sum() / denom)
     return fit
+
+
+def _heldout_probe(trainer, batch, every):
+    """A FIXED probe of the OPSD fitness, evaluated on ONE frozen batch.
+
+    Every in-band ES scalar saturates: `es/post_update_gain` reads ~-3.5e-4 for α spanning 9.3x
+    (and ~-1e-5 at α≈0), so it cannot rank step sizes -- the same trap zo_opd.md §12 records for
+    `train/L_clean_mean`.  This freezes step 1's batch (rollout, teacher advantages, and the
+    baseline log-probs) and re-scores the CURRENT weights against it every `every` steps, so the
+    only thing that varies is W.  Rising = the student is genuinely moving the way BP moves it.
+
+    Cheap: one extra forward every `every` steps, and ~25 MB of cached tensors.
+    """
+    if every <= 0:
+        return {}
+    st = getattr(trainer, "_es_probe", None)
+    if st is None:
+        keys = ["input_ids", "attention_mask", "position_ids", "responses", "response_mask"]
+        adv = batch.batch["advantages"]
+        if adv.dim() == 3:
+            keys += ["union_top_k_ids"] if "union_top_k_ids" in batch.batch.keys() else ["student_top_k_ids"]
+        sub = batch.select(batch_keys=keys).to("cpu")
+        sub.meta_info = dict(batch.meta_info)
+        st = trainer._es_probe = {
+            "sub": sub,
+            "adv": adv.detach().cpu().clone(),
+            "mask": batch.batch["response_mask"].detach().cpu().clone(),
+            "base": None,
+        }
+    if trainer.global_steps % every and st["base"] is not None:
+        return {}
+    sub, adv, mask = st["sub"], st["adv"], st["mask"]
+    denom = mask.sum().clamp(min=1.0)
+    if adv.dim() == 3:
+        ids_key = "union_top_k_ids" if "union_top_k_ids" in sub.batch.keys() else "student_top_k_ids"
+        q = sub.select(batch_keys=["input_ids", "attention_mask", "position_ids", "responses"])
+        q.batch["target_ids"] = sub.batch[ids_key]
+        q.meta_info = dict(sub.meta_info)
+        lp = wg_out = trainer.actor_rollout_wg.compute_log_probs_for_ids(q)
+        lp = wg_out.batch["student_log_probs_on_teacher_ids"].float().cpu()
+        m = mask.unsqueeze(-1)
+    else:
+        q = sub.select(batch_keys=["input_ids", "attention_mask", "position_ids", "responses", "response_mask"])
+        q.meta_info = dict(sub.meta_info)
+        lp = trainer.actor_rollout_wg.compute_log_prob(q).batch["old_log_probs"].float().cpu()
+        m = mask
+    if st["base"] is None:                       # first call defines the zero point
+        st["base"] = lp.clone()
+        return {"es/probe_fitness": 0.0}
+    return {"es/probe_fitness": float(((lp - st["base"]) * adv * m).sum() / denom)}
 
 
 def es_update_actor(trainer, batch: DataProto) -> dict:
@@ -120,13 +177,20 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
     t_apply = time.time() - t0
     # Did the step actually ascend the batch objective?  One more rail at W_new.
     post_gain = fit()
+    # Each rail is a full-vocab forward (151936-wide logits at ppo_max_token_len_per_gpu
+    # tokens), so N of them leave several GB of cached blocks behind.  vLLM's next
+    # wake_up() re-maps its whole KV cache in one allocation and OOMs on the fragments
+    # -- release them here, where BP's equivalent (the optimizer step) already does.
+    del fit
+    torch.cuda.empty_cache()
     upd_rms = float(np.sqrt(np.sum(coeffs**2)))   # independent unit-variance noises
     rms_w = float(stats.get("rms_w", float("nan")))
     # random-walk bookkeeping: cumulative RMS displacement of all ES steps so far
     trainer._es_cum_sq = getattr(trainer, "_es_cum_sq", 0.0) + upd_rms**2
     cum_footprint = float(np.sqrt(trainer._es_cum_sq)) / rms_w if rms_w == rms_w else float("nan")
-    return {
-        "es/post_update_gain": post_gain,          # F(W_new) - F(W_0) on this batch (>0 = descent)
+    out = {
+        "es/post_update_gain": post_gain,          # F(W_new) - F(W_0) on THIS batch -- saturates,
+                                                   # cannot rank alpha; use es/probe_fitness
         "es/cum_footprint": cum_footprint,         # sqrt(sum_s update_rms_s^2) / RMS(W)
         "es/fitness_plus_mean": float(fp.mean()),
         "es/fitness_minus_mean": float(fm.mean()),
@@ -143,3 +207,8 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
         "timing_s/es_apply": t_apply,
         "timing_s/es_per_rail": t_rails / ((2 * n_eff) if antithetic else n_eff),
     }
+    try:
+        out.update(_heldout_probe(trainer, batch, int(cfg.get("es_probe_every", 5))))
+    except Exception as e:                          # a probe must never kill a run
+        print(f"[ES] heldout probe skipped: {e}")
+    return out

@@ -35,6 +35,19 @@ length-hacked in both directions; zo_opd_short "problems found" §2).
 
 ## 3. OPSD extension (no external teacher)
 
+> **[2026-09-07] This section's prediction was right, and the setting now exists as a paper.**
+> *Self-Distilled Reasoner: On-Policy Self-Distillation for LLMs*
+> ([arXiv:2601.18734](https://arxiv.org/abs/2601.18734), `docs/papers/26_Self-Distilled Reasoner-*.pdf`)
+> is exactly instantiation 1 below — privileged-context self-teacher — and it independently
+> adopts caveat 3's fix (`--fixed_teacher`: the teacher is the **frozen initial policy**, kept as
+> the LoRA-disabled base model). Built and running in this repo:
+> [../OPSD/opsd_bp_vs_es.md](../OPSD/opsd_bp_vs_es.md).
+> Two of this section's caveats already have measurements there: **σ had to be recalibrated**
+> (caveat 1) but for a reason not anticipated here — with LoRA the binding constraint is the bf16
+> forward's own noise floor setting σ from *below*, not SNR decay as q→π — and the **geometry**
+> caveat (2) is satisfied by construction, since the paper's objective is forward KL with
+> pointwise clipping rather than anything linear in π.
+
 Applicable: the fitness only needs log q(y_t) teacher-forced evaluable. Instantiations:
 - **Privileged-context self-teacher** (best fit): q = same weights conditioned on the
   ground-truth answer/hint — one extra prefill of the same model; one model per worker;

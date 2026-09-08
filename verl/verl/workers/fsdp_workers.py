@@ -991,14 +991,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
     # ---- forward-only ES update (see verl/trainer/ppo/es_update.py) ----
+    def _es_params(self):
+        """Parameters the ES rails perturb: the TRAINABLE ones.
+
+        Under full fine-tuning that is every parameter (unchanged behaviour).  Under LoRA /
+        PEFT the base weights are frozen, so perturbing them would probe directions the update
+        can never move -- and would blow up the random-walk displacement for nothing.  The same
+        enumeration is used by es_perturb_weights and es_apply_update, so `pidx` (which seeds
+        the noise) stays consistent between probing and applying.
+        """
+        params = [p for p in self.actor_module_fsdp.parameters() if p.requires_grad]
+        if not getattr(self, "_es_params_logged", False):
+            n_all = sum(1 for _ in self.actor_module_fsdp.parameters())
+            print(f"[ES] perturbing {len(params)}/{n_all} tensors "
+                  f"({sum(p.numel() for p in params):,} local elements, trainable only)")
+            self._es_params_logged = True
+        return params
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def es_perturb_weights(self, seed: int, scale: float):
-        """W += scale * eps(seed) on every actor parameter (in place, fp32 master)."""
+        """W += scale * eps(seed) on every trainable actor parameter (in place, fp32 master)."""
         assert self._is_actor
         assert not self._is_offload_param, "algorithm.es_update needs actor.fsdp_config.param_offload=False"
         rank = torch.distributed.get_rank()
         with torch.no_grad():
-            for pidx, p in enumerate(self.actor_module_fsdp.parameters()):
+            for pidx, p in enumerate(self._es_params()):
                 flat = _es_local_flat(p)
                 for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
                     flat[start:start + noise.numel()].add_(noise, alpha=float(scale))
@@ -1013,7 +1030,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         rank = torch.distributed.get_rank()
         sq, n = 0.0, 0
         with torch.no_grad():
-            for pidx, p in enumerate(self.actor_module_fsdp.parameters()):
+            for pidx, p in enumerate(self._es_params()):
                 flat = _es_local_flat(p)
                 for seed, c in zip(seeds, coeffs):
                     for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
@@ -1885,6 +1902,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # download the checkpoint from hdfs
         local_path = copy_to_local(config.model.path, use_shm=use_shm)
 
+        # The teacher's own tokenizer is always needed: the OPSD privileged-context path
+        # (see _build_privileged_teacher_inputs) tokenizes a per-sample teacher prompt.
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
+
         if self.config.model.input_tokenizer is None:
             self._do_switch_chat_template = False
         else:
@@ -1893,7 +1914,6 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             self.input_tokenizer = hf_tokenizer(
                 input_tokenizer_local_path, trust_remote_code=config.model.get("trust_remote_code", False)
             )
-            self.tokenizer = hf_tokenizer(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
 
         trust_remote_code = config.model.get("trust_remote_code", False)
         model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
@@ -2709,6 +2729,63 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         return DataProto.from_dict(rm_inputs)
 
+    def _build_privileged_teacher_inputs(self, data: DataProto):
+        """OPSD (arXiv:2601.18734): score the student's rollout under a PRIVILEGED context.
+
+        The teacher is the same architecture/weights as the student but conditions on
+        (problem + reference solution + transition prompt) instead of the problem alone.
+        The per-sample templated teacher prompt is carried in
+        `extra_info["teacher_prompt"]` (built by scripts/opsd/build_opsd_dataset.py).
+
+        The response tokens are reused BIT-FOR-BIT from the student's rollout -- no
+        decode/re-encode round trip -- and placed at the very end of the sequence, so the
+        `[:, -response_length - 1 : -1]` logit slice in `_forward_micro_batch` stays valid
+        and every teacher log-prob lines up with the student's token at the same index.
+        """
+        tokenizer = self.tokenizer
+        responses = data.batch["responses"]                       # (B, R), right-padded
+        response_length = responses.shape[-1]
+        attention_mask = data.batch["attention_mask"]             # (B, P + R)
+        resp_attn = attention_mask[:, -response_length:]          # (B, R)
+        batch_size = responses.shape[0]
+
+        extra_info = data.non_tensor_batch["extra_info"]
+        prompts = []
+        for i in range(batch_size):
+            ei = extra_info[i]
+            tp = ei["teacher_prompt"] if isinstance(ei, dict) else ei["teacher_prompt"]
+            prompts.append(tp)
+
+        max_prompt_len = int(self.config.get("teacher_max_prompt_length", 4096))
+        enc = tokenizer(prompts, add_special_tokens=False)["input_ids"]
+        enc = [ids[-max_prompt_len:] for ids in enc]              # left-truncate the prompt
+        max_p = max(len(ids) for ids in enc)
+
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        device = responses.device
+        prompt_ids = torch.full((batch_size, max_p), pad_id, dtype=responses.dtype, device=device)
+        prompt_attn = torch.zeros((batch_size, max_p), dtype=attention_mask.dtype, device=device)
+        for i, ids in enumerate(enc):
+            n = len(ids)
+            prompt_ids[i, max_p - n:] = torch.tensor(ids, dtype=responses.dtype, device=device)  # LEFT pad
+            prompt_attn[i, max_p - n:] = 1
+
+        rm_input_ids = torch.cat([prompt_ids, responses], dim=-1)
+        rm_attention_mask = torch.cat([prompt_attn, resp_attn], dim=-1)
+        rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
+
+        if self.rank == 0 and data.meta_info.get("global_steps", -1) in (1, 2):
+            print(f"[OPSD privileged teacher] prompt tokens max={max_p} "
+                  f"mean={sum(len(x) for x in enc) / batch_size:.0f}, "
+                  f"teacher seq={rm_input_ids.shape[-1]} (resp {response_length})")
+
+        return DataProto.from_dict({
+            "input_ids": rm_input_ids,
+            "attention_mask": rm_attention_mask,
+            "position_ids": rm_position_ids,
+            "responses": responses,
+        })
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
     def compute_rm_score(self, data: DataProto, kl_estimator="k1"):
@@ -2738,7 +2815,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         response_mask = data.batch["response_mask"]  # shape: [batch, response_len]
 
-        if self._do_switch_chat_template:
+        if self.config.get("opsd_privileged", False):
+            rm_data = self._build_privileged_teacher_inputs(data)
+        elif self._do_switch_chat_template:
             if self.rank == 0:
                 print(f"Chat template switching is ENABLED (token-level aligned, left-padded).")
             rm_data = self._switch_chat_template_token_level(data)

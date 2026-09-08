@@ -1100,3 +1100,5 @@ Restored from HEAD and verified byte-identical. Anchor table edits on unique tex
 ## [2026-09-06] ingest | BP fura on the dense-SGD protocol (es_results.md §20): lr 1.0 (10× dense) → 73.4 @10 vs dense 72.2, crosses 72 by step 4; LR chain 0.3/3.0/0.1 running on GPU 2; verl sharding-manager export leak fixed
 
 ## [2026-09-06] ingest | §20 closed: BP fura LR sweep 0.3/1.0/2.0/3.0 + dense per-step rerun — fura ≈ dense within single-seed noise (74.3/72.9 vs 72.3/75.8), dense converges in 1 step vs 3–4, LR window 10–20× with a cliff at 30×; short doc + index updated
+
+## [2026-09-07] ingest | OPSD (arXiv:2601.18734) built + BP/es-prefill launched: privileged-context self-teacher + clipped-forward-KL advantage in verl, step-time parity N=4 measured, sigma=1e-3 set by the bf16 fitness noise floor (results/OPSD/opsd_bp_vs_es.md)

@@ -141,7 +141,8 @@ class RolloutConfig(BaseConfig):
     log_prob_max_token_len_per_gpu: int = 16384
     log_prob_top_k: int = 256
     top_k_strategy: str = "only_stu"  # "only_stu", "only_tch", "intersection", or "union"
-    reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
+    reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", "none", or "fkl_clip" (OPSD)
+    opsd_fkl_clip: float = 0.05  # OPSD per-token pointwise forward-KL clip tau; 0 disables
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
 
     disable_log_stats: bool = True

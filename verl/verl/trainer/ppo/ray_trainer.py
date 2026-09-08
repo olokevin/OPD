@@ -1152,6 +1152,10 @@ class RayPPOTrainer:
                             batch.meta_info["kl_estimator"] = kl_estimator
                             batch.meta_info["reward_weight_mode"] = reward_weight_mode
                             batch.meta_info["teacher_temperature"] = teacher_temperature
+                            # OPSD forward-KL pointwise clip tau (paper's per-token clipping)
+                            batch.meta_info["opsd_fkl_clip"] = self.config.actor_rollout_ref.rollout.get(
+                                "opsd_fkl_clip", 0.05
+                            )
                             
                             with marked_timer("compute_rm_score", timing_raw, color="magenta"):
                                 teacher_data = self.rm_wg.compute_rm_score(batch)
@@ -1164,6 +1168,14 @@ class RayPPOTrainer:
                                 with marked_timer("compute_distillation_reward", timing_raw, color="orange"):
                                     distillation_output = self.actor_rollout_wg.compute_distillation_reward(batch)
                                     batch = batch.union(distillation_output)
+                                # OPSD: the paper's own training objective, logged (and dropped)
+                                # here so it never travels with the batch.
+                                if "opsd_fkl" in batch.batch.keys():
+                                    _fkl = batch.batch.pop("opsd_fkl")
+                                    _m = batch.batch["response_mask"]
+                                    metrics["opsd/fwd_kl_per_token"] = float(
+                                        (_fkl * _m).sum() / _m.sum().clamp(min=1)
+                                    )
                         
                         # Plot overlapping tokens for Reverse KL
                         if (self.global_steps == 1 or self.global_steps % 10 == 0) and "student_valid_counts" in batch.batch.keys():

@@ -564,11 +564,38 @@ class DataParallelPPOActor(BasePPOActor):
             rm_scores = -kl_val * norm_weights
             
         elif strategy == "only_tch":
-            kl_val = S_on_T - T_logp
             valid_mask = torch.ones_like(S_on_T, dtype=torch.bool)
-            norm_weights = compute_reward_weights(S_on_T, T_logp, valid_mask, reward_weight_mode)
-            rm_scores = -kl_val * norm_weights
+            if reward_weight_mode == "fkl_clip":
+                # OPSD (arXiv:2601.18734) main objective: per-token FORWARD KL
+                #   KL(p_T || p_S) = sum_v ell_v,   ell_v = p_T(v) * (log p_T(v) - log p_S(v))
+                # with the paper's per-token POINTWISE clipping  sum_v min(ell_v, tau).
+                # Clipped entries contribute a constant, so their gradient is zero; elsewhere
+                # d/d log p_S(v) = -p_T(v).  The PG machinery maximises sum_v A_v * log p_S(v),
+                # so A_v = p_T(v) * 1[ell_v < tau] gives exactly the clipped-forward-KL descent
+                # direction.  p_T is the TRUE (un-renormalised) teacher probability, so this is
+                # the honest truncation of the full-vocabulary sum to the teacher's top-K.
+                tau = float(data.meta_info.get("opsd_fkl_clip", 0.05))
+                p_T = torch.exp(T_logp)
+                ell = p_T * (T_logp - S_on_T)
+                keep = (ell < tau).to(p_T.dtype) if tau > 0 else torch.ones_like(p_T)
+                rm_scores = p_T * keep
+                # Padded positions carry all-zero teacher log-probs, so p_T = exp(0) = 1 for
+                # every id and sum_k A_k reads K (=64) there.  token_reward_direct masks them
+                # out of the advantage, but critic/score/* is logged pre-mask -- zero them so
+                # the logged objective is the real one.
+                if "response_mask" in data.batch.keys():
+                    rm_scores = rm_scores * data.batch["response_mask"].to(rm_scores.device).unsqueeze(-1)
+                res_tensors["opsd_fkl"] = torch.minimum(ell, torch.full_like(ell, tau)).sum(-1) \
+                    if tau > 0 else ell.sum(-1)
+            else:
+                kl_val = S_on_T - T_logp
+                norm_weights = compute_reward_weights(S_on_T, T_logp, valid_mask, reward_weight_mode)
+                rm_scores = -kl_val * norm_weights
+            # The advantage is indexed by the TEACHER's ids, so the policy loss (and the ES
+            # fitness) must re-gather log pi at those ids, not at the student's own top-K.
             res_tensors["union_top_k_ids"] = T_ids
+            res_tensors["union_top_k_log_probs"] = S_on_T
+            res_tensors["student_log_probs_on_teacher_ids"] = S_on_T
             
         elif strategy == "intersection":
             valid_mask = overlap_mask.bool()
