@@ -51,6 +51,26 @@ def sampled_token_losses(
     return losses, clean
 
 
+def topk_rail_losses(
+    topk_payload: torch.Tensor,   # [T, 1+N, K] student logprobs at the clean
+                                  #             rail's top-K ids (col 0 = clean)
+    teacher_logq_k: torch.Tensor, # [T, K] teacher logprobs at the SAME ids
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Exact top-K truncated REVERSE KL per rail (loss_impl=topk):
+    l_{n,t} = sum_k pi_n(k)*(log pi_n(k) - log q(k)) over the clean rail's
+    top-K ids. The first launch used the plain CE -sum_k pi log q; being
+    LINEAR in pi its optimum is a delta on the teacher argmax, and it
+    collapsed entropy (MATH-500 68.0 -> 60.0 -> 54.2 by step 40 while the
+    CE fell 36 % -- 2026-09-04). The pi*log pi term restores the KL
+    geometry. The K id set is FIXED across rails (the clean rail's top-K),
+    so the rail FD difference estimates exactly this objective's gradient;
+    no IW, no +1 score term. Returns (losses [T, N], clean_loss [T])."""
+    lp = topk_payload.float()                                  # [T, 1+N, K]
+    p = lp.exp()
+    kl = (p * (lp - teacher_logq_k.float()[:, None, :])).sum(-1)   # [T, 1+N]
+    return kl[:, 1:], kl[:, 0]
+
+
 def rail_scales(
     losses: torch.Tensor,       # [T, N]
     clean_loss: torch.Tensor,   # [T]

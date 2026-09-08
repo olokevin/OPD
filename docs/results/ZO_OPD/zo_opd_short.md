@@ -172,10 +172,34 @@ update:  δW = 1/(Nσ) Σ_{t,n} (l_{n,t} − mean_m l_{m,t}) · (s_n⊙u_t)(r_n�
 Detached-history estimate; fresh-per-token noise multiplies *targets* not probes, so the
 information is N scalars per step, same as es-prefill (zo_opd.md §12.5).
 
-**es-decode** (not implemented; offline control `es_seq_audit.py` only): line 5's held `ε(s_n)`
-per rail, but evaluated by decode rails on the clean KV instead of a prefill — the same estimator
-as es-prefill, measured with the detached-history error at ~3× the cost per token-evaluation.
-No reason to build it.
+**es-decode** (implemented 2026-09-05: `es_token` trainer with `rail_mode=seq`, kernels in
+`rail_seq_kernels.py`; arms running on GPU 7, wandb `ds15b_es-decode_{full,r1}_N32_sig1e-3_a1.25e-3`):
+line 5's held `ε(s_n)` per rail, but evaluated by decode rails on the clean KV instead of a prefill —
+the same estimator as es-prefill, measured with the detached-history error.
+
+```
+per step: seeds s_1..s_{N/2};  rail 2i = +ε(s_i), rail 2i+1 = −ε(s_i)   (held for EVERY token)
+    ε full-rank:  {±1}^{m×n} per linear, stored as packed bits (1 bit/elt: 32 rails = 4.9 GB)
+    ε rank-r:     (1/√r) Σ_k a_k b_kᵀ, a,b ∈ {±1}          (unit per-element RMS either way)
+decode rails ride the clean rollout's KV: at every linear  y_n += σ·ε_n x_n
+    (full: packed-bit tensor-core GEMV, 1 launch/linear; rank ≤ 8: inside the fused norm/silu/rope)
+F_n = Σ_t A_t (log π_n(y_t) − log π_0(y_t)) / Σ_t 1,   A_t = log q(y_t) − log π_0(y_t)   (k1, as es-prefill)
+d_i = (F_{2i} − F_{2i+1})/2 ;  W += (α / (N/2)) Σ_i (d_i / RMS(d)) ε(s_i)                  (es_update.py rule)
+```
+The update reuses the noise still resident on the GPU (no regeneration); fp32 master on the host.
+Decode cost at B=1 (R1-Distill-1.5B, es_profile_results.md §15): held rank-1/4 ≈ es-token-decode's
+rails; full-rank adds the bit traffic + unpack, ≈ N × 0.16 GB per token.
+
+**Verdict (2026-09-07, es_profile_results.md §16): es-decode does NOT match es-prefill or BP, and is
+strictly dominated.** Standard ruler MATH-500 (base 0.751): es-decode peaks **0.786** (r1, +3.5 pp)
+vs es-prefill C **0.829** (+7.8) vs BP **0.859** (+9.5). Mechanism, measured in-run: the held rail
+attends the CLEAN KV, so its per-rail k1 fitness spread `es/d_std` is **~0.5e-3 vs es-prefill's
+~1.5e-3 (3×) at the same σ** — the detached-history rail carries ⅓ the coherent gradient; z-scoring
+spends the same displacement budget for it, so ⅔ is random walk. The 3× gap is **independent of
+perturbation rank (full = rank-1), N (32 = 128), α, and step normalisation** — signal-per-rail is set
+by riding the clean KV, not by any knob. To keep the full-history signal the perturbation must
+propagate → that IS es-prefill. Use es-prefill (forward-only) or BP; es-decode has no niche. Kernels
+stay available behind `rail_mode=seq`.
 
 **es-token-prefill** (not implemented; analysed in es_rails_formulation.md §4): fresh per-position
 `ΔW_t` *inside a prefill* via the rank-1 rail op as a per-position output adjustment
@@ -198,6 +222,7 @@ batch (≈ 400 k tokens at ~145 TFLOP/s), the ES apply is O(0.1 s):
 | es-prefill N=128 | 55 | 23 | 10 | 1125 (8.8) + 0.9 | **1215** | 19.0 |
 | BP (256 seqs) | 126 | 79 | 34 | 124 (fwd+bwd+Adam) | **329** | **1.29** |
 | es-token-decode N=32 (kernels on) | 496 (decode) | 12 | — | 238 (assembly) | **746** | 11.7 |
+| es-decode full-rank N=32 (step 0, 2026-09-05) | 1317 (decode, 32 packed-bit rails) | 15 | — | 10 (apply) | **1343** | 21.0 |
 
 **256-seq batch (BP's own batch), non-antithetic, profiled 2026-09-02** (`profile_es_prefill_N.sh`,
 2 warm steps per point): `step(N) ≈ 260 s + N × 32 s` — the rail cost is exactly proportional to

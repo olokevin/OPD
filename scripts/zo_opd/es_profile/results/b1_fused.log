@@ -1,0 +1,113 @@
+/home/yequan/miniconda3/envs/verl/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+INFO 09-02 16:00:00 [__init__.py:216] Automatically detected platform cuda.
+INFO 09-02 16:00:04 [utils.py:233] non-default args: {'dtype': 'bfloat16', 'enable_prefix_caching': False, 'gpu_memory_utilization': 0.5, 'disable_log_stats': True, 'enforce_eager': True, 'worker_extension_cls': 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension', 'model': '/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e'}
+WARNING 09-02 16:00:04 [model.py:371] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 09-02 16:00:04 [model.py:547] Resolved architecture: Qwen3ForCausalLM
+`torch_dtype` is deprecated! Use `dtype` instead!
+INFO 09-02 16:00:04 [model.py:1510] Using max model len 40960
+INFO 09-02 16:00:04 [scheduler.py:205] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 09-02 16:00:04 [__init__.py:381] Cudagraph is disabled under eager mode
+INFO 09-02 16:00:04 [core.py:77] Initializing a V1 LLM engine (v0.11.0) with config: model='/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', speculative_config=None, tokenizer='/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser=''), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None), seed=0, served_model_name=/data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e, enable_prefix_caching=False, chunked_prefill_enabled=True, pooler_config=None, compilation_config={"level":0,"debug_dump_path":"","cache_dir":"","backend":"","custom_ops":[],"splitting_ops":null,"use_inductor":true,"compile_sizes":[],"inductor_compile_config":{"enable_auto_functionalized_v2":false},"inductor_passes":{},"cudagraph_mode":0,"use_cudagraph":true,"cudagraph_num_of_warmups":0,"cudagraph_capture_sizes":[],"cudagraph_copy_inputs":false,"full_cuda_graph":false,"use_inductor_graph_partition":false,"pass_config":{},"max_capture_size":0,"local_cache_dir":null}
+W0902 16:00:10.004000 4037833 site-packages/torch/utils/cpp_extension.py:2425] TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+W0902 16:00:10.004000 4037833 site-packages/torch/utils/cpp_extension.py:2425] If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'] to specific architectures.
+INFO 09-02 16:00:10 [worker_base.py:243] Injected <class 'verl.workers.rollout.vllm_rollout.es_token_worker_extension.WorkerExtension'> into <class 'vllm.v1.worker.gpu_worker.Worker'> for extended collective_rpc calls ['_ensure_np_state', '_es_alloc_graph_step', '_es_build_attn_meta', '_es_capture_step_packed', '_es_decode_graph_step', '_es_eager_step_packed', '_es_fill_noise', '_es_install_fused_consumers', '_es_install_state', '_es_refresh_kv_pages', '_es_replay_step_packed', '_es_sigma_eff', '_es_step_body', '_es_update_step_buffers', '_np_build_attn_metadata', '_np_build_attn_metadata_packed', '_np_build_attn_metadata_packed_persistent', '_np_build_attn_metadata_persistent', '_np_capture_step', '_np_capture_step_packed', '_np_commit_clean', '_np_fill_u_buf', '_np_fill_u_buf_all_layers', '_np_fill_u_buf_all_layers_packed', '_np_is_eos', '_np_prefill', '_np_prefill_packed', '_np_replay_step', '_np_replay_step_packed', '_np_run_forward', '_np_sample_clean', '_np_slot_for_position', '_np_step_forward', '_np_step_forward_graph', '_np_step_forward_packed', '_run_np_decode_all_layers', '_topk_store', 'apply_node_update', 'assemble_all_layers_and_apply', 'assemble_and_apply', 'broadcast_layer_weights', 'es_assemble_and_apply', 'es_export_weights', 'es_reset_graphs', 'get_worker_ip', 'init_inter_engine_group', 'install_es_layers', 'install_perturb_layers', 'last_changed_frac', 'layer_weight_norm', 'run_es_decode_packed', 'run_np_decode', 'run_np_decode_graphed', 'run_np_decode_packed', 'run_np_decode_packed_graphed']
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 09-02 16:00:10 [parallel_state.py:1208] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, TP rank 0, EP rank 0
+WARNING 09-02 16:00:10 [topk_topp_sampler.py:59] FlashInfer is available, but it is not enabled. Falling back to the PyTorch-native implementation of top-p & top-k sampling. For the best performance, please set VLLM_USE_FLASHINFER_SAMPLER=1.
+INFO 09-02 16:00:11 [gpu_model_runner.py:2602] Starting to load model /data/yequan/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e...
+INFO 09-02 16:00:11 [gpu_model_runner.py:2634] Loading model from scratch...
+INFO 09-02 16:00:11 [cuda.py:325] Using Flash Attention backend on V1 engine.
+Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:00<00:00,  1.80it/s]
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:00<00:00,  3.59it/s]
+
+INFO 09-02 16:00:12 [default_loader.py:267] Loading weights took 0.78 seconds
+INFO 09-02 16:00:12 [gpu_model_runner.py:2653] Model loading took 3.2152 GiB and 0.937783 seconds
+INFO 09-02 16:00:13 [gpu_worker.py:298] Available KV cache memory: 37.59 GiB
+INFO 09-02 16:00:14 [kv_cache_utils.py:1087] GPU KV cache size: 351,888 tokens
+INFO 09-02 16:00:14 [kv_cache_utils.py:1091] Maximum concurrency for 40,960 tokens per request: 8.59x
+2026-09-02 16:00:14,240 - INFO - autotuner.py:256 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+2026-09-02 16:00:14,362 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process ends
+All deep_gemm operations loaded successfully!
+WARNING 09-02 16:00:14 [cudagraph_dispatcher.py:106] cudagraph dispatching keys are not initialized. No cudagraph will be used.
+INFO 09-02 16:00:14 [core.py:210] init engine (profile, create kv cache, warmup model) took 1.59 seconds
+INFO 09-02 16:00:14 [llm.py:306] Supported_tasks: ('generate',)
+[cfg] matched_layers=112 Bs=[1] Ns=[0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 192, 256, 384] paths=[('rows', 'full', 'kernel', 'eager'), ('fold', 'stream', 'kernel', 'eager'), ('rows', 'stream', 'fused', 'eager'), ('seq', 'stream', 'fused', 'eager'), ('seq', 'stream', 'fused', 'graph')] L=512
+[B= 1 N= 0 rows/full      rows=   1] ms/token-step=2.548  clean tok/s=392  overhead vs N=0: +0.0%
+[B= 1 N= 1 rows/full      rows=   2] ms/token-step=3.130  clean tok/s=319  overhead vs N=0: +22.8%
+[B= 1 N= 2 rows/full      rows=   3] ms/token-step=3.151  clean tok/s=317  overhead vs N=0: +23.7%
+[B= 1 N= 4 rows/full      rows=   5] ms/token-step=3.499  clean tok/s=286  overhead vs N=0: +37.3%
+[B= 1 N= 8 rows/full      rows=   9] ms/token-step=3.766  clean tok/s=266  overhead vs N=0: +47.8%
+[B= 1 N=16 rows/full      rows=  17] ms/token-step=3.993  clean tok/s=250  overhead vs N=0: +56.7%
+[B= 1 N=32 rows/full      rows=  33] ms/token-step=4.087  clean tok/s=245  overhead vs N=0: +60.4%
+[B= 1 N=48 rows/full      rows=  49] ms/token-step=4.489  clean tok/s=223  overhead vs N=0: +76.1%
+[B= 1 N=64 rows/full      rows=  65] ms/token-step=4.982  clean tok/s=201  overhead vs N=0: +95.5%
+[B= 1 N=96 rows/full      rows=  97] ms/token-step=6.440  clean tok/s=155  overhead vs N=0: +152.7%
+[B= 1 N=128 rows/full      rows= 129] ms/token-step=7.753  clean tok/s=129  overhead vs N=0: +204.2%
+[B= 1 N=192 rows/full      rows= 193] ms/token-step=10.416  clean tok/s=96  overhead vs N=0: +308.7%
+[B= 1 N=256 rows/full      rows= 257] ms/token-step=12.837  clean tok/s=78  overhead vs N=0: +403.7%
+[B= 1 N=384 rows/full      rows= 385] ms/token-step=18.655  clean tok/s=54  overhead vs N=0: +632.0%
+[B= 1 N= 0 fold/stream    rows=   1] ms/token-step=2.800  clean tok/s=357  overhead vs N=0: +0.0%
+[B= 1 N= 1 fold/stream    rows=   2] ms/token-step=3.506  clean tok/s=285  overhead vs N=0: +25.2%
+[B= 1 N= 2 fold/stream    rows=   3] ms/token-step=3.512  clean tok/s=285  overhead vs N=0: +25.4%
+[B= 1 N= 4 fold/stream    rows=   5] ms/token-step=3.522  clean tok/s=284  overhead vs N=0: +25.8%
+[B= 1 N= 8 fold/stream    rows=   9] ms/token-step=3.586  clean tok/s=279  overhead vs N=0: +28.0%
+[B= 1 N=16 fold/stream    rows=  17] ms/token-step=3.673  clean tok/s=272  overhead vs N=0: +31.1%
+[B= 1 N=32 fold/stream    rows=  33] ms/token-step=3.744  clean tok/s=267  overhead vs N=0: +33.7%
+[B= 1 N=48 fold/stream    rows=  49] ms/token-step=3.805  clean tok/s=263  overhead vs N=0: +35.9%
+[B= 1 N=64 fold/stream    rows=  65] ms/token-step=4.005  clean tok/s=250  overhead vs N=0: +43.0%
+[B= 1 N=96 fold/stream    rows=  97] ms/token-step=4.208  clean tok/s=238  overhead vs N=0: +50.3%
+[B= 1 N=128 fold/stream    rows= 129] ms/token-step=4.482  clean tok/s=223  overhead vs N=0: +60.1%
+[B= 1 N=192 fold/stream    rows= 193] ms/token-step=5.385  clean tok/s=186  overhead vs N=0: +92.3%
+[B= 1 N=256 fold/stream    rows= 257] ms/token-step=6.200  clean tok/s=161  overhead vs N=0: +121.4%
+[B= 1 N=384 fold/stream    rows= 385] ms/token-step=8.079  clean tok/s=124  overhead vs N=0: +188.5%
+[B= 1 N= 0 rows/stream/fused/eager rows=   1] ms/token-step=2.548  clean tok/s=392  overhead vs N=0: +0.0%
+[B= 1 N= 1 rows/stream/fused/eager rows=   2] ms/token-step=2.808  clean tok/s=356  overhead vs N=0: +10.2%
+[B= 1 N= 2 rows/stream/fused/eager rows=   3] ms/token-step=2.854  clean tok/s=350  overhead vs N=0: +12.0%
+[B= 1 N= 4 rows/stream/fused/eager rows=   5] ms/token-step=2.920  clean tok/s=342  overhead vs N=0: +14.6%
+[B= 1 N= 8 rows/stream/fused/eager rows=   9] ms/token-step=3.187  clean tok/s=314  overhead vs N=0: +25.1%
+[B= 1 N=16 rows/stream/fused/eager rows=  17] ms/token-step=3.404  clean tok/s=294  overhead vs N=0: +33.6%
+[B= 1 N=32 rows/stream/fused/eager rows=  33] ms/token-step=3.440  clean tok/s=291  overhead vs N=0: +35.0%
+[B= 1 N=48 rows/stream/fused/eager rows=  49] ms/token-step=3.858  clean tok/s=259  overhead vs N=0: +51.4%
+[B= 1 N=64 rows/stream/fused/eager rows=  65] ms/token-step=4.590  clean tok/s=218  overhead vs N=0: +80.1%
+[B= 1 N=96 rows/stream/fused/eager rows=  97] ms/token-step=5.893  clean tok/s=170  overhead vs N=0: +131.3%
+[B= 1 N=128 rows/stream/fused/eager rows= 129] ms/token-step=7.096  clean tok/s=141  overhead vs N=0: +178.5%
+[B= 1 N=192 rows/stream/fused/eager rows= 193] ms/token-step=9.473  clean tok/s=106  overhead vs N=0: +271.8%
+[B= 1 N=256 rows/stream/fused/eager rows= 257] ms/token-step=12.134  clean tok/s=82  overhead vs N=0: +376.2%
+[B= 1 N=384 rows/stream/fused/eager rows= 385] ms/token-step=17.680  clean tok/s=57  overhead vs N=0: +593.9%
+[B= 1 N= 0 seq/stream/fused/eager rows=   1] ms/token-step=2.492  clean tok/s=401  overhead vs N=0: +0.0%
+[B= 1 N= 1 seq/stream/fused/eager rows=   2] ms/token-step=2.742  clean tok/s=365  overhead vs N=0: +10.0%
+[B= 1 N= 2 seq/stream/fused/eager rows=   3] ms/token-step=2.763  clean tok/s=362  overhead vs N=0: +10.9%
+[B= 1 N= 4 seq/stream/fused/eager rows=   5] ms/token-step=2.793  clean tok/s=358  overhead vs N=0: +12.1%
+[B= 1 N= 8 seq/stream/fused/eager rows=   9] ms/token-step=2.852  clean tok/s=351  overhead vs N=0: +14.4%
+[B= 1 N=16 seq/stream/fused/eager rows=  17] ms/token-step=2.894  clean tok/s=346  overhead vs N=0: +16.1%
+[B= 1 N=32 seq/stream/fused/eager rows=  33] ms/token-step=2.959  clean tok/s=338  overhead vs N=0: +18.7%
+[B= 1 N=48 seq/stream/fused/eager rows=  49] ms/token-step=3.028  clean tok/s=330  overhead vs N=0: +21.5%
+[B= 1 N=64 seq/stream/fused/eager rows=  65] ms/token-step=3.157  clean tok/s=317  overhead vs N=0: +26.7%
+[B= 1 N=96 seq/stream/fused/eager rows=  97] ms/token-step=3.392  clean tok/s=295  overhead vs N=0: +36.1%
+[B= 1 N=128 seq/stream/fused/eager rows= 129] ms/token-step=3.793  clean tok/s=264  overhead vs N=0: +52.2%
+[B= 1 N=192 seq/stream/fused/eager rows= 193] ms/token-step=4.533  clean tok/s=221  overhead vs N=0: +81.9%
+[B= 1 N=256 seq/stream/fused/eager rows= 257] ms/token-step=5.335  clean tok/s=187  overhead vs N=0: +114.1%
+[B= 1 N=384 seq/stream/fused/eager rows= 385] ms/token-step=7.280  clean tok/s=137  overhead vs N=0: +192.1%
+[B= 1 N= 0 seq/stream/fused/graph rows=   1] ms/token-step=2.339  clean tok/s=428  overhead vs N=0: +0.0%
+[B= 1 N= 1 seq/stream/fused/graph rows=   2] ms/token-step=2.575  clean tok/s=388  overhead vs N=0: +10.1%
+[B= 1 N= 2 seq/stream/fused/graph rows=   3] ms/token-step=2.604  clean tok/s=384  overhead vs N=0: +11.3%
+[B= 1 N= 4 seq/stream/fused/graph rows=   5] ms/token-step=2.625  clean tok/s=381  overhead vs N=0: +12.2%
+[B= 1 N= 8 seq/stream/fused/graph rows=   9] ms/token-step=2.676  clean tok/s=374  overhead vs N=0: +14.4%
+[B= 1 N=16 seq/stream/fused/graph rows=  17] ms/token-step=2.728  clean tok/s=367  overhead vs N=0: +16.6%
+[B= 1 N=32 seq/stream/fused/graph rows=  33] ms/token-step=2.787  clean tok/s=359  overhead vs N=0: +19.1%
+[B= 1 N=48 seq/stream/fused/graph rows=  49] ms/token-step=2.838  clean tok/s=352  overhead vs N=0: +21.3%
+[B= 1 N=64 seq/stream/fused/graph rows=  65] ms/token-step=2.993  clean tok/s=334  overhead vs N=0: +28.0%
+[B= 1 N=96 seq/stream/fused/graph rows=  97] ms/token-step=3.222  clean tok/s=310  overhead vs N=0: +37.8%
+[B= 1 N=128 seq/stream/fused/graph rows= 129] ms/token-step=3.595  clean tok/s=278  overhead vs N=0: +53.7%
+[B= 1 N=192 seq/stream/fused/graph rows= 193] ms/token-step=4.255  clean tok/s=235  overhead vs N=0: +81.9%
+[B= 1 N=256 seq/stream/fused/graph rows= 257] ms/token-step=4.920  clean tok/s=203  overhead vs N=0: +110.4%
+[B= 1 N=384 seq/stream/fused/graph rows= 385] ms/token-step=6.864  clean tok/s=146  overhead vs N=0: +193.5%
+[saved] /home/yequan/Project/compression/OPD-estoken/scripts/zo_opd/es_profile/results/phase5_b1_fused.json
+[rank0]:[W902 16:11:35.120984625 ProcessGroupNCCL.cpp:1538] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

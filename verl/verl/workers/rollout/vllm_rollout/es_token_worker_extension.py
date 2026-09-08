@@ -32,9 +32,14 @@ import torch
 from verl.trainer.es_token.grad_estimator import assemble_chunk
 from verl.trainer.es_token.rail_kernel import apply_rail, rail_supported
 from verl.trainer.es_token.rail_attn_kernel import (
-    RailAttnWorkspace, pick_num_splits, rail_attention_fold, rail_attention_shared)
+    RailAttnWorkspace, pick_num_splits, rail_attention_fold, rail_attention_seq,
+    rail_attention_shared)
 from verl.trainer.es_token.lm_head_kernel import (
     LMHeadWorkspace, lm_head_gather_logit, lm_head_stream)
+from verl.trainer.es_token.fused_rail_kernels import (
+    MAX_FUSED_RANK, RailArgs, advance as es_advance, fill_rademacher_rows_t, lm_tail,
+    norm_rail, qkv_rail_norm_rope, silu_mul_rail)
+from verl.trainer.es_token.rail_seq_kernels import SeqNoise
 from verl.trainer.es_token.noise_kernel import fill_rademacher_rows
 from verl.trainer.es_token.seeding import (
     build_noise_layout, build_seed_table, draw_token_noise, es_token_seed)
@@ -70,6 +75,8 @@ class ESRailAttention(torch.nn.Module):
         "shared" -- Triton split-KV kernel, rails x GQA-group as one query tile
                     (rail_attn_kernel.rail_attention_shared)
         "fold"   -- rails folded into the head axis, stock FA3 GQA packing
+        "seq"    -- one FA3 request per slot with seqlen_q = R, non-causal:
+                    the fold's KV reuse with no permute copies (0902)
 
     Semantics are identical to "rows": rails attend the clean history including
     the clean current-token K/V; only the clean row writes KV.
@@ -119,6 +126,10 @@ class ESRailAttention(torch.nn.Module):
                                 fa_version=(2 if impl == "fold2" else 3),
                                 cu_seqlens_q=am["cu_b"],
                                 q_fold_buf=am["q_fold_buf"], o_fold_buf=am["o_fold_buf"])
+        elif impl == "seq":
+            rail_attention_seq(q4, key_cache, value_cache, am["bt_B"], am["sl_B"],
+                               attn.impl.scale, am["max_seqlen_k"], out=o4,
+                               cu_seqlens_q=am["cu_q"])
         else:
             raise ValueError(f"unknown es_attn_impl {impl!r}")
         if os.environ.get("ES_ATTN_CHECK"):   # debug: per-layer diff vs FA rows path
@@ -164,6 +175,26 @@ class ESTokenLinear(torch.nn.Module):
         if st.get("mode") != "perturb_es":
             return out
         x = args[0]
+        if st.get("es_rail_mode") == "seq":
+            # es-decode: ONE perturbation per rail held for the whole step
+            # (rail_seq_kernels.py). Low ranks ride the fused consumers; the
+            # full-rank packed-bit GEMV and larger ranks are standalone launches.
+            sn = st["es_seq_noise"]
+            if (sn.rank == "full" or st.get("es_rail_impl") != "fused"
+                    or int(sn.rank) > MAX_FUSED_RANK):
+                y, bias, was_tuple = _unpack(out)
+                assert rail_supported(x, y), self.name
+                sn.apply_rail(self.name, x, y, st["es_sigma_buf"][self.name],
+                              st["es_width"], st["es_bucket"])
+                return _repack(y, bias, was_tuple)
+            st["es_x"][self.name] = x
+            return out
+        if st.get("es_rail_impl") == "fused":
+            # Zero-launch rail (fused_rail_kernels.py): the consumer of this
+            # output applies the rail; it only needs the GEMM input. Stash the
+            # reference (fixed address inside the captured graph).
+            st["es_x"][self.name] = x
+            return out
         y, bias, was_tuple = _unpack(out)
 
         off_u, d_out, off_v, d_in = st["es_layout"][self.name]
@@ -193,9 +224,88 @@ class ESTokenLinear(torch.nn.Module):
         return _repack(y, bias, was_tuple)
 
 
+def _es_rail_args(st, producer):
+    """RailArgs for the perturbed linear `producer`, or None if it is not
+    perturbed (not in the layout) / there is no producer."""
+    if producer is None:
+        return None
+    layout = st["es_layout"].get(producer)
+    if layout is None:
+        return None
+    off_u, _, off_v, d_in = layout
+    if st.get("es_rail_mode") == "seq":
+        sn = st["es_seq_noise"]
+        if sn.rank == "full" or int(sn.rank) > MAX_FUSED_RANK:
+            return None          # applied standalone by ESTokenLinear
+        x = st["es_x"].get(producer)
+        if x is None:
+            raise RuntimeError(f"es fused rail: no stashed input for {producer}")
+        off_a, off_b = sn.offsets(producer)
+        return RailArgs(x, sn.noise, sn.noise, st["es_sigma_buf"][producer],
+                        off_a, off_b, d_in, st["es_width"], rank=int(sn.rank))
+    x = st["es_x"].get(producer)
+    if x is None:
+        raise RuntimeError(f"es fused rail: no stashed input for {producer}")
+    return RailArgs(x, st["es_noise_buf"], st["es_signs_flat"],
+                    st["es_sigma_buf"][producer], off_u, off_v, d_in, st["es_width"])
+
+
+def _es_fused_active(mod):
+    st = mod._es_st()
+    return st.get("mode") == "perturb_es" and st.get("es_rail_impl") == "fused", st
+
+
+def _es_norm_forward(self, x, residual=None):
+    """Patched RMSNorm.forward: [rail of the producing linear] + residual add +
+    norm in one launch (fused_rail_kernels.norm_rail). Layer 0's
+    input_layernorm (no residual, no producer) stays stock."""
+    on, st = _es_fused_active(self)
+    if not on or residual is None:
+        return self._es_orig_forward(x, residual) if residual is not None else self._es_orig_forward(x)
+    norm_rail(x, residual, self.weight.data, self.variance_epsilon,
+              _es_rail_args(st, self._es_producer))
+    return x, residual
+
+
+def _es_silu_forward(self, x):
+    """Patched SiluAndMul.forward: gate_up rail + silu*mul in one launch."""
+    on, st = _es_fused_active(self)
+    if not on:
+        return self._es_orig_forward(x)
+    out = torch.empty(x.shape[:-1] + (x.shape[-1] // 2,), dtype=x.dtype, device=x.device)
+    silu_mul_rail(x, out, _es_rail_args(st, self._es_producer))
+    return out
+
+
+def _es_attn_forward(self, positions, hidden_states):
+    """Patched Qwen3Attention.forward: qkv rail + q_norm + k_norm + RoPE in one
+    launch, replacing three (+ the rail op). Same attention / o_proj after."""
+    on, st = _es_fused_active(self)
+    if not on:
+        return self._es_orig_forward(positions=positions, hidden_states=hidden_states)
+    qkv, _ = self.qkv_proj(hidden_states)          # ESTokenLinear: raw GEMM, stashes x
+    rope = self.rotary_emb
+    if rope.cos_sin_cache.dtype != qkv.dtype or rope.cos_sin_cache.device != qkv.device:
+        rope._match_cos_sin_cache_dtype(qkv)
+    qn = getattr(self, "q_norm", None)
+    kn = getattr(self, "k_norm", None)
+    qkv_rail_norm_rope(qkv, positions,
+                       qn.weight.data if qn is not None else None,
+                       kn.weight.data if kn is not None else None,
+                       qn.variance_epsilon if qn is not None else 0.0,
+                       rope.cos_sin_cache,
+                       self.num_heads, self.num_kv_heads, self.head_dim,
+                       _es_rail_args(st, self._es_producer))
+    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+    attn_output = self.attn(q, k, v)
+    output, _ = self.o_proj(attn_output)
+    return output
+
+
 class WorkerExtension(NPWorkerExtension):
     # ------------------------------------------------------------- install ---
-    def install_es_layers(self, perturb_rules, n_rails, global_seed):
+    def install_es_layers(self, perturb_rules, n_rails, global_seed,
+                          rail_mode="token", noise_rank=1):
         """Wrap every matched linear with ESTokenLinear; build the flat-noise
         layout + fixed Hadamard sign buffers. Idempotent. Returns the resolved
         layer-name list (named_modules order -- identical on every worker, so
@@ -245,6 +355,8 @@ class WorkerExtension(NPWorkerExtension):
                 setattr(parent, leaf, wrapped_attn)
                 self.es_attn_modules[mod_name] = wrapped_attn
 
+        self._es_install_fused_consumers(model)
+
         layout, d_total = build_noise_layout(layer_dims)
         self.es_layout = layout
         self.es_d_total = int(d_total)
@@ -269,8 +381,123 @@ class WorkerExtension(NPWorkerExtension):
             w = self.np_modules[layer_name].wrapped.weight
             self.es_w_rms[layer_name] = float(
                 w.detach().float().pow(2).mean().sqrt().item())
+        # es-decode (rail_mode="seq"): ONE perturbation per rail, held for the
+        # step, resident on the GPU for both the rails and the update.
+        self.es_rail_mode = str(rail_mode)
+        self.es_seq_noise = None
+        if self.es_rail_mode == "seq":
+            rank = "full" if str(noise_rank) == "full" else int(noise_rank)
+            self.es_seq_noise = SeqNoise(self.es_layout, int(n_rails), rank,
+                                         device, self.es_dtype)
+            print(f"[es-decode] held noise: N={n_rails} rank={rank} "
+                  f"{self.es_seq_noise.n_bytes / 2**30:.2f} GiB on {device}", flush=True)
         st["mode"] = "off"
         return list(matched)
+
+    # ----------------------------------------------------------- es-decode ---
+    def es_seq_draw(self, seeds, antithetic=True):
+        """Regenerate this step's held rail noise from N (N/2 antithetic) seeds."""
+        self.es_seq_noise.draw([int(s) for s in seeds], bool(antithetic))
+        torch.cuda.synchronize()
+        return int(self.es_seq_noise.n_bytes)
+
+    def es_seq_apply(self, coeffs, es_cfg):
+        """W_l += sum_n coeffs[n] * eps_{n,l} for every perturbed linear, from
+        the SAME held noise the rails used (OpenAI-ES step; coeffs carry alpha).
+        fp32 master on the host exactly as es_assemble_and_apply."""
+        device = self.model_runner.device
+        coef = torch.as_tensor(list(coeffs), dtype=torch.float32, device=device)
+        fp32_master = bool(es_cfg.get("fp32_master", True))
+        if fp32_master and getattr(self, "es_master", None) is None:
+            self.es_master = {}
+        norms, sq_w, sq_dw, numel = {}, 0.0, 0.0, 0
+        with torch.no_grad():
+            for ln in self.es_layout:
+                dw = self.es_seq_noise.update(ln, coef)          # fp32 [d_out, d_in]
+                weight = self.np_modules[ln].wrapped.weight
+                if fp32_master:
+                    master = self.es_master.get(ln)
+                    if master is None:
+                        master = weight.detach().float().cpu().clone()
+                        self.es_master[ln] = master
+                    master.add_(dw.to("cpu"))
+                    weight.copy_(master.to(weight.device, weight.dtype))
+                else:
+                    weight.add_(dw.to(weight.dtype))
+                norms[ln] = float(dw.norm().item())
+                sq_dw += float(dw.pow(2).sum().item())
+                sq_w += float(weight.float().pow(2).sum().item())
+                numel += dw.numel()
+                del dw
+        torch.cuda.synchronize()
+        return {"norms": norms,
+                "rms_w": (sq_w / max(numel, 1)) ** 0.5,
+                "update_rms_measured": (sq_dw / max(numel, 1)) ** 0.5}
+
+    def _es_install_fused_consumers(self, model):
+        """rail_impl="fused" (fused_rail_kernels.py): patch, per Qwen3 decoder
+        layer, the forward of input_layernorm / post_attention_layernorm /
+        mlp.act_fn / self_attn (and the final model.norm) with versions that
+        also apply the rail of the linear whose output they consume. Instance-
+        level patches: the module tree and names are untouched, and every
+        patched forward is a pass-through outside fused mode. Idempotent.
+        Records the set of producers covered; fused mode refuses to run if a
+        perturbed linear has no patched consumer."""
+        import types
+
+        try:
+            from vllm.model_executor.layers.activation import SiluAndMul
+            from vllm.model_executor.layers.layernorm import RMSNorm
+            from vllm.model_executor.models.qwen3 import Qwen3Attention
+        except Exception:  # pragma: no cover
+            self._es_fused_consumers = set()
+            return
+        # Qwen2 (DeepSeek-R1-Distill): same decoder graph without q/k norm; the qkv
+        # consumer kernel runs with HAS_NORM=False.
+        try:
+            from vllm.model_executor.models.qwen2 import Qwen2Attention
+            _ATTN_CLASSES = (Qwen3Attention, Qwen2Attention)
+        except Exception:  # pragma: no cover
+            _ATTN_CLASSES = (Qwen3Attention,)
+        st_ref = lambda: self.np_state
+        consumers = set()
+
+        def patch(mod, fn, producer):
+            if not getattr(mod, "_es_patched", False):
+                mod._es_orig_forward = type(mod).forward.__get__(mod)
+                mod._es_st = st_ref
+                mod._es_patched = True
+                mod.forward = types.MethodType(fn, mod)
+            mod._es_producer = producer
+            if producer is not None:
+                consumers.add(producer)
+
+        inner = getattr(model, "model", None)
+        layers = getattr(inner, "layers", None)
+        if layers is None:
+            self._es_fused_consumers = set()
+            return
+        n = 0
+        for i, layer in enumerate(layers):
+            attn = getattr(layer, "self_attn", None)
+            if not (isinstance(attn, _ATTN_CLASSES)
+                    and isinstance(layer.input_layernorm, RMSNorm)
+                    and isinstance(layer.post_attention_layernorm, RMSNorm)
+                    and isinstance(layer.mlp.act_fn, SiluAndMul)
+                    and getattr(attn.rotary_emb, "is_neox_style", False)
+                    and attn.rotary_emb.rotary_dim == attn.head_dim
+                    and attn.head_dim % 2 == 0):
+                continue
+            pre = f"model.layers.{i}"
+            patch(layer.input_layernorm, _es_norm_forward,
+                  f"model.layers.{i - 1}.mlp.down_proj" if i > 0 else None)
+            patch(layer.post_attention_layernorm, _es_norm_forward, f"{pre}.self_attn.o_proj")
+            patch(layer.mlp.act_fn, _es_silu_forward, f"{pre}.mlp.gate_up_proj")
+            patch(attn, _es_attn_forward, f"{pre}.self_attn.qkv_proj")
+            n = i + 1
+        if n and isinstance(getattr(inner, "norm", None), RMSNorm):
+            patch(inner.norm, _es_norm_forward, f"model.layers.{n - 1}.mlp.down_proj")
+        self._es_fused_consumers = consumers
 
     def _es_sigma_eff(self, es_cfg):
         """Per-layer effective sigma: absolute (default) or sigma*RMS(W_l)."""
@@ -309,7 +536,8 @@ class WorkerExtension(NPWorkerExtension):
                 noise_buf.dtype, method))
 
     # ------------------------------------------------------------- capture ---
-    def _es_install_state(self, bucket, n_sample, device, attn_impl="rows"):
+    def _es_install_state(self, bucket, n_sample, device, attn_impl="rows",
+                          rail_impl="kernel"):
         """Allocate (or reuse) the per-bucket persistent es buffers and install
         them on np_state. Returns the runstate dict the decode loop uses.
         For the graphed path these EXACT objects are pinned by the capture --
@@ -343,9 +571,16 @@ class WorkerExtension(NPWorkerExtension):
             "es_rail_idx": rail_idx,
             "es_prompt_idx": prompt_idx,
             "es_attn_impl": str(attn_impl),
+            "es_rail_impl": str(rail_impl),
+            "es_x": {},
+            "es_width": 1 + int(n_sample),
+            "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+            "es_seq_noise": getattr(self, "es_seq_noise", None),
+            "es_bucket": int(bucket),
         })
         return {
             "attn_impl": str(attn_impl),
+            "rail_impl": str(rail_impl),
             "noise_buf": noise_buf,
             "sigma_buf": sigma_buf,
             "clean_row_idx": clean_row_idx,
@@ -372,6 +607,7 @@ class WorkerExtension(NPWorkerExtension):
             am["num_splits"] = ns
             am["ws"] = RailAttnWorkspace(bucket, Hkv, width, G, ns, D, device)
             am["cu_b"] = torch.arange(bucket + 1, dtype=torch.int32, device=device)
+            am["cu_q"] = am["cu_b"] * int(width)      # seq: one request of R rows per slot
             if attn_impl in ("fold", "fold2"):
                 am["q_fold_buf"] = torch.empty(bucket, Hkv * width * G, D,
                                                dtype=self.es_dtype, device=device)
@@ -413,11 +649,19 @@ class WorkerExtension(NPWorkerExtension):
         return True
 
     def _es_capture_step_packed(self, model, device, bucket, n_sample,
-                                prefill_states, max_seq_len_cap, rs):
+                                prefill_states, max_seq_len_cap, rs,
+                                step_impl="eager", max_tokens=None, greedy=True,
+                                capture=True):
         """Capture ONE es_token packed step forward at fixed bucket width.
         Mirrors NP's _np_capture_step_packed (persistent input/meta buffers,
         warmup, per-graph pool release, frozen max_seqlen_k at the cap) with the
-        es perturbation state already installed via _es_install_state."""
+        es perturbation state already installed via _es_install_state.
+
+        step_impl="graph": the graph body is the WHOLE token step -- noise
+        fill, forward, streaming LM head, sampling, payload write and the
+        next-token state advance (fused_rail_kernels.py) -- so the decode
+        loop is replay() with no per-token host work. capture=False builds
+        the same pinned state without a graph (eager oracle)."""
         from vllm.config.compilation import CUDAGraphMode
 
         assert len(prefill_states) == bucket
@@ -466,12 +710,34 @@ class WorkerExtension(NPWorkerExtension):
         rs["es_attn_meta"] = am
         self._ensure_np_state()["es_attn_meta"] = am
 
-        for _ in range(3):
-            with torch.no_grad(), set_forward_context(
-                attn_meta, self.model_runner.vllm_config, num_tokens=total,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE):
-                _ = model(input_ids=input_ids_buf, positions=positions_buf)
-        torch.cuda.synchronize()
+        gs = dict(rs)
+        gs.update({
+            "input_ids_buf": input_ids_buf,
+            "positions_buf": positions_buf,
+            "meta_bufs": meta_bufs,
+            "attn_meta": attn_meta,
+            "total": total,
+            "step_impl": str(step_impl),
+        })
+        if step_impl == "graph":
+            self._es_alloc_graph_step(gs, model, device, bucket, n_sample,
+                                      int(max_tokens), bool(greedy))
+            meta_bufs["slot_mapping"][rs["perturbed_row_idx"]] = -1
+            for _ in range(3):   # warm-up (Triton compile); each pass at t=0 --
+                gs["t_cnt"].zero_()   # the step buffers are only max_tokens wide
+                self._es_step_body(model, gs)
+            torch.cuda.synchronize()
+            if not capture:
+                gs["graph"] = None
+                gs["hidden_buf"] = None
+                return gs
+        else:
+            for _ in range(3):
+                with torch.no_grad(), set_forward_context(
+                    attn_meta, self.model_runner.vllm_config, num_tokens=total,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE):
+                    _ = model(input_ids=input_ids_buf, positions=positions_buf)
+            torch.cuda.synchronize()
 
         # Per-graph pool release (verbatim NP gotcha): free the previous live
         # graph before capturing a new one, or CUDACachingAllocator asserts.
@@ -495,27 +761,198 @@ class WorkerExtension(NPWorkerExtension):
                 gc_ctx = _vllm_gc(device=device)
         except Exception:  # pragma: no cover - single-GPU / CPU tests
             pass
-        with torch.no_grad(), set_forward_context(
-            attn_meta, self.model_runner.vllm_config, num_tokens=total,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE), gc_ctx as gcc:
-            with torch.cuda.graph(graph, stream=getattr(gcc, "stream", None)):
-                hidden_buf = model(input_ids=input_ids_buf,
-                                   positions=positions_buf)
+        if step_impl == "graph":
+            with gc_ctx as gcc:
+                with torch.cuda.graph(graph, stream=getattr(gcc, "stream", None)):
+                    hidden_buf = self._es_step_body(model, gs)
+        else:
+            with torch.no_grad(), set_forward_context(
+                attn_meta, self.model_runner.vllm_config, num_tokens=total,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE), gc_ctx as gcc:
+                with torch.cuda.graph(graph, stream=getattr(gcc, "stream", None)):
+                    hidden_buf = model(input_ids=input_ids_buf,
+                                       positions=positions_buf)
         self._np_active_graph = graph
 
         meta_bufs["slot_mapping"][rs["perturbed_row_idx"]] = -1
-
-        gs = dict(rs)
-        gs.update({
-            "graph": graph,
-            "input_ids_buf": input_ids_buf,
-            "positions_buf": positions_buf,
-            "hidden_buf": hidden_buf,
-            "meta_bufs": meta_bufs,
-            "attn_meta": attn_meta,
-            "total": total,
-        })
+        gs["graph"] = graph
+        gs["hidden_buf"] = hidden_buf
         return gs
+
+    # ------------------------------------------------- in-graph token step ---
+    def _es_alloc_graph_step(self, gs, model, device, bucket, n_sample, max_tokens, greedy):
+        """Pinned buffers for the in-graph token step (all fixed-shape; the
+        graph key carries max_tokens and greedy)."""
+        width = 1 + n_sample
+        R = bucket * width
+        lm_head = model.lm_head
+        V = int(getattr(model.logits_processor, "org_vocab_size", lm_head.weight.shape[0]))
+        clean_idx = torch.full((R,), -1, dtype=torch.int32, device=device)
+        clean_idx[gs["clean_row_idx"]] = torch.arange(bucket, dtype=torch.int32, device=device)
+        gs.update({
+            "max_tokens": int(max_tokens),
+            "greedy": bool(greedy),
+            "W_lm": lm_head.weight[:V],
+            "clean_idx": clean_idx,
+            "ws_lm": LMHeadWorkspace(R, V, bucket, 128, device),
+            "argmax_buf": torch.zeros(bucket, dtype=torch.long, device=device),
+            "inv_temp": torch.ones(1, dtype=torch.float32, device=device),
+            "t_cnt": torch.zeros(1, dtype=torch.long, device=device),
+            "active": torch.ones(bucket, dtype=torch.int32, device=device),
+            "ngen": torch.zeros(bucket, dtype=torch.int32, device=device),
+            "tokens_buf": torch.zeros(bucket, max_tokens, dtype=torch.long, device=device),
+            "payload_buf": torch.zeros(R, max_tokens, dtype=torch.float32, device=device),
+            "seed_tbl": torch.zeros(max_tokens, bucket, dtype=torch.int64, device=device),
+            "force_buf": torch.full((bucket, max_tokens), -1, dtype=torch.long, device=device),
+            "force_stop": torch.full((bucket,), 2 ** 62, dtype=torch.long, device=device),
+            "eos_buf": torch.full((16,), -1, dtype=torch.long, device=device),
+            "block_size": int(self.model_runner.cache_config.block_size),
+        })
+
+    def _es_step_body(self, model, gs):
+        """ONE token step, device-only (captured as the graph body):
+        noise(t) -> forward -> streaming head -> argmax/Gumbel -> payload
+        tail -> advance -> t += 1. Returns the hidden buffer."""
+        from vllm.config.compilation import CUDAGraphMode
+        width = 1 + int(gs["n_sample"])
+        if getattr(self, "es_rail_mode", "token") != "seq":   # es-decode: noise is held
+            fill_rademacher_rows_t(gs["noise_buf"], gs["seed_tbl"], gs["t_cnt"])
+        with torch.no_grad(), set_forward_context(
+                gs["attn_meta"], self.model_runner.vllm_config, num_tokens=gs["total"],
+                cudagraph_runtime_mode=CUDAGraphMode.NONE):
+            hidden = model(input_ids=gs["input_ids_buf"], positions=gs["positions_buf"])
+        ws = gs["ws_lm"]
+        clean_logits, _, _ = lm_head_stream(hidden, gs["W_lm"], gs["clean_idx"], ws=ws,
+                                            compute_lse=False)
+        if gs["greedy"]:
+            torch.argmax(clean_logits, dim=-1, out=gs["argmax_buf"])
+        else:   # Gumbel-max == multinomial(softmax(logits / T)); RNG is graph-safe
+            u = torch.rand_like(clean_logits)
+            torch.argmax(clean_logits * gs["inv_temp"] - torch.log(-torch.log(u)),
+                         dim=-1, out=gs["argmax_buf"])
+        lm_tail(hidden, gs["W_lm"], ws.mp, ws.sp, gs["argmax_buf"], gs["force_buf"],
+                gs["t_cnt"], gs["payload_buf"], width)
+        mb = gs["meta_bufs"]
+        bt = mb["block_table"]
+        es_advance(gs["argmax_buf"], gs["force_buf"], gs["active"], gs["ngen"],
+                   gs["tokens_buf"], gs["input_ids_buf"], gs["positions_buf"],
+                   mb["seq_lens_gpu"], gs["es_attn_meta"]["sl_B"], mb["slot_mapping"],
+                   bt.as_strided((int(gs["bucket"]), bt.shape[1]),
+                                 (width * bt.stride(0), bt.stride(1))),
+                   gs["force_stop"], gs["eos_buf"], gs["t_cnt"], width, gs["block_size"])
+        gs["t_cnt"] += 1
+        return hidden
+
+    def _es_decode_graph_step(self, model, device, states, B, bucket, n_sample,
+                              es_cfg, sampling_params, slot_rollout_ids,
+                              max_seq_len_cap, sigma_eff, attn_impl, rail_impl,
+                              use_graph, force_tokens):
+        """Decode loop for step_impl="graph": the host does replay() per token
+        and reads the active mask every ES_ACTIVE_CHECK_EVERY (32) tokens;
+        tokens and payload come back in ONE D2H at the end."""
+        st = self._ensure_np_state()
+        width = 1 + n_sample
+        max_tokens = int(es_cfg["max_tokens"])
+        temp = float(getattr(sampling_params, "temperature", 0.0) or 0.0)
+        greedy = temp == 0.0
+        if not hasattr(self, "_es_graph_by_bucket"):
+            self._es_graph_by_bucket = {}
+        gkey = (bucket, n_sample, attn_impl, rail_impl, "graph", max_tokens, greedy, bool(use_graph),
+                getattr(self, "es_rail_mode", "token"))
+        if gkey not in self._es_graph_by_bucket:
+            rs = self._es_install_state(bucket, n_sample, device, attn_impl=attn_impl,
+                                        rail_impl=rail_impl)
+            for ln, sg in sigma_eff.items():
+                rs["sigma_buf"][ln].fill_(float(sg))
+            gs = self._es_capture_step_packed(
+                model, device, bucket, n_sample, states, max_seq_len_cap, rs,
+                step_impl="graph", max_tokens=max_tokens, greedy=greedy,
+                capture=use_graph)
+            self._es_graph_by_bucket[gkey] = gs
+        gs = self._es_graph_by_bucket[gkey]
+        self._es_refresh_kv_pages(gs, states)
+        st.update({
+            "mode": "perturb_es",
+            "es_noise_buf": gs["noise_buf"],
+            "es_layout": self.es_layout,
+            "es_signs": self.es_signs,
+            "es_signs_flat": self.es_signs_flat,
+            "es_sigma_buf": gs["sigma_buf"],
+            "perturbed_row_idx": gs["perturbed_row_idx"],
+            "clean_row_idx": gs["clean_row_idx"],
+            "es_rail_idx": gs["rail_idx"],
+            "es_prompt_idx": gs["prompt_idx"],
+            "es_attn_impl": attn_impl,
+            "es_attn_meta": gs.get("es_attn_meta"),
+            "es_rail_impl": rail_impl,
+            "es_x": {},
+            "es_width": width,
+            "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+            "es_seq_noise": getattr(self, "es_seq_noise", None),
+            "es_bucket": int(bucket),
+        })
+        for ln, sg in sigma_eff.items():
+            gs["sigma_buf"][ln].fill_(float(sg))
+        if not greedy:
+            gs["inv_temp"].fill_(1.0 / temp)
+
+        # per-wave device state
+        assert es_cfg["sample_method"] == "bernoulli", "graph step: bernoulli noise only"
+        seeds_dev, _ = build_seed_table(int(es_cfg["global_seed"]), max_tokens,
+                                        slot_rollout_ids, device)
+        gs["seed_tbl"].copy_(seeds_dev)
+        fb = gs["force_buf"]
+        fb.fill_(-1)
+        if force_tokens is not None:
+            for p in range(min(B, len(force_tokens))):
+                ft = torch.as_tensor(list(force_tokens[p])[:max_tokens], dtype=torch.long)
+                if ft.numel():
+                    fb[p, : ft.numel()].copy_(ft.to(device))
+        fs = gs["force_stop"]
+        fs.fill_(2 ** 62)
+        force_stop = es_cfg.get("force_stop_at")
+        if force_stop is not None:
+            for p in range(min(B, len(force_stop))):
+                fs[p].fill_(int(force_stop[p]))
+        stop = getattr(sampling_params, "_all_stop_token_ids", None) or set()
+        if not stop:
+            try:
+                eos = self.model_runner.model_config.hf_config.eos_token_id
+                stop = {int(eos)} if isinstance(eos, int) else set(int(e) for e in (eos or []))
+            except Exception:
+                stop = set()
+        stop = sorted(int(e) for e in stop)
+        assert len(stop) <= gs["eos_buf"].numel(), stop
+        gs["eos_buf"].fill_(-1)
+        if stop:
+            gs["eos_buf"][: len(stop)].copy_(torch.tensor(stop, dtype=torch.long, device=device))
+        self._es_update_step_buffers(gs, states, n_sample)
+        gs["active"].copy_(torch.tensor([1 if states[p]["active"] else 0 for p in range(bucket)],
+                                        dtype=torch.int32, device=device))
+        gs["t_cnt"].zero_()
+        gs["ngen"].zero_()
+
+        check_every = int(os.environ.get("ES_ACTIVE_CHECK_EVERY", 32))
+        try:
+            for t in range(max_tokens):
+                if use_graph:
+                    gs["graph"].replay()
+                else:
+                    self._es_step_body(model, gs)
+                if (t + 1) % check_every == 0 and t + 1 < max_tokens:
+                    if int(gs["active"].sum().item()) == 0:
+                        break
+        finally:
+            st["mode"] = "off"
+        tokens = gs["tokens_buf"].cpu()
+        ngen = gs["ngen"].cpu().tolist()
+        payload_cpu = gs["payload_buf"].cpu()
+        clean_tokens, payload = [], []
+        for p in range(B):
+            T_p = int(ngen[p])
+            clean_tokens.append(tokens[p, :T_p].tolist())
+            payload.append(payload_cpu[p * width:(p + 1) * width, :T_p].t().contiguous())
+        return {"clean_tokens": clean_tokens, "payload": payload}
 
     # -------------------------------------------------------------- replay ---
     def _es_update_step_buffers(self, gs, states, n_sample):
@@ -571,7 +1008,7 @@ class WorkerExtension(NPWorkerExtension):
         (the sampled tokens' .tolist() in the orchestrator is the only host
         read; ES_FULL_SYNC=1 restores the blanket sync for debugging)."""
         self._es_update_step_buffers(gs, states, n_sample)
-        if not os.environ.get("ES_BENCH_SKIP_NOISE"):
+        if not os.environ.get("ES_BENCH_SKIP_NOISE") and getattr(self, "es_rail_mode", "token") != "seq":
             self._es_fill_noise(gs["noise_buf"], es_cfg, step_t,
                                 slot_rollout_ids)
         gs["graph"].replay()
@@ -620,7 +1057,7 @@ class WorkerExtension(NPWorkerExtension):
             query_lens += [1] * width
             per_row_block_ids += [states[p]["block_ids"]] * width
 
-        if not os.environ.get("ES_BENCH_SKIP_NOISE"):
+        if not os.environ.get("ES_BENCH_SKIP_NOISE") and getattr(self, "es_rail_mode", "token") != "seq":
             self._es_fill_noise(rs["noise_buf"], es_cfg, step_t,
                                 slot_rollout_ids)
 
@@ -669,8 +1106,16 @@ class WorkerExtension(NPWorkerExtension):
         # shipping path; "shared"/"fold" + "stream" are the rail-aware kernels.
         attn_impl = str(es_cfg.get("attn_impl", "rows"))
         lm_impl = str(es_cfg.get("lm_head_impl", "full"))
-        assert attn_impl in ("rows", "shared", "fold", "fold2"), attn_impl
+        rail_impl = str(es_cfg.get("rail_impl", "kernel"))
+        step_impl = str(es_cfg.get("step_impl", "eager"))
+        assert attn_impl in ("rows", "shared", "fold", "fold2", "seq"), attn_impl
         assert lm_impl in ("full", "stream"), lm_impl
+        assert rail_impl in ("kernel", "fused"), rail_impl
+        assert step_impl in ("eager", "graph"), step_impl
+        if rail_impl == "fused":
+            missing = set(self.es_layout) - getattr(self, "_es_fused_consumers", set())
+            assert not missing, ("rail_impl=fused: perturbed linears without a fused "
+                                 f"consumer (non-Qwen3 layer?): {sorted(missing)[:4]}")
         if lm_impl == "stream":
             try:
                 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -709,13 +1154,24 @@ class WorkerExtension(NPWorkerExtension):
             self._es_seed_tbl = None
 
         sigma_eff = self._es_sigma_eff(es_cfg)
+        force_tokens = es_cfg.get("force_tokens")   # test-only teacher forcing
+        if step_impl == "graph":
+            top_p = float(es_cfg.get("top_p", 1.0) or 1.0)
+            assert lm_impl == "stream", "step_impl=graph needs lm_head_impl=stream"
+            assert top_p >= 1.0, "step_impl=graph: top-p sampling is not in-graph (use step_impl=eager)"
+            assert int(es_cfg.get("topk_k", 0) or 0) == 0, \
+                "loss_impl=topk needs step_impl=eager"
+            return self._es_decode_graph_step(
+                model, device, states, B, bucket, n_sample, es_cfg, sampling_params,
+                slot_rollout_ids, max_seq_len_cap, sigma_eff, attn_impl, rail_impl,
+                use_graph, force_tokens)
         if use_graph:
             if not hasattr(self, "_es_graph_by_bucket"):
                 self._es_graph_by_bucket = {}
-            gkey = (bucket, n_sample, attn_impl)
+            gkey = (bucket, n_sample, attn_impl, rail_impl, getattr(self, "es_rail_mode", "token"))
             if gkey not in self._es_graph_by_bucket:
                 rs = self._es_install_state(bucket, n_sample, device,
-                                            attn_impl=attn_impl)
+                                            attn_impl=attn_impl, rail_impl=rail_impl)
                 for ln, s in sigma_eff.items():
                     rs["sigma_buf"][ln].fill_(float(s))
                 gs = self._es_capture_step_packed(
@@ -740,13 +1196,19 @@ class WorkerExtension(NPWorkerExtension):
                 "es_prompt_idx": gs["prompt_idx"],
                 "es_attn_impl": attn_impl,
                 "es_attn_meta": gs.get("es_attn_meta"),
+                "es_rail_impl": rail_impl,
+                "es_x": {},
+                "es_width": width,
+                "es_rail_mode": getattr(self, "es_rail_mode", "token"),
+                "es_seq_noise": getattr(self, "es_seq_noise", None),
+                "es_bucket": int(bucket),
             })
             for ln, s in sigma_eff.items():
                 gs["sigma_buf"][ln].fill_(float(s))
             rs = gs
         else:
             rs = self._es_install_state(bucket, n_sample, device,
-                                        attn_impl=attn_impl)
+                                        attn_impl=attn_impl, rail_impl=rail_impl)
             for ln, s in sigma_eff.items():
                 rs["sigma_buf"][ln].fill_(float(s))
 
@@ -762,13 +1224,20 @@ class WorkerExtension(NPWorkerExtension):
             clean_idx[rs["clean_row_idx"]] = torch.arange(
                 bucket, dtype=torch.int32, device=device)
             ws_lm = LMHeadWorkspace(bucket * width, V, bucket, 128, device)
-        force_tokens = es_cfg.get("force_tokens")   # test-only teacher forcing
         prof_lm = os.environ.get("ES_PROFILE_LMHEAD")
         lm_ms = 0.0
 
         clean_row_idx = rs["clean_row_idx"]
         payload_buf = torch.zeros(bucket * width, max_tokens, device=device,
                                   dtype=torch.float32)
+        # Exact top-K rail loss (loss_impl=topk): also record the clean rail's
+        # top-K token ids and EVERY rail's logprob at those K ids.
+        topk_k = int(es_cfg.get("topk_k", 0) or 0)
+        if topk_k > 0:
+            topk_ids_buf = torch.zeros(bucket, max_tokens, topk_k,
+                                       dtype=torch.int32, device=device)
+            topk_buf = torch.zeros(bucket * width, max_tokens, topk_k,
+                                   dtype=torch.float32, device=device)
         clean_tokens = [[] for _ in range(B)]
         temp = float(getattr(sampling_params, "temperature", 0.0) or 0.0)
         top_p = float(es_cfg.get("top_p", 1.0) or 1.0)
@@ -832,6 +1301,21 @@ class WorkerExtension(NPWorkerExtension):
                 else:
                     tok_logp = logits_f.gather(1, chosen[:, None])[:, 0] - lse
                 payload_buf[:, t] = tok_logp
+                if topk_k > 0:
+                    # Clean rail's top-K ids (pre-temperature logits: same
+                    # ranking); per-row gather-dot in fp32, numerics matching
+                    # lm_head_gather_logit (x.float() . w.float()).
+                    kids = clean_logits.topk(topk_k, dim=-1).indices
+                    topk_ids_buf[:, t] = kids.to(torch.int32)
+                    kids_R = kids.repeat_interleave(width, dim=0)   # [R, K]
+                    if lm_impl == "stream":
+                        wk = W_lm.index_select(0, kids_R.reshape(-1)).view(
+                            -1, topk_k, W_lm.shape[1])              # [R, K, d]
+                        lk = torch.einsum("rd,rkd->rk", hidden.float(),
+                                          wk.float())
+                    else:
+                        lk = logits_f.gather(1, kids_R)
+                    topk_buf[:, t] = lk - lse[:, None]
                 if prof_lm:
                     ev1.record()
                     ev1.synchronize()
@@ -859,7 +1343,19 @@ class WorkerExtension(NPWorkerExtension):
             T_p = len(clean_tokens[p])
             block = payload_cpu[p * width:(p + 1) * width, :T_p]  # [1+N, T_p]
             payload.append(block.t().contiguous())                # [T_p, 1+N]
-        return {"clean_tokens": clean_tokens, "payload": payload}
+        res = {"clean_tokens": clean_tokens, "payload": payload}
+        if topk_k > 0:
+            tp_cpu = topk_buf.to("cpu")
+            ti_cpu = topk_ids_buf.to("cpu")
+            topk_payload, topk_ids = [], []
+            for p in range(B):
+                T_p = len(clean_tokens[p])
+                blk = tp_cpu[p * width:(p + 1) * width, :T_p]  # [1+N, T_p, K]
+                topk_payload.append(blk.permute(1, 0, 2).contiguous())
+                topk_ids.append(ti_cpu[p, :T_p].clone())       # [T_p, K]
+            res["topk_payload"] = topk_payload                 # [T_p, 1+N, K]
+            res["topk_ids"] = topk_ids
+        return res
 
     # -------------------------------------------------------------- export ---
     def es_export_weights(self):

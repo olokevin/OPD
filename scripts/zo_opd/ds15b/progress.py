@@ -11,6 +11,7 @@ ARMS = {
     "ES-B": "logs/ds15b/es/B/run_*.log",
     "ES-C": "logs/ds15b/es/C/run_*.log",
     "ES-D": "logs/ds15b/es/D/run_*.log",
+    "ES-F(b64n1-N16)": "logs/ds15b/es/F/run_*.log",
 }
 KEYS = ["critic/rewards/mean", "response_length/mean", "es/post_update_gain", "es/cum_footprint",
         "es/d_snr", "timing_s/step", "val-core/MATH-500/acc/mean@2", "val-core/AIME24/acc/mean@2"]

@@ -1025,6 +1025,17 @@ Ran the *Do We Need Adam?* recipe (bf16 SGD, lr 0.1, no momentum) for 10 GRPO st
   x n=1 (64 seqs/step), N=16 plain sampling (mean baseline), footprint 0.58%/step, 300 steps,
   expected ~210 s/step.
 
+## [2026-09-02] ingest | es_token 0902 fused kernels: zero-launch rail + non-causal seq attention + in-graph token step (B=1 decode ≤ stock vLLM up to 16 rails)
+
+- Built behind `es_cfg` flags (`rail_impl=fused`, `attn_impl=seq`, `step_impl=graph`) in
+  `verl/trainer/es_token/fused_rail_kernels.py` + `es_token_worker_extension.py`; gates
+  `check_fused_kernels.py` (kernel-level, bit-exact) and `check_fused_path.py` (G1–G5, all pass).
+- Measured on GPU 4 only (user rule): B=1 sweep N=0…384 (`phase5_b1_fused.json`), kernel audit,
+  one-prompt step series for shipping vs fused (`es_b1_step_*.tsv`), BP batch-1 reference
+  (`bp_b1.json`). Figure `figs/es_profile_b1_fused.png`. Results in es_profile_results.md §11–14.
+- Two launcher lessons: the trainer hangs on the decode after an eval (run step timings with
+  `EVAL_INTERVAL=0`); `timeout` does not reap the trainer's python (kill by GPU PID).
+
 ## [2026-09-03] ingest | arm F (es-prefill b64n1 N16 plain) completed: full-curve budget-law confirmation
 
 - Ran its full epoch (279 steps, ~16.9 h). MATH-500@7168 curve: 0.751 -> 0.81 band by step 40 ->
@@ -1097,8 +1108,32 @@ Restored from HEAD and verified byte-identical. Anchor table edits on unique tex
 
 ## [2026-09-05] query | paper framing filed: SFT-vs-es-prefill loss justification, learning-signal mechanism, OPSD extension (es_prefill_paper_framing.md)
 
+## [2026-09-05] ingest | es-decode implemented (held per-rail perturbation, full-rank packed bits or rank-r) + B=1 throughput + two ds15b training arms launched
+
+- `verl/trainer/es_token/rail_seq_kernels.py` (bit generation, bit-GEMV, low-rank rail, update
+  kernels, `SeqNoise`), `fused_rail_kernels.py` RB mode, worker `es_seq_draw/es_seq_apply`, trainer
+  seq branch (k1 fitness, `es_update.py` rule), launchers `ds15b/es_decode.sh`, `run_es_decode_arms.sh`.
+- Gates: `check_seq_kernels.py` (36/36), `check_es_decode.py` (S0–S5), SMOKE both arms.
+- Throughput (GPU 4, B=1): es_profile_results.md §15.4 + `figs/es_decode_b1_throughput.png`.
+- Training: GPU 7, full-rank first (step 0 = 1343 s), then rank-1; wandb `es_opd_JustRL_1p5b`.
+- Lessons: bit-GEMV grid must cover the ACTIVE rails (sweep installs N_max); a leading-axis tile
+  reduce in the fused silu kernel cost 6x at N=0 (static-unroll the apply side); per-token
+  antithetic asymmetry at sigma=1e-3 is ~0.27 (second order), the aggregated fitness is what counts.
+
 ## [2026-09-06] ingest | BP fura on the dense-SGD protocol (es_results.md §20): lr 1.0 (10× dense) → 73.4 @10 vs dense 72.2, crosses 72 by step 4; LR chain 0.3/3.0/0.1 running on GPU 2; verl sharding-manager export leak fixed
 
 ## [2026-09-06] ingest | §20 closed: BP fura LR sweep 0.3/1.0/2.0/3.0 + dense per-step rerun — fura ≈ dense within single-seed noise (74.3/72.9 vs 72.3/75.8), dense converges in 1 step vs 3–4, LR window 10–20× with a cliff at 30×; short doc + index updated
 
 ## [2026-09-07] ingest | OPSD (arXiv:2601.18734) built + BP/es-prefill launched: privileged-context self-teacher + clipped-forward-KL advantage in verl, step-time parity N=4 measured, sigma=1e-3 set by the bf16 fitness noise floor (results/OPSD/opsd_bp_vs_es.md)
+
+## [2026-09-07] ingest | es-decode verdict: strictly dominated, does not match es-prefill/BP (why-it-fails analysis)
+
+- Ran the rank-1 lr/hyperparam search (zscore a1.25e-3, raw a2.8e-3, N=128, a5e-4 queued) + full-flow
+  debug after the full-rank arm; standard-ruler peak 0.786 (r1, +3.5 pp) vs es-prefill C 0.829 vs BP
+  0.859. Mechanism (es_profile_results.md §16): held decode rail rides the CLEAN KV -> per-rail k1
+  fitness spread es/d_std ~0.5e-3 vs es-prefill ~1.5e-3 (3x) at same sigma; offline fitness cosine
+  0.6 / amplitude 0.45; gap independent of rank(full=r1)/N(32=128)/alpha/normalisation. Gap-2 (ES vs
+  BP) is the known forward-only displacement budget. es-decode strictly dominated -> use es-prefill/BP.
+- Flow bug fixed: OOB loads in the fused rank-r apply loops (k>=rank read past the noise buffer ->
+  last rail NaN) + non-finite fitness guard. Ruler scoring tools (ruler_ckpt.sh/ruler_watch.sh,
+  val_only scratch to /tmp). Run stopped by user at N=128 step 12. Peak ckpt kept (r1 zscore step_20).

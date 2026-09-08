@@ -10,6 +10,11 @@ Paths:  rows/full   = shipping es_token (each rail its own FA request, full
                       [rows, V] logits)
         shared/stream = Triton shared-KV rail attention + streaming LM head
         fold/stream   = FA3 GQA-fold rail attention + streaming LM head
+        A path is attn/lm[/rail[/step]] with rail in {kernel (default), fused}
+        and step in {eager (default), graph} (0902 fused kernels):
+        seq/stream/fused/graph = non-causal seqlen_q=R FA3 + streaming head
+                      + rail fused into norm/silu/rope + whole token step in
+                      the CUDA graph.
 
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=<worktree>/verl python \
         scripts/zo_opd/es_profile/phase5_decode_heatmap.py --Bs 1,4,8,16,64 \
@@ -62,6 +67,11 @@ PROMPTS = [
 
 KERNEL_CATS = [
     ("rail_op", r"_rail_fused"),
+    ("fused_norm", r"_norm_rail_kernel"),          # 0902: rail + residual + RMSNorm
+    ("fused_qkv", r"_qkv_rail_norm_rope"),         # 0902: rail + q/k norm + RoPE
+    ("fused_silu", r"_silu_mul_rail"),             # 0902: rail + silu*mul
+    ("lm_tail", r"_lm_tail_kernel"),               # 0902: LSE + gather-dot + payload
+    ("advance", r"_advance_kernel"),               # 0902: in-graph state advance
     ("noise", r"rademacher|philox"),
     ("attn_shared", r"_rail_attn"),
     ("attn", r"flash|fwd_kernel|attn|fmha"),
@@ -101,17 +111,31 @@ def no_eos(sp):
     return sp
 
 
-def es_cfg_for(N, max_tokens, sigma, bucket, attn_impl, lm_impl, seed=42):
+def parse_path(p):
+    """'attn/lm[/rail[/step]]' -> (attn, lm, rail, step) with defaults."""
+    parts = p.split("/")
+    parts += ["kernel", "eager"][len(parts) - 2:]
+    return tuple(parts[:4])
+
+
+RAIL_MODE = {"rail_mode": "token", "noise_rank": "1"}   # set from --rail-mode/--noise-rank
+
+
+def es_cfg_for(N, max_tokens, sigma, bucket, attn_impl, lm_impl, seed=42,
+               rail_impl="kernel", step_impl="eager"):
     return dict(n_sample=N, max_tokens=max_tokens, global_seed=seed, sigma=sigma,
                 sigma_mode="absolute", sample_method="bernoulli",
                 b_pack_buckets=[bucket], token_agg="mean",
-                attn_impl=attn_impl, lm_head_impl=lm_impl)
+                attn_impl=attn_impl, lm_head_impl=lm_impl,
+                rail_impl=rail_impl, step_impl=step_impl, **RAIL_MODE)
 
 
-def time_packed(llm, pids, N, max_tokens, sigma, attn_impl, lm_impl, use_graph=True):
+def time_packed(llm, pids, N, max_tokens, sigma, attn_impl, lm_impl, use_graph=True,
+                rail_impl="kernel", step_impl="eager"):
     B = len(pids)
     sp = no_eos(SamplingParams(temperature=0.0, max_tokens=max_tokens))
-    cfg = es_cfg_for(N, max_tokens, sigma, B, attn_impl, lm_impl)
+    cfg = es_cfg_for(N, max_tokens, sigma, B, attn_impl, lm_impl,
+                     rail_impl=rail_impl, step_impl=step_impl)
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     out = llm.collective_rpc("run_es_decode_packed",
@@ -134,7 +158,8 @@ def slope_ms(t_s, t_l, T_s, T_l):
     return (t_l - t_s) / (T_l - T_s) * 1e3
 
 
-def profile_point(llm, pids, N, attn_impl, lm_impl, sigma, n_short=2, n_long=10):
+def profile_point(llm, pids, N, attn_impl, lm_impl, sigma, n_short=2, n_long=10,
+                  rail_impl="kernel", step_impl="eager"):
     """Phase 3: eager steps under torch.profiler; CUDA kernel ms per token-step
     bucketed by kernel name. Two runs of different length are differenced so
     the prefill (same in both) cancels: per-step = (long - short) / (n_long - n_short)."""
@@ -142,7 +167,8 @@ def profile_point(llm, pids, N, attn_impl, lm_impl, sigma, n_short=2, n_long=10)
 
     def collect(n_tokens):
         with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU]) as prof:
-            time_packed(llm, pids, N, n_tokens, sigma, attn_impl, lm_impl, use_graph=False)
+            time_packed(llm, pids, N, n_tokens, sigma, attn_impl, lm_impl, use_graph=False,
+                        rail_impl=rail_impl, step_impl=step_impl)
         cats = {c: 0.0 for c, _ in KERNEL_CATS}
         cats["other"] = 0.0
         names = {}
@@ -162,7 +188,8 @@ def profile_point(llm, pids, N, attn_impl, lm_impl, sigma, n_short=2, n_long=10)
         cats["total"] = total
         return cats, names
 
-    time_packed(llm, pids, N, 4, sigma, attn_impl, lm_impl, use_graph=False)   # warm/compile
+    time_packed(llm, pids, N, 4, sigma, attn_impl, lm_impl, use_graph=False,
+                rail_impl=rail_impl, step_impl=step_impl)   # warm/compile
     c_s, n_s = collect(n_short)
     c_l, n_l = collect(n_long)
     d = n_long - n_short
@@ -192,13 +219,15 @@ def main():
                          "asserts when a co-tenant frees memory mid-profile)")
     ap.add_argument("--stock-only", action="store_true")
     ap.add_argument("--profile", action="store_true", help="Phase 3 kernel audit instead of the sweep")
+    ap.add_argument("--rail-mode", default="token", help="token (es-token-decode) | seq (es-decode, held noise)")
+    ap.add_argument("--noise-rank", default="1", help="seq mode: int rank or 'full' (packed bits)")
     ap.add_argument("--tag", default="")
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args()
 
     Bs = [int(x) for x in args.Bs.split(",")]
     Ns = [int(x) for x in args.Ns.split(",")]
-    paths = [tuple(p.split("/")) for p in args.paths.split(",")]
+    paths = [parse_path(p) for p in args.paths.split(",")]
     eager = not args.stock_only
     kw = dict(model=args.model, enforce_eager=eager, enable_prefix_caching=False,
               worker_extension_cls=WEXT, dtype="bfloat16",
@@ -241,18 +270,26 @@ def main():
         return
 
     n_rails_max = max(max(Ns), 1)
-    matched = llm.collective_rpc("install_es_layers", args=(RULES, n_rails_max, 42))[0]
+    RAIL_MODE.update(rail_mode=args.rail_mode, noise_rank=str(args.noise_rank))
+    rank_arg = "full" if str(args.noise_rank) == "full" else int(args.noise_rank)
+    matched = llm.collective_rpc("install_es_layers",
+                                 args=(RULES, n_rails_max, 42, args.rail_mode, rank_arg))[0]
+    if args.rail_mode == "seq":   # held noise for the whole sweep (antithetic pairs)
+        llm.collective_rpc("es_seq_draw", args=([100 + i for i in range(max(1, n_rails_max // 2))], True))
     print(f"[cfg] matched_layers={len(matched)} Bs={Bs} Ns={Ns} paths={paths} L={args.prompt_len}", flush=True)
 
     for B in Bs:
         pids = make_pids(tok, B, args.prompt_len)
-        for attn_impl, lm_impl in paths:
+        for attn_impl, lm_impl, rail_impl, step_impl in paths:
+            kw = dict(rail_impl=rail_impl, step_impl=step_impl)
             for N in Ns:
                 path = f"{attn_impl}/{lm_impl}"
+                if (rail_impl, step_impl) != ("kernel", "eager"):
+                    path += f"/{rail_impl}/{step_impl}"
                 llm.collective_rpc("es_reset_graphs")
                 try:
                     if args.profile:
-                        per, top = profile_point(llm, pids, N, attn_impl, lm_impl, args.sigma)
+                        per, top = profile_point(llm, pids, N, attn_impl, lm_impl, args.sigma, **kw)
                         p = dict(B=B, N=N, path=path, rows=B * (1 + N), kernel_ms=per, top=top)
                         rec["points"].append(p)
                         print(f"[prof B={B} N={N} {path}] total={per['total']:.3f} ms/step  " +
@@ -261,12 +298,13 @@ def main():
                         for n, v in top[:6]:
                             print(f"      {v:8.3f}  {n}", flush=True)
                         continue
-                    time_packed(llm, pids, N, 8, args.sigma, attn_impl, lm_impl)      # capture
-                    time_packed(llm, pids, N, args.t_short, args.sigma, attn_impl, lm_impl)
+                    # step_impl=graph pins max_tokens in its graph: warm each length once
+                    time_packed(llm, pids, N, args.t_short, args.sigma, attn_impl, lm_impl, **kw)
+                    time_packed(llm, pids, N, args.t_long, args.sigma, attn_impl, lm_impl, **kw)
                     t_s, t_l = float("inf"), float("inf")
                     for _ in range(args.repeats):
-                        a, n_s = time_packed(llm, pids, N, args.t_short, args.sigma, attn_impl, lm_impl)
-                        b, n_l = time_packed(llm, pids, N, args.t_long, args.sigma, attn_impl, lm_impl)
+                        a, n_s = time_packed(llm, pids, N, args.t_short, args.sigma, attn_impl, lm_impl, **kw)
+                        b, n_l = time_packed(llm, pids, N, args.t_long, args.sigma, attn_impl, lm_impl, **kw)
                         t_s, t_l = min(t_s, a), min(t_l, b)
                 except AssertionError as e:
                     print(f"[B={B} N={N} {path}] SKIP: {str(e)[:160]}", flush=True)

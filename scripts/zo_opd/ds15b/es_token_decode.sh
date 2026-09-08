@@ -47,9 +47,21 @@ export LR=${ES_LR:-3e-4}
 export FP32_MASTER=true
 export ASSEMBLE_CHUNK=${ASSEMBLE_CHUNK:-1024}
 
-# rail-aware kernels
-export ATTN_IMPL=${ATTN_IMPL:-shared}
+# rail-aware kernels (0902 generation: fused zero-launch rail, non-causal seq attention,
+# fully in-graph token step -- es_profile_results.md + commit 9a4521e)
+export ATTN_IMPL=${ATTN_IMPL:-seq}
 export LM_HEAD_IMPL=${LM_HEAD_IMPL:-stream}
+# rail_impl=fused binds to Qwen3's op chain (q/k-norm+RoPE); Qwen2/R1-Distill has no fused
+# consumer (asserted in the smoke) -> kernel (the single-launch Triton rail op) on this model.
+export RAIL_IMPL=${RAIL_IMPL:-kernel}
+# step_impl=graph needs top_p=1.0 (top-p is not in-graph); we keep ES_TOP_P=0.95 for BP parity.
+export STEP_IMPL=${STEP_IMPL:-eager}
+
+# ES_LOSS_IMPL=topk: exact top-K truncated CE on the clean rail's top-K ids
+# (HF teacher, no IW / no +1 score term) -- the arm built to make
+# es-token-decode actually learn. Default keeps the sampled-token loss.
+export ES_LOSS_IMPL=${ES_LOSS_IMPL:-sampled}
+export ES_TOPK_K=${ES_TOPK_K:-16}
 
 export NUM_ITERATIONS=${ES_ITERS:-150}
 export EVAL_INTERVAL=${EVAL_INTERVAL:-20}
@@ -63,7 +75,8 @@ export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 export TEACHER_MAX_MODEL_LEN=${TEACHER_MAX_MODEL_LEN:-$((1024 + MAX_PROMPT_LENGTH + MAX_RESP_LENGTH))}
 
 export PROJECT_NAME=${PROJECT_NAME:-es_opd_JustRL_1p5b}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-ds15b_es-token-decode_N${N_SAMPLE}_sig${SIGMA}_lr${LR}}
+_LOSS_TAG=""; [ "$ES_LOSS_IMPL" = "topk" ] && _LOSS_TAG="_topk${ES_TOPK_K}"
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-ds15b_es-token-decode_N${N_SAMPLE}_sig${SIGMA}_lr${LR}${_LOSS_TAG}}
 export ES_LOGGER=${ES_LOGGER:-'["console","wandb"]'}
 export LOG_DIR=${LOG_DIR:-logs/ds15b/es_token}
 
@@ -79,5 +92,5 @@ mkdir -p "$LOG_DIR"
 
 echo "=== es-token-decode (ds15b, rail-aware kernels) ==="
 echo "  student $ACTOR_MODEL_PATH  teacher $TEACHER_MODEL_PATH  gpu $CUDA_VISIBLE_DEVICES"
-echo "  B=$BATCH_SIZE pw=$PACK_WIDTH N=$N_SAMPLE sigma=$SIGMA lr=$LR resp<=$MAX_RESP_LENGTH attn=$ATTN_IMPL lm_head=$LM_HEAD_IMPL"
+echo "  B=$BATCH_SIZE pw=$PACK_WIDTH N=$N_SAMPLE sigma=$SIGMA lr=$LR resp<=$MAX_RESP_LENGTH attn=$ATTN_IMPL lm_head=$LM_HEAD_IMPL rail=$RAIL_IMPL step=$STEP_IMPL"
 bash scripts/zo_opd/opd_es_token.sh

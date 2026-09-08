@@ -383,3 +383,422 @@ Reads, in the order the plan's §8 asked for:
 - Hardware: H100 NVL 94 GB, 132 SMs, driver 570.207, CUDA 12.8, torch 2.8.0, triton 3.4.0, vLLM 0.11.0 (FA3), NVLink pairs (0,1),(2,3),(4,5),(6,7).
 
 # 0902 Fused kernel
+
+> 2026-09-02, same worktree/branch, GPUs 0–4 **idle** (the 0831 co-tenant jobs are gone, so these
+> numbers are clean; the B=1 rows of §5 read ~0.3–0.7 ms high). Follows §9 items 1–3: the fixed
+> "rails-on" tax is gone by construction — the rail op has **zero launches**, the fold's permutes are
+> gone, and the whole token step (LM head, sampling, payload, state advance) lives inside the one
+> CUDA graph, so the decode loop is `replay()` with no per-token host work.
+
+## 11. Design — three fused kernels, one non-causal FA call, one graph per token
+
+**The tax, itemised (B=1, fold/stream, §5.1):** N=0 → 2.83 ms, N=1 → 3.55 ms. That +0.7 ms step was
+(a) 112 `_rail_fused` launches (~0.47 ms, latency-bound, flat in N), (b) the fold path's two permute
+copies per layer (56 launches), (c) ~20 eager tail ops per token (streaming head + LSE, argmax,
+`repeat_interleave`, gather-dot, payload store, five `fill_` per slot, the noise launch) plus one
+`.tolist()` sync per token that leaves the GPU idle while the CPU re-issues the next step.
+
+**What replaced it** (all behind `es_cfg` flags; every shipping path is untouched):
+
+| flag                  | what it does                                                                                                                                                                                                                                                                                                                                      | file                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `rail_impl=fused`     | The rail update is applied by the kernel that already reads each linear's output: `qkv_proj` → **rail + q_norm + k_norm + RoPE** (one kernel replaces three), `o_proj` → **rail + residual add + post_attention_layernorm**, `gate_up` → **rail + silu·mul**, `down_proj` → **rail + residual + next layer's input_layernorm** (final `model.norm` for layer 27). One program per packed row: reduce `a = σ⟨x, r_n⊙v_p⟩` over the stashed GEMM input, add `a·(s_n⊙u_p)` to the output tile in registers, do the kernel's normal job. 10 kernels per layer instead of 16; no rail launch at all. | `verl/trainer/es_token/fused_rail_kernels.py`; instance-level `forward` patches on `RMSNorm` / `SiluAndMul` / `Qwen3Attention` installed by `install_es_layers` (module tree and names untouched; pass-through outside fused mode) |
+| `attn_impl=seq`       | One FA3 request per slot with `seqlen_q = R`, **`causal=False`**, `seqused_k` = the clean history incl. the current token: all R rail rows attend the same KV, FA3's own GQA packing puts the `R·G` query rows of a KV head in one M tile — the fold's KV reuse with **no permute copies and no custom kernel**. The `qkv.split` view is passed as is.                                            | `rail_attn_kernel.rail_attention_seq`                        |
+| `step_impl=graph`     | The graph body is the **whole token step**: Philox noise fill from `seed_tbl[t]` (t = a device counter), forward, streaming head (no `[R,V]`), `argmax` (or Gumbel-max for T>0), a **tail kernel** (LSE from the head's (m,s) tiles + gather-dot of the chosen token + `payload[row, t]` store) and an **advance kernel** per slot (record token, EOS / forced-stop test, next input id / position / seq_len / clean KV slot from the block table; finished slots freeze with slot −1 — C-4 semantics). Host loop: `graph.replay()` per token, one `active.sum()` read every 32 tokens, one D2H of tokens + payload at the end. `use_graph=False` runs the identical body eagerly (oracle). | `fused_rail_kernels._lm_tail_kernel / _advance_kernel / _rademacher_rows_t`; `WorkerExtension._es_step_body / _es_decode_graph_step` |
+
+**Rounding is the whole difficulty, not the arithmetic.** Every fused kernel reproduces the exact
+rounding sequence of the vLLM CUDA op it replaces (bf16 add for the residual, `bf16(bf16(z·rsqrt)·w)`
+for the norm, `bf16(bf16(silu)·h)`, and neox RoPE as `bf16(bf16(x·cos) − bf16(y·sin))`). Two
+compiler facts cost an afternoon and are worth recording:
+
+1. **Triton's LLVM pipeline contracts `x·cos − bf16(y·sin)` into an FMA**, skipping the rounding of
+   the first product → 18 % of RoPE outputs off by one bf16 ulp although the same formula in torch is
+   bit-exact. Fix: launch the qkv kernel with `enable_fp_fusion=False`. (The noise and signs are ±1, so
+   the rail update `y + a·u·s` itself is exact either way.)
+2. **Triton's `/` is `div.full.f32` (approximate) and `tl.exp` is `ex2.approx`-based**; vLLM's silu is
+   `expf` + IEEE division. Use `libdevice.exp` / `libdevice.div_rn`.
+
+With those, the kernel-level gate (`check_fused_kernels.py`, each fused kernel vs `apply_rail` → vLLM op
+chain on Qwen3-1.7B shapes) is **bit-exact** for the norm (residual and normed output), silu·mul, k,
+v, the in-graph noise, tail and advance kernels; q differs in 0.008 % of elements by one ulp (α
+reduction order). The α reduction now uses `apply_rail`'s tiling (BLOCK_IN 4096, 16 warps).
+
+**End-to-end gates** (`check_fused_path.py`, GPU 0, 4 prompts × 64 tokens, N=8, σ=0.01, log
+`results/fused_gate.log`) — all green:
+
+| gate | result |
+| ---- | ------ |
+| G1 σ=0 greedy vs stock vLLM (rows+fused, seq+kernel, seq+fused, seq+fused+graph, fold+fused+graph) | identical except the known **exact bf16 tie** at prompt 2 / token 42 (gap 0.000) on every path |
+| G2 σ>0 forced-token payload vs rows/full — **yardstick** = the same fused kernels with the α tiling changed (BLOCK_IN 1024/8w): max 1.72 / mean 0.0094 | seq + kernel rail: max 0.13 / mean 0.006; every fused-rail path: max 1.39 / mean 0.012 — inside the yardstick (bf16 chaos through 28 layers, §6), not a bug |
+| G3 `step_impl=graph`: captured graph vs the same body run eagerly | **bit-identical** payload and tokens (seq and fold) |
+| G3b fused rail vs kernel rail, identical attention + head (rows/stream) | max 1.35 / mean 0.009 = the pure rail-op reduction-order delta, inside the yardstick |
+| G4 multi-wave KV page refresh through the cached graph (longer prompts) | identical to stock on every fused path |
+| G5 real EOS + staggered forced stops **inside the graph** vs the eager step | lengths [10, 20, 48, 30] = eager; tokens identical |
+
+Launch: `RAIL_IMPL=fused ATTN_IMPL=seq LM_HEAD_IMPL=stream STEP_IMPL=graph bash scripts/zo_opd/opd_es_token.sh`
+(YAML keys `es_token.rail_impl / step_impl`). `step_impl=graph` needs `lm_head_impl=stream` and
+`top_p=1` (top-p sampling stays on the eager tail); temperature > 0 samples by Gumbel-max in-graph.
+
+## 12. Results — B=1 decode sweep (GPU 4, idle; prompt 512, min-of-2 slopes over 64→512 token-steps)
+
+`run_gpu4_chain.sh` → `results/phase5_b1_fused.json`, stock `phase5_b1_stock.json` (2.735 ms today),
+figure `figs/es_profile_b1_fused.png` (left panel), plot `plot_b1_fused.py`. ms per clean token-step:
+
+| path                              | R=1  | R=2  | R=5  | R=9  | R=17 | R=33 | R=49 | R=65 | R=97 | R=129 | R=193 | R=257 | R=385 |
+| --------------------------------- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ----- | ----- | ----- | ----- |
+| rows/full (shipping)              | 2.55 | 3.13 | 3.50 | 3.77 | 3.99 | 4.09 | 4.49 | 4.98 | 6.44 | 7.75  | 10.42 | 12.84 | 18.66 |
+| fold/stream (0831)                | 2.80 | 3.51 | 3.52 | 3.59 | 3.67 | 3.74 | 3.80 | 4.01 | 4.21 | 4.48  | 5.39  | 6.20  | 8.08  |
+| rows + fused rail                 | 2.55 | 2.81 | 2.92 | 3.19 | 3.40 | 3.44 | 3.86 | 4.59 | 5.89 | 7.10  | 9.47  | 12.13 | 17.68 |
+| seq + fused rail, eager tail      | 2.49 | 2.74 | 2.79 | 2.85 | 2.89 | 2.96 | 3.03 | 3.16 | 3.39 | 3.79  | 4.53  | 5.34  | 7.28  |
+| **seq + fused rail + in-graph step** | **2.34** | **2.58** | **2.62** | **2.68** | **2.73** | **2.79** | **2.84** | **2.99** | **3.22** | **3.59** | **4.26** | **4.92** | **6.86** |
+
+Derived (stock clean decode = 2.735 ms):
+
+| path                        | N=0 vs stock | rails-on tax (N=1 − N=0) | N_free vs N=1 at 5/10/25 % | largest N still ≤ stock clean | rail evals/s at R=129 / 385 |
+| --------------------------- | ------------ | ------------------------ | -------------------------- | ----------------------------- | --------------------------- |
+| rows/full                   | −7 %        | +0.58 ms (+23 %)         | 2 / 2 / 8                  | 0                             | 16.5 k / 20.6 k             |
+| fold/stream                 | +2 %        | +0.71 ms (+25 %)         | 16 / 48 / 96               | —                             | 28.6 k / 47.5 k             |
+| rows + fused rail           | −7 %        | +0.26 ms (+10 %)         | 4 / 4 / 32                 | 0                             | 18.0 k / 21.7 k             |
+| seq + fused, eager tail     | −9 %        | +0.25 ms (+10 %)         | 8 / 32 / 96                | 0                             | 33.7 k / 52.7 k             |
+| **seq + fused + in-graph**  | **−14 %**   | **+0.24 ms (+10 %)**     | **8 / 32 / 64**            | **16**                        | **35.6 k / 55.9 k**         |
+
+**Key reads**
+
+1. **The tax is gone as a *launch* cost and the decode loop is GPU-bound.** The in-graph path's
+   wall-clock per token equals its kernel-only time from the audit below (2.34 vs 2.34 ms at N=0,
+   2.68 vs 2.69 at N=8, 2.79 vs 2.82 at N=32): there is no host work left between tokens. At N=0 it
+   is **14 % faster than stock vLLM's own CUDA-graph decode** (2.34 vs 2.735) and 8 % faster than the
+   shipping es driver — the fused qkv kernel (three launches → one) and the streaming head pay off
+   before any rail exists.
+2. **16 rails now cost less than one stock clean token** (N=16: 2.73 ms vs 2.735). Relative to the
+   shipping path the new one is 1.22× at N=1, **1.41× at N=8, 1.47× at N=32, 1.66× at N=64, 2.16× at
+   N=128, 2.72× at N=384**; relative to the 0831 fold path 1.34× from N=1 to N=64.
+3. **What remains of "rails-on" is +0.24 ms (+10 %) and it is arithmetic on the critical path, not
+   launches**: the audit shows the three fused kernels growing 0.14→0.28 / 0.08→0.13 / 0.12→0.19 ms
+   from N=0 to N=8 — a fused kernel takes as long as its slowest program, and the rail rows'
+   programs first reduce `⟨x, r⊙v⟩` over d_in (2048–6144) before they can touch their tile. That
+   cost is flat from N=1 to ~N=48 (programs run on separate SMs), which is why the curve is flat
+   there; it can only be removed by hoisting the α reduction into the *producer* of x (§14.1).
+4. **Beyond ~N=48 the curve is the GEMM ridge**, exactly as the plan predicted: rows 2×49…385 at
+   B=1 put `B(1+N)` past ~130 and the four GEMMs leave their latency floor (audit: gemm 1.26 → 1.57 ms
+   at R=129) while the streaming head goes compute-bound (0.19 → 0.42 ms). Attention on the `seq`
+   path stays 0.52–0.73 ms to R=129 (rows: 0.52 → 2.50).
+5. **`seq` beats `fold` at every N for free**: same FA3 kernel, same KV reuse, no permute copies —
+   N=1 3.51 → 2.74 ms on the eager tail alone. The 0831 `fold`/`shared` kernels are superseded at
+   B=1 (they remain the B≥4 options, untested with the fused rail beyond the gate).
+6. **Probe throughput**: 55.9 k rail evaluations/s on one sequence at R=385 (0831 fold: 47.5 k;
+   shipping: 20.6 k), 35.6 k at R=129 — 3.8 % of the GPU's clean-token rate is now spent per rail
+   at N=32 (2.79 ms / 33 rows = 85 µs per row-step, vs 2.735 ms for a clean token).
+
+### 12.1 Kernel audit at B=1 (eager, `--profile`, ms per token-step; prefill differenced out)
+
+| path                     | N   | GEMM | attention | rail op | norm / act / rope | fused norm / qkv / silu | LM head (+tail) | other elementwise | total |
+| ------------------------ | --- | ---- | --------- | ------- | ----------------- | ----------------------- | --------------- | ----------------- | ----- |
+| rows/full                | 0   | 1.44 | 0.52      | —       | 0.31 / 0.11 / 0.09 | —                       | (in GEMM)       | 0.11              | 2.60  |
+| rows/full                | 8   | 1.50 | 0.72      | 0.45    | 0.31 / 0.11 / 0.09 | —                       | (in GEMM)       | 0.33              | 3.51  |
+| rows/full                | 128 | 1.79 | 2.50      | 0.54    | 0.38 / 0.12 / 0.10 | —                       | (in GEMM)       | 0.85              | 6.29  |
+| fold/stream              | 8   | 1.31 | 0.53      | 0.45    | 0.31 / 0.11 / 0.09 | —                       | 0.19            | 0.48              | 3.48  |
+| fold/stream              | 128 | 1.57 | 0.71      | 0.54    | 0.38 / 0.12 / 0.10 | —                       | 0.43            | 0.81              | 4.66  |
+| seq + fused, eager tail  | 8   | 1.32 | 0.54      | —       | —                 | 0.28 / 0.12 / 0.19      | 0.19            | 0.11              | 2.75  |
+| **seq + fused + in-graph** | 0 | 1.26 | 0.53      | —       | —                 | 0.14 / 0.08 / 0.12      | 0.19 + 0.01     | 0.02              | 2.34  |
+| **seq + fused + in-graph** | 8 | 1.33 | 0.55      | —       | —                 | 0.28 / 0.13 / 0.19      | 0.19 + 0.01     | 0.02              | 2.69  |
+| **seq + fused + in-graph** | 32 | 1.36 | 0.63     | —       | —                 | 0.28 / 0.13 / 0.19      | 0.19 + 0.01     | 0.02              | 2.82  |
+| **seq + fused + in-graph** | 128 | 1.57 | 0.73    | —       | —                 | 0.32 / 0.14 / 0.21      | 0.42 + 0.01     | 0.01              | 3.42  |
+
+Reads: the 0.45–0.54 ms `rail_op` column is gone; the three fused kernels at N=0 (0.34 ms) cost *less*
+than the stock norm + act + rope they replace (0.51 ms); the in-graph tail + advance kernels are
+0.01 ms; "other elementwise" collapses from 0.33–0.85 ms to 0.02 (that was the eager per-token
+sampling/payload path). Full table: `results/phase5_profile_b1_fused.json`.
+
+## 13. Results — one-prompt training step vs rails (GPU 4)
+
+`run_es_b1_step.sh` (the es_token trainer with `batch_size=1, pack_width=1, max_tokens=512`, greedy,
+DAPO-Math prompt, co-located Qwen3-4B teacher, no eval), mean of steps 1–2 (step 0 carries the graph
+capture and the teacher's cold start); BP reference `run_bp_b1.sh` (verl PPO `token_reward_direct`,
+`train_batch_size=1`, 512 tokens, same student/teacher, `results/bp_b1.json`). Figure
+`figs/es_profile_b1_fused.png` (right panel).
+
+| one-prompt step, s (decode / teacher / assemble+apply) | N=1                    | N=8                    | N=32                   | N=128                  |
+| ------------------------------------------------------ | ---------------------- | ---------------------- | ---------------------- | ---------------------- |
+| es_token, shipping path (rows/full)                    | 6.23 (1.65/0.05/4.46)  | 7.15 (1.78/0.04/5.25)  | 7.87 (1.91/0.04/5.83)  | 10.39 (3.06/0.05/7.19) |
+| **es_token, seq + fused rail + in-graph step**         | 6.43 (1.28/0.05/5.00)  | 6.30 (1.33/0.05/4.82)  | 7.29 (1.40/0.04/5.76)  | 9.18 (1.72/0.04/7.32)  |
+| BP-OPD, batch 1 (steady, steps 2–3)                    | 8.19 (gen 4.79 / teacher 2.81 / log-prob 2.37 / update 0.59) — cold step 1: 35.1 |
+| stock vLLM clean generation of 512 tokens              | 1.40 (2.735 ms/token)  |
+
+**Reads**
+
+1. **Decode is where the rails were, and it is now 1.3–1.8× faster end to end**: 1.65/1.78/1.91/3.06 s
+   → 1.28/1.33/1.40/1.72 s at N = 1/8/32/128 — the trainer reproduces the sweep (1.28 s = 512 ×
+   2.5 ms). With 32 rails the decode takes exactly what stock vLLM takes to generate the same 512
+   tokens with no rails (1.40 s); with 128 rails, 1.23× that.
+2. **The one-prompt step is not decode-bound; it is assemble-bound**: 4.5–7.3 s of every step is
+   `es_assemble_and_apply` — the fp32-master host round trip (5.65 GB of perturbed weights to the
+   CPU and back, ≈ 4.5 s, independent of N) plus the chunked GEMMs that grow with N (+2.8 s from N=1
+   to 128). That term is also noisy (±0.5 s run to run), which is why the totals at N=1 (6.2 vs 6.4)
+   are a wash. The teacher is 0.04 s (one prefill). For a single prompt, therefore, the fused decode
+   moves the step from 7.15 → 6.30 s at N=8 (1.13×) and 10.39 → 9.18 s at N=128 (1.13×); the lever
+   that is left at B=1 is the master round trip (keep the fp32 master on the GPU when memory allows,
+   or apply the update in bf16 with error feedback), not the decode.
+3. **Against BP at batch 1 (8.2 s steady)**: the es_token step with **32 rails is 7.3 s, i.e. faster
+   than one BP step**, and 128 rails cost 1.12× BP. BP's own batch-1 step is dominated by its
+   generation phase (4.8 s for 512 tokens = 9.4 ms/token through verl's rollout worker, 3.4× stock
+   vLLM's decode) and the teacher/log-prob FSDP passes (5.2 s) — fixed costs that a one-prompt step
+   cannot amortise; at batch 64 the picture is the §zo_opd one (ES 1.48× BP).
+
+## 14. Next steps (after 0902)
+
+1. **Hoist the α reduction into the producer of x** (§12 read 3): the norm kernel that emits the
+   qkv input, the post-attention norm that emits the gate_up input and the silu kernel that emits
+   the down_proj input all hold x in registers — have them write `α[row]` for the *next* linear
+   into a `[R, 112]` scratch, so the consumer's rail update is a scalar read. Only the o_proj rail
+   (x = FA output) keeps its reduction. Expected: the remaining +0.24 ms (N=1) → ~+0.1 ms.
+2. **Ridge-side levers for N ≳ 48 at B=1**: the streaming head is compute-bound past 64 rows
+   (0.19 → 0.42 ms at R=129; BLOCK_M 128 / `num_stages` tuning), and the GEMMs leave their floor at
+   ~130 rows — nothing below the ridge is left to remove, so larger N at B=1 is a tensor-core
+   question (fp8 rails?) or a "more prompts per wave" question (§5: B=8 × N=8 waves).
+3. **B ≥ 4 with the fused rail + `seq`**: only gated (G1–G5 at B=4), not profiled; the 0831 heat map
+   should be re-run with `rail_impl=fused, attn_impl=seq, step_impl=graph` to refresh `N_free(B, L)`.
+4. **Post-eval decode hang (open bug)**: with `eval_interval` > 0 the trainer hangs at 97 % GPU util
+   on the first decode after `_evaluate_model` (any path, incl. the shipping one); the 2026-06
+   "teardown hang" is the same thing (the eval came after the last step). `run_es_b1_step.sh` runs
+   with `EVAL_INTERVAL=0` and kills the driver by GPU PID after the last step's metric line.
+5. **Top-p in-graph**: `step_impl=graph` supports greedy and Gumbel-max (T > 0, top_p = 1); the
+   0.95 top-p used by BP's rollout and every eval still needs a sort — a fused top-p/Gumbel kernel
+   over the `[B, V]` clean logits would close that gap.
+6. Unchanged: none of this touches the estimator (§9.7 / [es_rails_formulation](es_rails_formulation.md)).
+
+## 15. es-decode (2026-09-05): held per-rail perturbations, full-rank or low-rank
+
+> The fourth rail algorithm of [zo_opd_short.md](zo_opd_short.md): like es-token-decode the rails
+> ride the clean rollout's KV, but rail n's `ΔW_n = σ ε_n` is drawn ONCE per step and held for
+> every token of every rollout — es-prefill's estimator (k1 fitness, antithetic pairs, OpenAI-ES
+> step from `es_update.py`) measured with decode rails. Built in `es_token` (`rail_mode=seq`,
+> `noise_rank = r | full`); GPUs: profiling on 4 (co-tenant idle), training on 7.
+
+### 15.1 Design
+
+| piece | what |
+| --- | --- |
+| noise, low-rank `r` | per rail one flat bf16 row `[r · d_total]`: `a_k ∈ {±1}^{d_out}`, `b_k ∈ {±1}^{d_in}` per linear, `ε = (1/√r) Σ_k a_k b_kᵀ` → unit per-element RMS, so σ has the same meaning at every rank. Rail 2i+1 = rail 2i with the `a` side negated. |
+| noise, full-rank | `ε ∈ {±1}^{d_out×d_in}` as **packed bits**: one int32 word = 32 signs of one output row, generated by Philox from the rail's seed (`_rademacher_bits_kernel`, odd rails = inverted words). 32 rails × 1.31 B perturbed params = **4.9 GB** instead of 84 GB in bf16. |
+| rail op, low-rank | `y += (σ/√r) Σ_k ⟨b_k, x⟩ a_k`: inside the fused consumer kernels (`RB > 0` mode of `_norm_rail_kernel` / `_qkv_rail_norm_rope_kernel` / `_silu_mul_rail_kernel`, one `[RB, BLOCK]` tile per row, r ≤ 8) or the standalone `_rail_lowrank_kernel` (any r, `rail_impl=kernel`). |
+| rail op, full-rank | `_rail_bits_kernel`: grid (rail, 128-row block); streams the block's words once for all slots, unpacks by a static loop over the 32 bit positions (bit b of word j = column 32j+b) into a bf16 ±1 `[128, 16]` tile and does one `tl.dot` per position against the matching strided x columns of all slots (`BP = next_pow2(bucket) ≥ 16`); exact products, fp32 accumulate, `y = bf16(y + σ·acc)`. The 3-D `(w >> bits) & 1` reshape form was 1.4× slower. One launch per linear (112/token). |
+| update | `W += Σ_n coef_n ε_n` from the SAME resident noise: low-rank = one fp32 GEMM per linear (`Aᵀ diag(coef/√r) B`); full = `_bits_update_kernel` (coef-weighted signs into an fp32 tile). fp32 master on the host as es_token. |
+| trainer | per step `seeds = rng(global_seed + step)`; `es_seq_draw` → decode waves → teacher log q → `F_n` from the payload (`Σ_t A_t Δlog π_n / Σ_t 1`, batch-aggregated) → `d, RMS(d), coef` exactly as `es_update.py` (`es_alpha`, `es_antithetic`, `es_normalize`) → `es_seq_apply`. Metrics: `es/d_snr`, `es/update_rms` (= √Σcoef², matches the measured RMS to 1e-6), `train/update_footprint`, `es/cum_footprint`, `es/probe_footprint`. |
+
+Files: `verl/trainer/es_token/rail_seq_kernels.py` (kernels + `SeqNoise`), `fused_rail_kernels.py`
+(`RB` mode, `MAX_FUSED_RANK = 8`), `es_token_worker_extension.py` (`install_es_layers(..., rail_mode,
+noise_rank)`, `es_seq_draw`, `es_seq_apply`, seq dispatch in `ESTokenLinear`, no per-token noise),
+`ray_trainer.py` (seq branch of `fit`), YAML/launcher knobs `rail_mode / noise_rank / es_alpha /
+es_antithetic / es_normalize / ckpt_keep_last`, launchers `scripts/zo_opd/ds15b/es_decode.sh`,
+`run_es_decode_arms.sh`; gates `check_seq_kernels.py`, `check_es_decode.py`.
+
+### 15.2 Gates (GPU 4)
+
+| gate | result |
+| --- | --- |
+| kernel-level (`check_seq_kernels.py`, Qwen2/Qwen3 shapes, N=8, bucket 4) | bits deterministic + antithetic inversion exact; full-rank rail vs torch ±1 GEMV max 3.9e-3 (bf16 output ulp); low-rank rail r=1/4/16 vs torch max 1.5e-5; both update kernels vs torch ≤ 1.4e-9; fused consumers (r = 1/4/8; Qwen3 with q/k-norm, Qwen2 without) **bit-identical** to standalone kernel + vLLM op |
+| e2e (`check_es_decode.py`, R1-Distill-1.5B, 4 prompts × 32 tok, N=4, σ=1e-3) | S0 σ=0 rails ≡ clean (2e-6 nats); S1 antithetic per-token corr(d₊, d₋) = −0.93 (r=1) / −0.89 (full), even part 0.26–0.29 of the odd part (second order at σ=1e-3); S2 fused vs standalone r=1 max 5.6e-2 / mean 2.9e-3 (α-tiling bf16 chaos); S3 graphed ≡ eager **bit-identical** (both ranks); S4 exported `W_after − W_before` = `bf16(W + Σ coef ε)` on `layers.3.mlp.down_proj`, measured RMS 3.16e-4 = √(3e-4² + 1e-4²); S5 redraw same seeds → identical payload |
+| trainer smoke (GPU 7, `SMOKE=1`, N=4, 8 prompts × 256 tok) | both arms 2 steps; step 1 = 7.3 s (full: decode 2.5 / teacher 0.1 / apply 4.7) and 6.4 s (r=1: 1.35 / 0.13 / 4.9); `es/update_rms` measured ≡ analytic 8.84e-4 |
+
+### 15.3 Full-rank rail kernel cost (one layer's down + gate_up, 41.3 M params, ms per token)
+
+| N | bucket 1 | bucket 8 | bit traffic | effective |
+| --- | --- | --- | --- | --- |
+| 8 | 0.198 | 0.206 | 41 MB → 209 GB/s | 3.3 / 26 TFLOP/s |
+| 32 | 0.543 | 0.562 | 165 MB → 300 GB/s | 4.9 / 38 TFLOP/s |
+
+The cost is per-rail-per-token unpack work, flat in the number of slots up to 16 (the `tl.dot`'s M
+dimension) — extrapolated over the 112 linears: **≈ 4.5 ms/token at N=8, ≈ 17 ms/token at N=32**,
+i.e. the full-rank decode rail costs ~N × 0.5 ms/token on top of the packed decode. Unpack ALU work
+(~5 ops per sign) is the floor of this formulation; a further 2–3× would need int8 tensor-core
+sign tiles or fp8 x.
+
+### 15.4 Decode throughput at B=1 (GPU 4, R1-Distill-1.5B, prompt 512, `seq/stream/fused/graph`, min-of-2 slopes 64→512)
+
+Stock vLLM clean decode 2.645 ms. `run_gpu4_esdecode*.sh` → `results/phase5_ds15b_b1_esdecode_*.json`;
+figure `figs/es_decode_b1_throughput.png`; plot `plot_b1_esdecode.py`. ms per clean token-step:
+
+| path                                   | R=1  | R=2  | R=5  | R=9  | R=17  | R=33  | R=65  | R=129 |
+| -------------------------------------- | ---- | ---- | ---- | ---- | ----- | ----- | ----- | ----- |
+| es-token-decode (fresh rank-1 / token) | 2.18 | 2.59 | 2.66 | 2.70 | 2.79  | 2.89  | 3.00  | 3.43  |
+| **es-decode, held rank-1**             | 2.13 | 2.52 | 2.56 | 2.61 | 2.71  | 2.81  | 2.94  | 3.33  |
+| es-decode, held rank-4                 | 2.13 | 2.84 | 2.89 | 2.95 | 3.04  | 3.16  | 3.30  | 3.75  |
+| es-decode, held full-rank (packed bits) | 2.14 | 5.42 | 6.63 | 9.02 | 12.93 | 21.64 | 41.99 | —     |
+
+Kernel audit (eager, ms per token-step), held rank-1 vs fresh rank-1: N=0 2.30 vs 2.36, N=8 2.66 vs
+2.76 — the held rail reads no sign vector and needs no per-token noise fill.
+
+**Reads**
+
+1. **A held low-rank perturbation costs exactly what the fresh one did, slightly less**: rank-1 rails
+   are ≤ 3 % cheaper than es-token-decode at every N (no signs, no Philox per token); 32 held rails
+   cost +32 % of the clean token, 128 rails +56 %, i.e. the es-decode machinery is free where the
+   es-token-decode machinery was. Rank 4 adds ~0.3 ms — four α reductions on the rail row's critical
+   path (§12 read 3) — and stays within +50 % to N=32.
+2. **Full-rank is a different regime: ~0.6 ms per rail per token, linear in N** (N=8 → 9.0, N=32 →
+   21.6, N=64 → 42.0 ms), with a 3.3 ms latency floor at N=1 (112 launches of a K/16-dot chain;
+   the N ≤ 4 tiling BM 64 / BK 1024 halved it from 6.96). Each rail is a 1.31 B-sign GEMV per
+   token; packed bits make it fit (4.9 GB for 32 rails) and tensor cores make it ~0.5 ms, but the
+   bit-unpack ALU work is the floor. Probe throughput saturates at **~1.5 k rail-evals/s** against
+   ~11 k (rank-1) at R=33 — full-rank rails are ~7× the price of rank-1 rails at N=32.
+3. In training terms (pack_width 8, ~7 k tokens/rollout): the full-rank arm's step-0 decode was
+   **1317 s** (≈ 23 ms per token-step at 8 × 33 rows) vs es-token-decode's 498 s at the same N=32;
+   the rank-1 arm should land at or below es-token-decode's cost.
+
+### 15.5 Training arms (GPU 7, sequential, `run_es_decode_arms.sh`; wandb `es_opd_JustRL_1p5b`)
+
+`ds15b_es-decode_full_N32_sig1e-3_a1.25e-3` then `ds15b_es-decode_r1_N32_sig1e-3_a1.25e-3`: es-prefill C's
+knobs (N=32 = 16 antithetic pairs, σ=1e-3 → probe footprint 2.5 % of RMS(W) of the perturbed linears,
+α=1.25e-3 → 7.8e-3/step, z-scored), 64 prompts × n=1, 7168 tokens, T=1.0 / top-p 0.95, MATH-500 greedy
+every 20 steps, 80 steps, checkpoints every 20 (`ckpt_keep_last=10`). Launched 2026-09-05 23:04.
+
+Full-rank step 0: **1343 s** = decode 1317 / teacher 14.6 / apply 10.3; `train/L_clean_mean` 0.266,
+`es/d_snr` 0.12, MATH-500 greedy @0 = 68.8 %, held-out clean loss 0.361. Expected ≈ 30 h for the arm;
+the rank-1 arm (≈ 12 h) follows. Results go to [zo_opd_short.md](zo_opd_short.md) when the runs finish.
+
+**Check-in at step 31 (2026-09-06 11:30), standard ruler on the step-20 checkpoint** (`VAL_ONLY` via
+`EXTRA_HYDRA_ARGS="trainer.val_only=True" bp_opd.sh`, GPU 4; `validation_log/ruler_es-decode_full_N32_step20/`):
+
+| | BP (256 seq) | es-prefill C (64 seq) | es-token-decode | **es-decode full** |
+| --- | --- | --- | --- | --- |
+| MATH-500 n=2@T=0.6 @20 (base 0.751) | 0.823 | 0.803 | — (0.803 @60) | **0.779** (AIME24 0.200) |
+| train KL @0 → 20s → 30 | 0.245 → 0.064 → 0.040 | 0.270 → 0.225 → 0.219 | 0.248 → 0.229 → 0.224 | 0.266 → 0.239 → 0.229 |
+| held-out probe @0 → 20 | — | — | 0.361 → 0.313 | 0.361 → 0.344 |
+| `es/d_std` (per-rail fitness spread) | — | 1.5e-3 → 1.1e-3 | — | **5.8e-4 → 4.2e-4** |
+| `es/d_snr` | — | 0.16–0.28 | — | 0.15–0.23 |
+| cum. displacement @30 (C's normalisation) | — | 3.6 % | — | ≈ 3.2 % (identical 3.1e-4/step) |
+| s/step · s/seq | 330 · 1.29 | 320 · 5.0 | 745 · 11.7 | 1335 · 20.9 |
+
+Read: at the same α, N and displacement schedule as es-prefill C, the held full-rank decode rail
+learns less per step (+2.8 pp vs +5.2 on the ruler at 20; KL −10 % vs −17 %) at 4.2× the step cost —
+its per-rail fitness spread is 2.6× smaller for the same σ (the detached-history rail sees a weaker
+effect of the same perturbation; §4/§7.2 prediction). 22 % of its step-20 evals hit the cap (C/BP:
+16–17 %). The rank-1 arm follows.
+
+### 15.6 Pivot (2026-09-06 12:40): full-rank arm stopped at step 34, rank-1 search launched; flow diagnostics
+
+The full-rank arm was learning slower than es-prefill C at 4.2× its cost (§15.5) and is not the
+setting to tune; its step-20 checkpoint / ruler (0.779) are kept. GPU 7 now runs
+`run_es_decode_r1_search.sh`: rank-1, N=32, σ=1e-3, eval + checkpoint every 10 steps, arms
+`α=1.25e-3` (40 steps) → `raw α=2.8e-3` (40; `es_normalize=raw` = α × the gradient estimate, so the
+step scales with the signal instead of the fixed random walk; 2.8e-3 matches zscore-1.25e-3 at the
+initial `d_std`) → `α=2.5e-3` (30) → `α=5e-4` (30). Every step now logs `es/post_update_gain`
+(F(W_new) − F(W₀) on the first wave's first 512 tokens, teacher-forced clean-rail re-decode): the
+smoke gave +6.9e-3 / +4.6e-3 (> 0: the step ascends its own surrogate).
+
+**Is the decode-rail fitness a faithful proxy? (`check_es_decode_fitness.py`, GPU 4, 8 sampled rollouts × 512 tok, N=64 held rank-1 rails = 32 antithetic pairs, HF prefill of the SAME noise via hooks)**
+
+| σ | corr(F_dec, F_pre) | corr(d_dec, d_pre) = cos of the two assembled updates | sign agreement | RMS(d) dec / pre | even/odd dec, pre |
+| --- | --- | --- | --- | --- | --- |
+| 3e-4 | +0.40 | **+0.51** | 0.66 | 3.2e-4 / 7.2e-4 = **0.45** | 0.40, 1.56 |
+| 1e-3 | +0.57 | **+0.62** | 0.75 | 9.9e-4 / 2.2e-3 = **0.45** | 0.38, 1.08 |
+
+Reads: (1) the detached-history rail sees the *same direction* as a true prefill of the perturbed
+model with cosine ≈ 0.6 and **45 % of its fitness spread** — es-decode is es-prefill with a noisier
+estimator, not a broken one; that is the whole gap to C (§15.5) and it does not depend on σ. (2)
+Antithetic pairing is mandatory: the even (curvature/noise) part of the prefill fitness is as large
+as the odd part at σ=1e-3 (1.08) — a one-sided fitness would be dominated by it. (3) Per-layer
+cosines to the true k1 gradient are at the noise floor for both estimators at this sample size
+(8 rollouts; bound √(K/(K+D)) = 1.5e-3), i.e. the run-level signal is what §7's budget law says it is.
+(4) The NaN payloads were a **real kernel bug, now fixed**: the fused rank-r apply loops are
+statically unrolled to `RB = next_pow2(rank) ≥ 2` and loaded `a_k` for `k ≥ rank` (coefficient 0) —
+for the last rail × last layer that read runs past the noise buffer and `0 × garbage` is NaN whenever
+the garbage is (nondeterministic; always the last rail's whole column; only `rail_impl=fused`; σ up
+to 5e-3 decodes cleanly). Loads are now masked with `k < rank`; the trainer zeroes non-finite rails'
+pairs so a NaN can never reach the weights. The rank-1 search was restarted after re-gating.
+
+**Rank-1 search, arm α=1.25e-3 (relaunched 12:48 on the fixed kernels):** 336 s/step (decode 305 —
+4× cheaper than full-rank, 0.94× es-token-decode's 745 with the 0831 kernels), `es/post_update_gain`
++0.6e-3…+3.7e-3 every step, train KL 0.266 → 0.235 by step 10 (full-rank needed 20 steps; C's
+step-10 block 0.248). **Standard ruler @10: MATH-500 0.773, AIME24 0.233** (base 0.751 / 0.150; C @20
+0.803 / —; BP @20 0.823, AIME24 0.267 @60). Checkpoints are scored automatically as they appear
+(`ds15b/ruler_watch.sh` → `results/ruler_scores.tsv`; single-checkpoint tool `ds15b/ruler_ckpt.sh`,
+which also reaps the stale isolated Ray head that made the first re-score fail with a
+session-name mismatch).
+
+**Arm 1 result (rank-1, z-scored α=1.25e-3, 40 steps, 336 s/step):** standard ruler MATH-500
+**0.773 @10 → 0.786 @20 → 0.785 @30 → 0.772 @39** (AIME24 0.233 / 0.233 / 0.233 / 0.200); greedy
+67.0 / 67.6 / 66.0 / 69.8 / 68.4; probe 0.344 → 0.383 → 0.318 → 0.341 → 0.333; train KL 0.266 → ~0.24;
+`es/post_update_gain` positive on 33 of 40 steps (mean ≈ +1.2e-3). Peak +3.5 pp at step 20–30 and
+turnover by step 39 at 5.0 % cumulative displacement — the §7 budget law at a lower peak than
+es-prefill C (0.829 @60, +7.8 pp), i.e. the 0.45-amplitude estimator spends the same random-walk
+budget for less. Same step (20): full 0.779 < r1 0.786 < C 0.803 < BP 0.823.
+
+**Arm 2 result (rank-1, raw/adaptive-step α=2.8e-3, 40 steps):** ruler MATH-500 **0.762 @10 → 0.776
+@20 → 0.770 @30 → 0.775 @39** (AIME24 0.20/0.25/0.217/0.233); greedy climbed monotonically 67.8 →
+68.8 → 70.4 → 71.2 → 70.2 and train KL reached the lowest of any arm (0.224 @37). But the standard
+ruler is flat at ~0.77 — `es_normalize=raw` (step ∝ the gradient estimate, so weak-signal steps
+shrink instead of forcing the fixed random walk) changed the *dynamics*, not the *ceiling*: same
+plateau as the z-scored arm (~0.785), ≈4 pp under es-prefill C. The greedy/sampled split (greedy
++3.4 pp, sampled ~flat) is the same one the §7.2 es-rl run showed — greedy-repetition unsticking,
+not distillation. Levers left: N=128 (information per step) and α=5e-4 (slow high-ceiling arm).
+
+## 16. Why es-decode fails to match es-prefill / BP (2026-09-07, run stopped at N=128 step 12)
+
+Every es-decode arm learns a little and stalls well short of es-prefill, never near BP. Standard ruler
+(MATH-500, n=2 @ T=0.6, 7168; base 0.751), `results/ruler_scores.tsv`:
+
+| arm | @10 | @20 | @30 | @39 | peak vs base |
+| --- | --- | --- | --- | --- | --- |
+| es-decode r1, zscore α=1.25e-3 | 0.773 | **0.786** | 0.785 | 0.772 | +3.5 pp |
+| es-decode r1, raw α=2.8e-3 | 0.762 | 0.776 | 0.770 | 0.775 | +2.5 pp |
+| es-decode r1, N=128 α=1.25e-3 | 0.770 | (stopped @12) | | | — |
+| es-decode full-rank α=1.25e-3 | | 0.779 | | | +2.8 pp |
+| **es-prefill C** (reference) | | 0.803 | | 0.815 | **+7.8 pp @60 (0.829)** |
+| **BP** (reference) | | 0.823 | | 0.843 | **+9.5 pp @120 (0.859)** |
+
+The cause is two nested gaps, both measured, neither closable by tuning.
+
+### Gap 1 — es-decode vs es-prefill (~4 pp): the detached-history rail is a 3× weaker estimator
+
+The held decode rail attends the **clean** rollout's KV, so a rail's weight perturbation changes only
+the current token's logits — it never sees its own effect on the history. The per-rail k1 fitness
+spread `es/d_std` (the ES signal itself; same definition and σ=1e-3 in both trainers) measures this
+directly, **in the live runs**:
+
+| run | `es/d_std` (steps 1–10) |
+| --- | --- |
+| es-prefill C (true prefill of the perturbed model) | **~1.5e-3** |
+| es-decode, r1 zscore / r1 raw / r1 N=128 / **full-rank** — all | **~0.5e-3** |
+
+Ratio ≈ **0.33** in-run (offline `check_es_decode_fitness.py`: fitness cosine **0.6**, spread ratio
+**0.45**). The z-scored step re-normalises to a fixed displacement, so es-decode walks the same (in
+fact larger, 7.8e-3 vs 5.8e-3 per step) distance in weight space while its rail carries ⅓ the coherent
+gradient — the remainder is random walk. Everything downstream follows:
+
+- own-batch surrogate ascent `es/post_update_gain` **1.3e-3** (es-decode) vs **2.8e-3** (es-prefill);
+- train KL(student‖teacher) `L_clean` 0.266 → ~0.24 (−10 %, noisy) vs es-prefill → 0.19 (−32 %) vs BP → 0.004;
+- ruler peaks at 0.786 and turns over by step 39 at ~5 % cumulative displacement (the §7 ES budget law).
+
+**The gap is fixed by the evaluation, not any knob** — the four levers all leave `es/d_std` and the
+ruler ceiling put:
+
+| lever | swept | effect on d_std | ruler |
+| --- | --- | --- | --- |
+| perturbation rank | rank-1 → full matrix | 0.5e-3 = 0.5e-3 | 0.786 vs 0.779 |
+| rail count N | 32 → 128 | 0.5e-3 = 0.5e-3 | 0.786 vs 0.770 @10 |
+| step normalisation | zscore → raw | — | 0.785 vs 0.775 |
+| α | 1.25e-3 (± via raw) | — | flat plateau |
+
+N only shrinks the √N sampling error of the fitness *mean*, not the per-rail spread; rank changes the
+perturbation subspace but not how the detached rail attenuates it; α / normalisation move the dynamics,
+not the ceiling. **The bottleneck is signal-per-rail, and it is set by riding the clean KV.**
+
+### Gap 2 — es-prefill (hence es-decode) vs BP: the forward-only displacement budget
+
+Already established (2026-09-01, es_rails_formulation.md §7): no forward-only rail config is comparable
+to BP on this setting — at the 16 k cap BP is +6 pp / +23 pp AIME24, every ES arm ≤ +1.8 pp. ES coherent
+motion per step ≈ 1/40 of a BP step; matching a BP run needs ~10⁶–10⁷ rail forwards. es-decode inherits
+this **and** adds the 3× attenuation of Gap 1 on top.
+
+### Conclusion
+
+es-decode is **strictly dominated**: es-prefill's estimator degraded 3× by the detached-history
+evaluation, at 2–4× the per-step cost (full-rank), and es-prefill itself does not match BP. No setting
+in {rank, N, α, normalisation} closes it, because signal-per-rail is fixed by the clean-KV evaluation.
+To recover the full-history signal the perturbation must propagate through the sequence — which is
+exactly es-prefill (weights held for a whole teacher-forced prefill) or es-token-prefill. **Recommendation:
+use es-prefill for forward-only OPD, BP when backward is affordable; es-decode has no operating niche.**
+The kernels (rank-r fused rail, full-rank packed-bit GEMV, in-graph step) are correct and fast and stay
+available behind `rail_mode=seq`; the negative learning result is a property of the estimator, not the code.

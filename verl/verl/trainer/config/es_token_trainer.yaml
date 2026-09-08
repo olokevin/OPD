@@ -17,6 +17,12 @@ es_token:
   grad_estimate_sample: mean_baseline  # mean_baseline | clean_baseline
   reward_weight_mode: student_iw       # student_iw | student_p | none (DEGENERATE)
   iw_clamp: 10.0
+  loss_impl: sampled                   # sampled (logq at the sampled token, vLLM
+                                       # teacher) | topk (exact top-K truncated CE
+                                       # on the clean rail's top-K ids, HF teacher;
+                                       # no IW / no +1 term)
+  topk_k: 16                           # K for loss_impl=topk
+  teacher_topk_chunk: 512              # HF teacher lm_head position-chunk
   top_p: 1.0                           # 1.0 = historical (no top-p). 0.95 matches
                                        # BP's rollout + every eval (zo_opd.md 12.6)
   use_generation_config_eos: false     # true also stops on 151643 (zo_opd.md 12.6)
@@ -26,9 +32,21 @@ es_token:
   update_clip: null
   assemble_chunk: 1024             # token-records per assembly GEMM chunk
 
+  # es-decode (zo_opd_short.md): ONE perturbation per rail HELD for the whole
+  # step, k1 fitness per rail, es-prefill's OpenAI-ES step (es_update.py)
+  rail_mode: token                 # token (es-token-decode, fresh per token) | seq (es-decode)
+  noise_rank: 1                    # int r (dW = sigma/sqrt(r) sum_k a_k b_k^T) | full (packed-bit +-1 matrix)
+  es_alpha: 1.25e-3                # OpenAI-ES step (z-scored), es-prefill C's value
+  es_antithetic: true              # rail 2i+1 = -rail 2i
+  es_normalize: zscore             # zscore | raw
+  ckpt_keep_last: 2                # HF checkpoints kept (peak-then-revert curves: raise it)
+  es_post_gain_tokens: 0           # seq mode: re-score the first wave's first K tokens after the update (es/post_update_gain); 0 = off
+
   # decode driver (graphed packed; eager only as the parity oracle)
   attn_impl: rows                  # rows | shared | fold (rail-aware kernels, es_profile_results.md)
   lm_head_impl: full               # full | stream
+  rail_impl: kernel                # kernel | fused  (0902: rail op fused into norm/silu/rope, zero launches)
+  step_impl: eager                 # eager | graph   (0902: LM head + sampling + payload + advance inside the CUDA graph)
   use_cuda_graph: true
   pack_width: 4                    # B_pack per wave (KV ceiling, wiki §10.5/§11.3)
   b_pack_buckets: [2, 4]           # fixed CUDA-graph bucket widths

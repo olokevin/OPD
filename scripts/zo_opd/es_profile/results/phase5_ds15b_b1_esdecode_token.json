@@ -1,0 +1,119 @@
+{
+  "gpu": {
+    "name": "NVIDIA H100 NVL",
+    "sms": 132,
+    "total_mem_gb": 93.1,
+    "cc": "9.0",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8",
+    "host": "lambda-scalar",
+    "cuda_visible": "4",
+    "triton": "3.4.0",
+    "vllm": "0.11.0",
+    "nvidia_smi": [
+      "0, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 86258 MiB, 0 %",
+      "1, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 86258 MiB, 0 %",
+      "2, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 2701 MiB, 0 %",
+      "3, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 12251 MiB, 0 %",
+      "4, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 57871 MiB, 0 %",
+      "5, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 2709 MiB, 0 %",
+      "6, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 3499 MiB, 0 %",
+      "7, NVIDIA H100 NVL, 570.207, 1785 MHz, 2619 MHz, 400.00 W, 4 MiB, 0 %"
+    ]
+  },
+  "prompt_len": 512,
+  "t_short": 64,
+  "t_long": 512,
+  "repeats": 2,
+  "tp": 1,
+  "points": [
+    {
+      "B": 1,
+      "N": 0,
+      "path": "seq/stream/fused/graph",
+      "rows": 1,
+      "ms_per_token_step": 2.1783326852268408,
+      "clean_tok_per_s": 459.0667012352454,
+      "row_steps_per_s": 459.0667012352454,
+      "t_short_s": 0.14953500032424927,
+      "t_long_s": 1.1254280433058739
+    },
+    {
+      "B": 1,
+      "N": 1,
+      "path": "seq/stream/fused/graph",
+      "rows": 2,
+      "ms_per_token_step": 2.5869944116233716,
+      "clean_tok_per_s": 386.54896025557605,
+      "row_steps_per_s": 773.0979205111521,
+      "t_short_s": 0.17603945918381214,
+      "t_long_s": 1.3350129555910826
+    },
+    {
+      "B": 1,
+      "N": 4,
+      "path": "seq/stream/fused/graph",
+      "rows": 5,
+      "ms_per_token_step": 2.655470506787034,
+      "clean_tok_per_s": 376.5810983191609,
+      "row_steps_per_s": 1882.9054915958045,
+      "t_short_s": 0.18053939007222652,
+      "t_long_s": 1.3701901771128178
+    },
+    {
+      "B": 1,
+      "N": 8,
+      "path": "seq/stream/fused/graph",
+      "rows": 9,
+      "ms_per_token_step": 2.7000450354535133,
+      "clean_tok_per_s": 370.3641927705976,
+      "row_steps_per_s": 3333.2777349353782,
+      "t_short_s": 0.1862094011157751,
+      "t_long_s": 1.395829576998949
+    },
+    {
+      "B": 1,
+      "N": 16,
+      "path": "seq/stream/fused/graph",
+      "rows": 17,
+      "ms_per_token_step": 2.793777035549283,
+      "clean_tok_per_s": 357.9383706271286,
+      "row_steps_per_s": 6084.952300661187,
+      "t_short_s": 0.19067992828786373,
+      "t_long_s": 1.4422920402139425
+    },
+    {
+      "B": 1,
+      "N": 32,
+      "path": "seq/stream/fused/graph",
+      "rows": 33,
+      "ms_per_token_step": 2.885537438227662,
+      "clean_tok_per_s": 346.55589172123655,
+      "row_steps_per_s": 11436.344426800806,
+      "t_short_s": 0.1948212217539549,
+      "t_long_s": 1.4875419940799475
+    },
+    {
+      "B": 1,
+      "N": 64,
+      "path": "seq/stream/fused/graph",
+      "rows": 65,
+      "ms_per_token_step": 3.001814550121448,
+      "clean_tok_per_s": 333.1318385273141,
+      "row_steps_per_s": 21653.569504275412,
+      "t_short_s": 0.20418883487582207,
+      "t_long_s": 1.5490017533302307
+    },
+    {
+      "B": 1,
+      "N": 128,
+      "path": "seq/stream/fused/graph",
+      "rows": 129,
+      "ms_per_token_step": 3.429071291715705,
+      "clean_tok_per_s": 291.6241497853662,
+      "row_steps_per_s": 37619.51532231224,
+      "t_short_s": 0.22698815166950226,
+      "t_long_s": 1.763212090358138
+    }
+  ]
+}

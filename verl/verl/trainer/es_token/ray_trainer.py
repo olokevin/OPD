@@ -22,7 +22,8 @@ from tqdm import tqdm
 from vllm import SamplingParams
 
 from verl.trainer.es_token.grad_estimator import (rail_scales,
-                                                  sampled_token_losses)
+                                                  sampled_token_losses,
+                                                  topk_rail_losses)
 from verl.trainer.np.ray_trainer import RayNPTrainer
 from verl.utils.tracking import Tracking
 from verl.workers.rollout.vllm_rollout.np_worker_extension import (
@@ -67,6 +68,64 @@ class SampledTokenTeacher:
         return out
 
 
+class TopKTeacherHF:
+    """Eager HF teacher for loss_impl=topk: log q at ARBITRARY per-token id
+    sets (vLLM prompt_logprobs can only return the teacher's own top-k, not
+    the student's clean top-K). One bf16 forward per rollout on the training
+    GPU; lm_head + log_softmax run in position chunks so the [chunk, V] fp32
+    logits stay bounded (~300 MB at chunk=512)."""
+
+    def __init__(self, model_path, temperature, device="cuda", chunk=512):
+        from transformers import AutoModelForCausalLM
+        self.temp = float(temperature)
+        self.chunk = int(chunk)
+        self.device = device
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path, torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2")
+        except Exception as e:
+            print(f"[topk-teacher] flash_attention_2 unavailable ({e}); sdpa")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path, torch_dtype=torch.bfloat16,
+                attn_implementation="sdpa")
+        self.model = self.model.to(device).eval()
+
+    @torch.no_grad()
+    def logq_topk(self, fulls, resp_lens, topk_ids):
+        """fulls[i] = prompt+response ids; topk_ids[i] = [T_i, K] int ids.
+        Returns [tensor [T_i, K] fp32] of teacher logprobs at those ids."""
+        out = []
+        for full, T, kids in zip(fulls, resp_lens, topk_ids):
+            T = int(T)
+            if T == 0:
+                out.append(torch.zeros(0, 0))
+                continue
+            ids = torch.tensor([list(full)], dtype=torch.long,
+                               device=self.device)
+            h = self.model.model(input_ids=ids).last_hidden_state[0]
+            hs = h[-T - 1:-1]                        # predicts fulls[-T:]
+            kid = kids.to(self.device).long()        # [T, K]
+            lq = torch.empty(T, kid.shape[1], dtype=torch.float32)
+            for s in range(0, T, self.chunk):
+                e = min(T, s + self.chunk)
+                lg = self.model.lm_head(hs[s:e]).float()
+                if self.temp != 1.0:
+                    lg = lg / self.temp
+                lsm = lg - torch.logsumexp(lg, dim=-1, keepdim=True)
+                lq[s:e] = lsm.gather(1, kid[s:e]).cpu()
+            out.append(lq)
+        return out
+
+    def logq_wave(self, fulls, resp_lens):
+        """Sampled-token logq (K=1 gather) -- keeps the held-out probe's
+        clean reverse-KL metric identical to the SampledTokenTeacher arms."""
+        kids = [torch.tensor(f[-int(T):], dtype=torch.long).view(-1, 1)
+                if int(T) > 0 else torch.zeros(0, 1, dtype=torch.long)
+                for f, T in zip(fulls, resp_lens)]
+        return [lq[:, 0] for lq in self.logq_topk(fulls, resp_lens, kids)]
+
+
 class RayESTokenTrainer(RayNPTrainer):
     def __init__(self, config: DictConfig, tokenizer, reward_fn,
                  val_reward_fn=None, train_data=None, eval_data=None,
@@ -90,11 +149,14 @@ class RayESTokenTrainer(RayNPTrainer):
         print("Initializing inter-engine NCCL group...")
         self._init_inter_engine_group()
         print("Installing es_token layers on all engines...")
+        self.rail_mode = str(self.es.get("rail_mode", "token"))
+        noise_rank = self.es.get("noise_rank", 1)
+        noise_rank = "full" if str(noise_rank) == "full" else int(noise_rank)
         matched_per_engine = ray.get([
             e.collective_rpc.remote(
                 "install_es_layers",
                 args=(list(self.es.perturb_rules), int(self.es.n_sample),
-                      int(self.es.global_seed)))
+                      int(self.es.global_seed), self.rail_mode, noise_rank))
             for e in self.engines
         ])
         self.matched = list(matched_per_engine[0][0])
@@ -103,11 +165,20 @@ class RayESTokenTrainer(RayNPTrainer):
         teacher_path = self.es.teacher_model_path
         if not teacher_path:
             raise ValueError("es_token requires es_token.teacher_model_path")
-        print(f"Launching teacher engine ({teacher_path})...")
-        self._launch_teacher_engine(teacher_path)
-        self.teacher = SampledTokenTeacher(
-            self.teacher_engine, self.es.teacher_temperature,
-            self.es.get("teacher_batch_size", 16))
+        if str(self.es.get("loss_impl", "sampled")) == "topk":
+            # No vLLM teacher engine: top-K scoring needs logprobs at
+            # arbitrary ids, which prompt_logprobs cannot return. The HF
+            # teacher (~3.5 GB bf16) rides on the freed engine fraction.
+            print(f"Loading HF top-K teacher ({teacher_path})...")
+            self.teacher = TopKTeacherHF(
+                teacher_path, self.es.teacher_temperature,
+                chunk=int(self.es.get("teacher_topk_chunk", 512)))
+        else:
+            print(f"Launching teacher engine ({teacher_path})...")
+            self._launch_teacher_engine(teacher_path)
+            self.teacher = SampledTokenTeacher(
+                self.teacher_engine, self.es.teacher_temperature,
+                self.es.get("teacher_batch_size", 16))
         print("Workers initialized successfully.")
 
     # ---------------------------------------------------------- checkpoint ---
@@ -283,7 +354,30 @@ class RayESTokenTrainer(RayNPTrainer):
             # rail-aware kernels (es_profile_results.md): rows = shipping path
             attn_impl=str(cfg.get("attn_impl", "rows")),
             lm_head_impl=str(cfg.get("lm_head_impl", "full")),
+            rail_impl=str(cfg.get("rail_impl", "kernel")),
+            step_impl=str(cfg.get("step_impl", "eager")),
+            # loss_impl=topk: the worker also returns the clean top-K ids and
+            # per-rail logprobs at them (run_es_decode_packed).
+            topk_k=(int(cfg.get("topk_k", 16))
+                    if str(cfg.get("loss_impl", "sampled")) == "topk" else 0),
+            # es-decode (rail_mode=seq): one held perturbation per rail
+            rail_mode=str(cfg.get("rail_mode", "token")),
+            noise_rank=str(cfg.get("noise_rank", 1)),
         )
+        rail_mode = str(cfg.get("rail_mode", "token"))
+        es_alpha = float(cfg.get("es_alpha", 1.25e-3))
+        es_antithetic = bool(cfg.get("es_antithetic", True))
+        es_normalize = str(cfg.get("es_normalize", "zscore"))
+        if rail_mode == "seq":
+            assert str(cfg.get("loss_impl", "sampled")) == "sampled", "es-decode uses the k1 fitness"
+            assert cfg.sample_method == "bernoulli", "es-decode noise is Rademacher (packed bits)"
+            if es_antithetic:
+                assert int(cfg.n_sample) % 2 == 0, "antithetic es-decode needs an even n_sample"
+        ckpt_keep_last = int(cfg.get("ckpt_keep_last", 2))
+        # es-decode: after the update, re-score the FIRST wave's rollouts (first
+        # es_post_gain_tokens tokens, teacher-forced, clean rail only) to log
+        # F(W_new) - F(W_0) on the batch -- es_update.py's post_update_gain.
+        es_post_gain_tokens = int(cfg.get("es_post_gain_tokens", 0) or 0)
         # A bare SamplingParams leaves _all_stop_token_ids empty, so _np_is_eos
         # falls back to config.json's single eos_token_id and misses 151643
         # (<|endoftext|>, declared only in generation_config.json). Opt-in so the
@@ -310,6 +404,7 @@ class RayESTokenTrainer(RayNPTrainer):
         batch_size = int(cfg.get("batch_size", 1))
         pack_width = int(cfg.get("pack_width", 4))
         n_rails = int(cfg.n_sample)
+        loss_impl = str(cfg.get("loss_impl", "sampled"))
         weight_mode = cfg.get("reward_weight_mode", "student_iw")
         iw_clamp = cfg.get("iw_clamp", 10.0)
         scale_mode = cfg.get("grad_estimate_sample", "mean_baseline")
@@ -327,10 +422,22 @@ class RayESTokenTrainer(RayNPTrainer):
             rollout_ids = _assign_rollout_ids(step, batch_size, 1)
             waves = _pad_waves_to_pack_width(pids, rollout_ids, pack_width)
 
+            # ---- es-decode: draw this step's held rail noise ------------- #
+            if rail_mode == "seq":
+                rng = np.random.default_rng(int(cfg.global_seed) + step)
+                n_eff = max(1, n_rails // 2) if es_antithetic else n_rails
+                seq_seeds = [int(x) for x in rng.integers(0, 2 ** 31 - 1, size=n_eff)]
+                ray.get([e.collective_rpc.remote("es_seq_draw", args=(seq_seeds, es_antithetic))
+                         for e in self.engines])
+
             # ---- Phase 1: graphed packed rail decode --------------------- #
             t_dec0 = time.time()
             roll_pids, roll_rids, roll_toks, roll_payload = [], [], [], []
+            roll_tp, roll_tids = [], []
+            first_wave_n = None
             for wi, (wave_pids, wave_rids, real_count) in enumerate(waves):
+                if wi == 1:
+                    first_wave_n = len(roll_toks)
                 if ES_DEBUG:
                     print(f"[esdbg s{step} wave {wi} real={real_count}] decode",
                           flush=True)
@@ -348,7 +455,12 @@ class RayESTokenTrainer(RayNPTrainer):
                     roll_rids.append(int(wave_rids[i]))
                     roll_toks.append(list(out["clean_tokens"][i]))
                     roll_payload.append(out["payload"][i])
+                    if loss_impl == "topk":
+                        roll_tp.append(out["topk_payload"][i])
+                        roll_tids.append(out["topk_ids"][i])
             decode_s = time.time() - t_dec0
+            if first_wave_n is None:
+                first_wave_n = len(roll_toks)
 
             if not roll_toks:
                 logger.log(data={"train/step_time": time.time() - t0,
@@ -359,8 +471,142 @@ class RayESTokenTrainer(RayNPTrainer):
             t_tch0 = time.time()
             fulls = [list(p) + t for p, t in zip(roll_pids, roll_toks)]
             lens = [len(t) for t in roll_toks]
-            logqs = self.teacher.logq_wave(fulls, lens)
+            if loss_impl == "topk":
+                logqs = self.teacher.logq_topk(fulls, lens, roll_tids)
+            else:
+                logqs = self.teacher.logq_wave(fulls, lens)
             teacher_s = time.time() - t_tch0
+
+            # ---- es-decode: k1 fitness per rail -> OpenAI-ES step --------- #
+            if rail_mode == "seq":
+                t_asm0 = time.time()
+                num = torch.zeros(n_rails, dtype=torch.float64)
+                den = 0
+                clean_means = []
+                for payload, logq in zip(roll_payload, logqs):
+                    lp = payload.double()                      # [T, 1+N]
+                    lq = logq.double()
+                    A = lq - lp[:, 0]                          # k1 advantage (frozen)
+                    dlp = lp[:, 1:] - lp[:, :1]                # delta log pi_n(y_t)
+                    num += (A[:, None] * dlp).sum(0)
+                    den += lp.shape[0]
+                    clean_means.append(float((lp[:, 0] - lq).mean()))
+                F = (num / max(den, 1)).numpy()                # [N] F(W+sigma eps_n) - F(W)
+                if not np.all(np.isfinite(F)):
+                    bad = [int(i) for i in np.nonzero(~np.isfinite(F))[0]]
+                    print(f"[es-decode] step {step}: non-finite fitness on rails {bad} -> "
+                          f"zeroing those rails' pairs (no NaN reaches the weights)", flush=True)
+                    F = np.where(np.isfinite(F), F, 0.0)
+                    if es_antithetic:
+                        for i in bad:
+                            F[i ^ 1] = 0.0
+                if es_antithetic:
+                    fp_, fm_ = F[0::2], F[1::2]
+                    d = 0.5 * (fp_ - fm_)
+                    n_eff = len(d)
+                    scale = float(np.sqrt(np.mean(d ** 2))) if n_eff > 1 else max(abs(float(d[0])), 1e-12)
+                else:
+                    fp_, fm_ = F, np.full_like(F, float(F.mean()))
+                    d = F - F.mean()
+                    n_eff = len(d)
+                    scale = float(d.std()) + 1e-12
+                if es_normalize == "zscore":
+                    coef_eff = (es_alpha / n_eff) * d / (scale + 1e-12)
+                elif es_normalize == "raw":
+                    coef_eff = es_alpha * d / (n_eff * float(cfg.sigma))
+                else:
+                    raise ValueError(f"unknown es_normalize={es_normalize!r}")
+                if es_antithetic:   # rail 2i = +eps_i, rail 2i+1 = -eps_i
+                    coeffs = np.zeros(n_rails)
+                    coeffs[0::2] = coef_eff
+                else:
+                    coeffs = coef_eff
+                _res = ray.get(self.engines[0].collective_rpc.remote(
+                    "es_seq_apply", args=([float(c) for c in coeffs], es_cfg)))[0]
+                for ln in self.matched:
+                    ray.get([e.collective_rpc.remote("broadcast_layer_weights", args=(ln, 0))
+                             for e in self.engines])
+                assemble_s = time.time() - t_asm0
+                post_gain = float("nan")
+                if es_post_gain_tokens > 0 and first_wave_n > 0:
+                    t_pg0 = time.time()
+                    npg = first_wave_n
+                    force = [list(roll_toks[j][:es_post_gain_tokens]) for j in range(npg)]
+                    cfg_pg = dict(es_cfg, n_sample=0, max_tokens=es_post_gain_tokens,
+                                  force_tokens=force, b_pack_buckets=[npg])
+                    out_pg = ray.get(self.engines[0].collective_rpc.remote(
+                        "run_es_decode_packed",
+                        args=(roll_pids[:npg], sp, cfg_pg, roll_rids[:npg], use_graph)))[0]
+                    num_pg, den_pg = 0.0, 0
+                    for j in range(npg):
+                        Tj = min(len(out_pg["clean_tokens"][j]), len(force[j]))
+                        if Tj == 0:
+                            continue
+                        lp_new = out_pg["payload"][j][:Tj, 0].double()
+                        lp0 = roll_payload[j][:Tj, 0].double()
+                        A = logqs[j][:Tj].double() - lp0
+                        num_pg += float((A * (lp_new - lp0)).sum())
+                        den_pg += Tj
+                    post_gain = num_pg / max(den_pg, 1)
+                    assemble_s += time.time() - t_pg0
+                upd_rms = float(np.sqrt(np.sum(coef_eff ** 2)))
+                rms_w = float(_res["rms_w"])
+                self._es_cum_sq = getattr(self, "_es_cum_sq", 0.0) + upd_rms ** 2
+                step_time = time.time() - t0
+                metrics = {
+                    "train/step_time": step_time,
+                    "train/decode_s": decode_s,
+                    "train/teacher_s": teacher_s,
+                    "train/assemble_s": assemble_s,
+                    "train/n_token_records": int(den),
+                    "train/L_clean_mean": float(np.mean(clean_means)),
+                    "train/dW_norm_max": float(max(_res["norms"].values())),
+                    "train/dW_norm_mean": float(np.mean(list(_res["norms"].values()))),
+                    "train/update_footprint": upd_rms / rms_w,
+                    "es/post_update_gain": post_gain,      # F(W_new)-F(W_0), first wave, >0 = ascent
+                    "es/cum_footprint": float(np.sqrt(self._es_cum_sq)) / rms_w,
+                    "es/fitness_plus_mean": float(fp_.mean()),
+                    "es/fitness_minus_mean": float(fm_.mean()),
+                    "es/d_mean": float(d.mean()),
+                    "es/d_std": scale,
+                    "es/d_snr": float(abs(d.mean()) / (scale + 1e-12)),
+                    "es/update_rms": upd_rms,
+                    "es/update_rms_measured": float(_res["update_rms_measured"]),
+                    "es/update_footprint": upd_rms / rms_w,
+                    "es/probe_footprint": float(cfg.sigma) / rms_w,
+                    "es/n_rails": n_rails,
+                    "es/sigma": float(cfg.sigma),
+                    "es/alpha": es_alpha,
+                    "training/global_step": step,
+                }
+                logger.log(data=metrics, step=step)
+                progress.set_postfix({
+                    "fp": f"{metrics['train/update_footprint']:.2e}",
+                    "cum": f"{metrics['es/cum_footprint']:.3f}",
+                    "snr": f"{metrics['es/d_snr']:.2f}",
+                    "L_clean": f"{metrics['train/L_clean_mean']:.3f}",
+                    "dec": f"{decode_s:.1f}s", "tch": f"{teacher_s:.1f}s", "asm": f"{assemble_s:.1f}s",
+                }, refresh=False)
+                if save_freq and (step > 0 and step % save_freq == 0
+                                  or step == num_iterations - 1):
+                    try:
+                        self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
+                    except Exception as e:
+                        print(f"[es ckpt] save failed at step {step}: {e}")
+                if eval_interval and (step % eval_interval == 0
+                                      or step == num_iterations - 1):
+                    eval_metrics = self._evaluate_model(
+                        self.engines[0], self.eval_data, step, logger)
+                    if eval_metrics:
+                        logger.log(data=eval_metrics, step=step)
+                    hk = self._heldout_clean_loss(heldout_pids, probe_sp, es_cfg)
+                    if hk is not None:
+                        logger.log(data={"eval/heldout_clean_loss": hk}, step=step)
+                        print(f"[Probe @ step {step}] heldout_clean_loss={hk:.4f} "
+                              f"(fixed {len(heldout_pids)} prompts; lower=better)")
+                gc.collect()
+                torch.cuda.empty_cache()
+                continue
 
             # ---- Phase 3: losses -> scales -> assemble+apply ------------- #
             t_asm0 = time.time()
@@ -368,9 +614,23 @@ class RayESTokenTrainer(RayNPTrainer):
             rec_t: List[int] = []
             rec_scales: List[torch.Tensor] = []
             clean_means: List[float] = []
-            for rid, payload, logq in zip(roll_rids, roll_payload, logqs):
-                losses, clean = sampled_token_losses(
-                    payload, logq, weight_mode, iw_clamp)
+            for ri, (rid, payload, logq) in enumerate(
+                    zip(roll_rids, roll_payload, logqs)):
+                if loss_impl == "topk":
+                    if ES_DEBUG and ri == 0:
+                        # gate: where the sampled token IS in the K set, the
+                        # clean rail's K-gather must equal payload col 0.
+                        _hit = (roll_tids[ri].long()
+                                == torch.tensor(roll_toks[ri])[:, None])
+                        if _hit.any():
+                            _err = (roll_tp[ri][:, 0, :][_hit]
+                                    - payload[:, 0][_hit.any(1)]).abs().max()
+                            print(f"[esdbg topk] clean-token K-gather "
+                                  f"max|d|={float(_err):.3e}", flush=True)
+                    losses, clean = topk_rail_losses(roll_tp[ri], logq)
+                else:
+                    losses, clean = sampled_token_losses(
+                        payload, logq, weight_mode, iw_clamp)
                 # RAW rail differences; the 1/sigma_l is applied per layer in
                 # the worker assemble (sigma_mode=relative stays unbiased).
                 sc = rail_scales(losses, clean, 1.0, scale_mode)   # [T, N]
@@ -455,7 +715,7 @@ class RayESTokenTrainer(RayNPTrainer):
             if save_freq and (step > 0 and step % save_freq == 0
                               or step == num_iterations - 1):
                 try:
-                    self._save_hf_checkpoint(step, logging_dir)
+                    self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
                 except Exception as e:
                     print(f"[es ckpt] save failed at step {step}: {e}")
 

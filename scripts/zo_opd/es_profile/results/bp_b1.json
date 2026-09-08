@@ -1,0 +1,6 @@
+{"note": "BP-OPD (verl PPO token_reward_direct) batch 1, max_response 512 (clipped), greedy, Qwen3-1.7B student + Qwen3-4B teacher on one H100 NVL; run_bp_b1.sh, log logs/es_b1/bp_b1_20260902_154610.log; steady = mean of steps 2-3, cold = step 1",
+ "step_s": 8.19, "gen_s": 4.79, "reward_s": 2.81, "log_prob_s": 2.37, "update_actor_s": 0.585,
+ "cold_step_s": 35.13, "cold_gen_s": 8.78, "cold_reward_s": 25.61,
+ "steps": {"1": {"step": 35.126, "gen": 8.781, "reward": 25.610, "log_prob": 3.437, "update": 0.725},
+           "2": {"step": 8.396, "gen": 4.934, "reward": 2.866, "log_prob": 2.424, "update": 0.584},
+           "3": {"step": 7.992, "gen": 4.656, "reward": 2.745, "log_prob": 2.308, "update": 0.586}}}
