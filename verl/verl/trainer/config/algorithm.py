@@ -366,3 +366,5 @@ class AlgoConfig(BaseConfig):
     es_normalize: str = "zscore"  # "zscore" (OpenAI-ES) | "raw" (alpha * unbiased gradient estimate)
     es_antithetic: bool = True    # False = plain random sampling, mean baseline (1 eval/rail)
     es_seed: int = 1234
+    es_perturb_set: str = "all"   # "all" = every trainable tensor | "layers" = tensors whose name
+                                  # contains ".layers." (decoder blocks only: no embed/lm_head/final norm)

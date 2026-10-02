@@ -125,8 +125,10 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.use_generation_config_eos=${ES_EOS_FROM_GENCFG} \
     es_token.max_prompt_length=${MAX_PROMPT_LENGTH} \
     es_token.num_engines=${NUM_ENGINES} \
-    es_token.num_iterations=${NUM_ITERATIONS} \
+    es_token.num_iterations=${NUM_ITERATIONS} es_token.start_step=${ES_START_STEP:-0} \
     es_token.eval_interval=${EVAL_INTERVAL} \
+    es_token.eval_n=${ES_EVAL_N:-1} es_token.eval_temperature=${ES_EVAL_TEMPERATURE:-0.0} \
+    es_token.eval_top_p=${ES_EVAL_TOP_P:-1.0} es_token.eval_max_tokens=${ES_EVAL_MAX_TOKENS:-null} \
     es_token.heldout_probe_size=${HELDOUT_PROBE_SIZE} \
     es_token.gpu_fraction=${GPU_FRACTION} \
     es_token.distributed_executor_backend=${EXEC_BACKEND} \

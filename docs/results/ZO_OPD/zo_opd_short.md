@@ -5,6 +5,103 @@
 > Student `Qwen/Qwen3-1.7B` (non-thinking) ← teacher `Keven16/Qwen3-4B-Non-Thinking-RL-Math-Step500`,
 > DAPO-Math-17k, MATH-500 greedy n=1 as the ruler (**base = 73.60 ± 1.97**).
 
+## 2026-09-07 (evening) — aligned pair running: es-prefill vs es-decode (rank-1), standing ES setting
+
+> The setting audit ([zo_opd.md § "2026-09-07 BP es-prefill and es-decode setting audit"](zo_opd.md))
+> found the earlier es-prefill-vs-es-decode comparison confounded (all-params vs linears-only probe,
+> 16×4 vs 64×1 prompts, top-p 1 vs 0.95). This pair removes every difference except *where the rail is
+> evaluated*. Full hyper-parameter table and running results:
+> [zo_opd.md § "2026-09-07 aligned pair"](zo_opd.md). Launcher `scripts/zo_opd/ds15b/aligned_es_pair.sh`.
+
+**Standing ES setting (all future ES runs, CLAUDE.md):** 64 prompts / step (one rollout each), **N=32
+perturbations, non-antithetic**, σ=1e-3, α=1.25e-3 z-scored, 7168 tokens, **T=0 / top-p 1.0 for the
+training rollout and the eval (greedy n=1)**, decoder blocks only (es-prefill `es_perturb_set=layers`,
+1.31 B elements = es_token's linears), 280 steps (1 epoch), in-run MATH-500 + AIME24 greedy pass@1 every
+20 steps, wandb `es_opd_JustRL_1p5b`. Runs: `ds15b_es-prefill_layers_T0_b64n1_N32rand_sig1e-3_a1.25e-3`
+(GPU 6), `ds15b_es-decode_r1_T0_b64n1_N32rand_sig1e-3_a1.25e-3` (GPU 7), launched 2026-09-07 22:10.
+BP reference = the 2026-08-31 run (64 × 4 prompts, all params, Adam 1e-6; its evals are n=2 @ T=0.6:
+MATH-500 0.751 → 0.859 @120 / 0.861 @180, AIME24 0.15 → 0.40 @180 — a greedy re-score of its final
+checkpoint is needed for a like-for-like number).
+
+**Results (greedy pass@1, MATH-500 / AIME24; both runs complete 2026-09-12; full tables in zo_opd.md):**
+
+| arm | `es/d_std` steps 1–10 | peak MATH-500 (step) | final | gain vs own base, peak / final |
+|---|---|---|---|---|
+| es-prefill | **1.23e-3** | **0.808** (140) | 0.784 @260 | **+13.8 / +11.4 pp** |
+| es-decode r1 | 0.40e-3 | 0.740 (120) | 0.674 @279 (common ruler 0.686) | +9.2 / +2.6 pp |
+| BP @220 (T=1.0-trained, greedy re-score) | — | — | 0.678 | +0.8 pp |
+
+**Key reads.** (1) With every setting matched, the clean-KV decode rail carries **⅓ of the prefill
+rail's signal** (3.0× at T=0) and its accuracy curve peaks earlier and reverts to base by the end —
+the 09-07 verdict holds without the confounds; es-decode has no niche. (2) es-prefill beating BP here
+is the greedy protocol, not the method: BP's T=1.0-trained policy loops under greedy decoding (36 %
+capped, 0.678), and on the sampled ruler BP 0.859 > es-prefill 0.829 still stands; a like-for-like
+greedy reference needs BP trained at T=0. (3) The greedy gains are mostly "stop looping" (MATH-500
+cap-hit 0.31 → 0.17). Both runs crashed once (Ray logs filled the root disk, 2026-09-08) and were
+resumed; es-prefill's peak checkpoint was pruned (keep=1), its score is the in-run eval, which the
+common ruler reproduces exactly at step 260.
+
+## 2026-09-07 — es-decode (the `es_token` trainer with held rails): search done, closed out
+
+> "es-token" runs = the `es_token` trainer. Two modes: **es-token-decode** (fresh rank-1 noise every
+> token, 0831–0903) and **es-decode** (one noise per rail, held for the whole rollout, 0905–0907,
+> `rail_mode=seq`). Both score rails on the clean rollout's KV. Detail and raw numbers:
+> [es_profile_results.md](es_profile_results.md) §15–16.
+
+**Setting (all arms).** R1-Distill-1.5B ← JustRL-1.5B, DAPO-Math, 64 prompts/step, N=32 rails
+(16 antithetic pairs), σ=1e-3, 7168 tokens, k1 fitness, es-prefill's update rule, one GPU.
+~330 s/step rank-1, ~1340 s full-rank. Ruler: MATH-500 n=2 @ T=0.6 (base 0.751).
+
+**What was swept.** Step size (α 1.25e-3 z-scored; 2.8e-3 raw/adaptive), rails (N 32 → 128),
+perturbation shape (rank-1 → full matrix). One real bug fixed on the way: a fused-kernel
+out-of-range read that NaN'd the last rail.
+
+**Results.**
+
+| arm | @10 | @20 | @30 | @39 | peak |
+|---|---:|---:|---:|---:|---:|
+| es-decode rank-1, α 1.25e-3 | 0.773 | **0.786** | 0.785 | 0.772 | +3.5 pp |
+| es-decode rank-1, raw α 2.8e-3 | 0.762 | 0.776 | 0.770 | 0.775 | +2.5 pp |
+| es-decode rank-1, N=128 | 0.770 | stopped @12 | | | — |
+| es-decode full-rank | | 0.779 | | | +2.8 pp |
+| es-prefill C (ref) | | 0.803 | | 0.815 | **0.829 @60** |
+| BP (ref) | | 0.823 | | 0.843 | **0.859 @120** |
+
+Every arm learns a little, peaks by step 20–30, then turns over at ~5 % cumulative weight
+displacement. None gets near es-prefill; none gets near BP.
+
+**Why (measured, not guessed).** The held rail rides the *clean* KV, so its perturbation only
+changes the current token — it never sees its own effect on the history. That shows up directly
+in the ES signal: the per-rail fitness spread `es/d_std` is **0.5e-3 for every es-decode arm vs
+1.5e-3 for es-prefill** at the same σ — a 3× weaker signal. z-scoring then spends the same
+displacement budget on it, so ~⅔ of each step is random walk. The 3× is **the same for rank-1
+and full-rank, N=32 and N=128, and both step rules** — no knob touches it, because it is set by
+*where* the rail is evaluated, not *how* it is perturbed.
+
+> **Caveat (2026-09-07 audit, [zo_opd.md § "2026-09-07 BP es-prefill and es-decode setting audit"](zo_opd.md)):**
+> the two trainers share the loss and step rule exactly, but es-prefill perturbs *all* 1.78 B params
+> (embed + untied lm_head included; relative step 6.0e-3 vs es-decode's 7.8e-3 at the same α) and
+> batches 16 prompts × n=4 vs es-decode's 64 × n=1, and trains at top_p=1 vs 0.95. The first two
+> inflate `d_std` independently of the clean-KV effect, so the 3× is an upper bound on it until the
+> control run in that page is done.
+
+**es-prefill vs es-token, in one table.**
+
+| | es-prefill | es-token-decode | es-decode |
+|---|---|---|---|
+| noise | 1 per rail, held; scored by a full prefill | fresh per token; rails on clean KV | 1 per rail, held; rails on clean KV |
+| signal per rail (`d_std` @ σ 1e-3) | **1.5e-3** | per-token, not the same scalar | 0.5e-3 (⅓) |
+| cost / seq @ N=32 | 5.0 s | 8.7 s (fused) | ~5 s rank-1, ~21 s full |
+| headroom before the random walk bites | climbs to ~9–10 % | reverts at 4–5 % | reverts at ~5 % |
+| ruler peak | **0.829 @60** | 0.803 @60 | 0.786 @20 |
+
+**Bottom line.** es-prefill strictly dominates both es_token modes: more signal per rail, same or
+lower cost, more headroom. The only way to get the full-history signal is to let the perturbation
+propagate through the sequence — which *is* es-prefill. And es-prefill itself stays ~3 pp under
+BP (the forward-only budget limit, 2026-09-01). Use es-prefill for forward-only OPD, BP when
+backward is affordable. The es_token kernels (shared-KV attention, streaming LM head, fused rail
+ops, packed-bit GEMV) are correct and fast and stay behind `rail_mode=seq`.
+
 ## 2026-09-03 — es-token-decode: fused Qwen2 kernels + the exact top-K loss arm
 
 Two moves to give es-token-decode its best shot before closing it out:
@@ -102,6 +199,8 @@ scored by one teacher-forced prefill; 64 seqs/step, no backward). Arms: N=32 α=
 | BP | 0.859–0.861 | steps 120–180 | flat, completed-answer accuracy rises 0.948 → 0.967 |
 | es-prefill C | 0.829 | step 60 | plateau 0.80–0.83, quality −2 to −3 pp |
 | es-prefill A / B / D′ | 0.804–0.815 | 40–100 | same plateau; D′ (N=8) collapses by 40 |
+| es-token-decode | 0.803 | step 60 | greedy peaks then reverts; dominated by es-prefill on cost too (2026-09-03) |
+| es-decode rank-1 / full-rank | 0.786 / 0.779 | step 20 | turns over by ~39; rail signal 3× weaker than es-prefill's (2026-09-07) |
 
 **At a 16k cap (truncation removed): BP +6.0 pp MATH-500 / +23 pp AIME24 over base; every ES arm
 ≤ +1.8 pp (inside noise).** Decomposition: at 7168 both methods' gains are truncation reductions —
@@ -173,7 +272,7 @@ Detached-history estimate; fresh-per-token noise multiplies *targets* not probes
 information is N scalars per step, same as es-prefill (zo_opd.md §12.5).
 
 **es-decode** (implemented 2026-09-05: `es_token` trainer with `rail_mode=seq`, kernels in
-`rail_seq_kernels.py`; arms running on GPU 7, wandb `ds15b_es-decode_{full,r1}_N32_sig1e-3_a1.25e-3`):
+`rail_seq_kernels.py`; arms run 2026-09-05→07 on GPU 7, stopped; wandb `ds15b_es-decode_*`):
 line 5's held `ε(s_n)` per rail, but evaluated by decode rails on the clean KV instead of a prefill —
 the same estimator as es-prefill, measured with the detached-history error.
 
@@ -192,7 +291,17 @@ rails; full-rank adds the bit traffic + unpack, ≈ N × 0.16 GB per token.
 
 **Verdict (2026-09-07, es_profile_results.md §16): es-decode does NOT match es-prefill or BP, and is
 strictly dominated.** Standard ruler MATH-500 (base 0.751): es-decode peaks **0.786** (r1, +3.5 pp)
-vs es-prefill C **0.829** (+7.8) vs BP **0.859** (+9.5). Mechanism, measured in-run: the held rail
+vs es-prefill C **0.829** (+7.8) vs BP **0.859** (+9.5):
+
+| arm (std ruler MATH-500) | @10 | @20 | @30 | @39 | peak |
+| --- | --- | --- | --- | --- | --- |
+| es-decode r1 zscore α1.25e-3 | 0.773 | **0.786** | 0.785 | 0.772 | +3.5 pp |
+| es-decode r1 raw α2.8e-3 | 0.762 | 0.776 | 0.770 | 0.775 | +2.5 pp |
+| es-decode r1 N=128 α1.25e-3 | 0.770 | stopped @12 | | | — |
+| es-decode full-rank | | 0.779 | | | +2.8 pp |
+| es-prefill C / BP | | 0.803 / 0.823 | | 0.815 / 0.843 | 0.829 @60 / 0.859 @120 |
+
+Mechanism, measured in-run: the held rail
 attends the CLEAN KV, so its per-rail k1 fitness spread `es/d_std` is **~0.5e-3 vs es-prefill's
 ~1.5e-3 (3×) at the same σ** — the detached-history rail carries ⅓ the coherent gradient; z-scoring
 spends the same displacement budget for it, so ⅔ is random walk. The 3× gap is **independent of

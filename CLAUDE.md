@@ -39,7 +39,7 @@ The two training frameworks use **different conda envs** (`verl` py3.12 vs `sft`
 - **Query** — to answer a question about this project, read `docs/index.md` first to locate relevant pages, drill into them, then synthesize with citations to `docs/...` paths. **File substantial answers back** as a new/updated page (a comparison, an analysis, a discovered connection) so explorations compound instead of vanishing into chat history.
 - **Lint** — when asked to health-check, scan for contradictions between pages, stale claims newer results superseded, orphan pages with no inbound links, concepts that deserve their own page, and missing cross-references; report findings and propose fixes.
 
-**Conventions:** start each page with an H1 and a one-line/blockquote summary; prefer relative links between docs (`results/zo_opd.md`); keep `docs/index.md` and `docs/log.md` in sync with every change; convert relative dates to absolute (today is in the session context). The wiki is just a git repo of markdown — commit doc changes alongside the work they describe.
+**Conventions:** **do not create a new page for a query answer or an audit — record it as a dated section in the existing page it belongs to** (results pages for findings, wiki pages for design), and only create a page when the user asks for one; start each page with an H1 and a one-line/blockquote summary; prefer relative links between docs (`results/zo_opd.md`); keep `docs/index.md` and `docs/log.md` in sync with every change; convert relative dates to absolute (today is in the session context). The wiki is just a git repo of markdown — commit doc changes alongside the work they describe.
 
 This knowledge base and the auto-memory at `~/.claude/.../memory/` are complementary: **memory** holds short cross-session facts/preferences/gotchas; the **wiki** holds the durable, interlinked project knowledge. When a memory and a wiki page overlap, the wiki page is the fuller source — point the memory at it.
 
@@ -164,6 +164,10 @@ Key OPD knobs (full table in `README.md`):
 
 The teacher model is wired through verl's `reward_model.*` config — i.e. the "reward model" slot is repurposed to hold the **teacher LLM**, not a scalar RM. `reward_model.model.path=$REWARD_MODEL_PATH` in the launch scripts.
 
+## ZO-OPD (ES / es_token) experiment defaults
+
+Standing settings for every future forward-only (ES) run on the ds15b pair, set 2026-09-07: **64 prompts per step (one rollout each), N=32 perturbations, non-antithetic (plain random draws, mean baseline)**, σ=1e-3, α=1.25e-3 z-scored, 7168 response tokens, **T=0 / top-p 1.0 for both the training rollout and the eval (greedy, n=1)**, in-run eval MATH-500 + AIME24 every 20 steps, wandb project `es_opd_JustRL_1p5b`. Launcher: `scripts/zo_opd/ds15b/aligned_es_pair.sh` (`ARM=prefill|decode`). Record the full hyper-parameter table of any new run in `docs/results/ZO_OPD/zo_opd.md`.
+
 ## Data layout
 
 - `datasets/*.parquet` — training datasets in verl's expected parquet format (DAPO-Math-17k, DeepMath-103K-deduped, OpenThoughts3 OPD slice).
@@ -246,9 +250,11 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-### 5. Be concise, easy-language when writing the doc
+## 5. Be concise, easy-language when writing the doc
 
 When composing the doc, always only expose the key analysis and implementation/fix guidelines, with results (prefer a table) and key reads, next steps. Details go to a separate reference section at the end of the doc, and in the body text only point to them for future reference. Use easy and clean languages.
+
+## 6. Record the wandb run link, and exp result logs/jsons, and attach to each run in the doc.
 
 ---
 

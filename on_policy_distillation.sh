@@ -14,6 +14,16 @@
 
 set -x
 
+# Own the local Ray cluster for the entire launch, including startup failures.
+# The supervisor adopts detached Ray services and cleans only its descendants.
+# RAY_EXTERNAL clusters belong to their caller and must not be torn down here.
+if [ "${RAY_EXTERNAL:-0}" != "1" ] && [ "${OPD_RAY_SUPERVISOR_PID:-}" != "$PPID" ]; then
+    if [ -z "${SLURM_JOB_ID:-}" ] && [ "${OPD_SYSTEMD:-1}" != "0" ]; then
+        exec python3 "$(dirname "$(realpath "$0")")/scripts/opd/run_systemd.py" bash "$0" "$@"
+    fi
+    exec python3 "$(dirname "$(realpath "$0")")/scripts/opd/run_with_ray_cleanup.py" bash "$0" "$@"
+fi
+
 # Configure logging when running outside SBATCH.
 if [ -z "$SLURM_JOB_ID" ]; then
     # Create the log directory and file for local runs.
@@ -31,18 +41,14 @@ fi
 # Make compress/ package importable when PEFT_MODE=blocktt|svd is enabled.
 export PYTHONPATH="$(dirname "$(realpath "$0")")/src${PYTHONPATH:+:$PYTHONPATH}"
 
-# Ray isolation. When RAY_ISOLATE=1 (set by the per-GPU LR-search runner so
-# multiple single-GPU runs can coexist on one box), start a private Ray head on
-# a per-run port + temp dir and DO NOT global-`ray stop --force` (which would
-# tear down sibling runs). Otherwise keep the original single-run behavior.
+# Ray isolation selects a per-GPU port for concurrent runs. Every local head
+# has a private temp directory and is owned by the supervisor above; never use
+# host-wide `ray stop --force`, which would tear down sibling runs.
 export RAY_ISOLATE=${RAY_ISOLATE:-0}
 # RAY_EXTERNAL=1: a Ray cluster was already started outside this script (e.g. a
 # multi-node head+worker bootstrap) and RAY_ADDRESS points at it. Do not stop it
 # and do not start a new head — just let the python driver attach via RAY_ADDRESS.
 export RAY_EXTERNAL=${RAY_EXTERNAL:-0}
-if [ "$RAY_ISOLATE" != "1" ] && [ "$RAY_EXTERNAL" != "1" ]; then
-    ray stop --force
-fi
 export RAY_memory_usage_threshold=0.99
 # Disable Ray's worker-OOM memory monitor. On this box (cgroup v2) the monitor
 # misreads usage — "Got negative used memory for cgroup -1" — and SIGKILLs the
@@ -218,24 +224,21 @@ if [ "$RAY_EXTERNAL" = "1" ]; then
     # Multi-node: the cluster (head + workers) was started outside this script and
     # RAY_ADDRESS already points at the head. Just attach the python driver to it.
     echo "RAY_EXTERNAL=1: attaching driver to pre-started cluster RAY_ADDRESS=${RAY_ADDRESS}"
-elif [ "$RAY_ISOLATE" = "1" ]; then
-    # Per-run private Ray head so concurrent single-GPU runs don't collide:
-    # unique port + a FRESH temp dir per run keyed to the GPU id. CUDA_VISIBLE_
-    # DEVICES already confines each run to its own GPU, so no node-ip tricks are
-    # needed. Wipe the temp dir first so a stale session from a prior run can't
-    # trigger Ray's "Session name does not match persisted value" assertion.
+else
     _gpu0=${CUDA_VISIBLE_DEVICES%%,*}
-    export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
-    export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/ray_opd_gpu${_gpu0:-0}}
-    rm -rf "$RAY_TMPDIR"; mkdir -p "$RAY_TMPDIR"
+    if [ "$RAY_ISOLATE" = "1" ]; then
+        export RAY_PORT=${RAY_PORT:-$((6379 + ${_gpu0:-0} * 100 + 21))}
+    else
+        export RAY_PORT=${RAY_PORT:-6379}
+    fi
+    # RAY_TMPDIR was freshly allocated by the supervisor. Never erase a
+    # previous session here: it could still belong to a running job.
     # Start the head FRESH (RAY_ADDRESS unset so `ray start` never tries to
     # attach to a sibling cluster), then point the python driver at it.
     unset RAY_ADDRESS
     ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TMPDIR" \
-        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE"
+        --dashboard-host=127.0.0.1 --num-gpus="$N_GPUS_PER_NODE" || exit $?
     export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
-else
-    ray start --head
 fi
 sleep 5
 
@@ -432,6 +435,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.is_plot=$IS_PLOT \
     $PEFT_ARGS \
     $EXTRA_HYDRA_ARGS
+TRAIN_EXIT_CODE=$?
 
 # Log the end time for local runs.
 if [ -z "$SLURM_JOB_ID" ]; then
@@ -439,3 +443,4 @@ if [ -z "$SLURM_JOB_ID" ]; then
     echo "End time: $(date)"
     echo "=========================================="
 fi
+exit "$TRAIN_EXIT_CODE"

@@ -990,32 +990,51 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=checkpoint_contents,
             )
 
+    def _es_logprob_temperature(self):
+        """Temperature for teacher-forced log-probs. Greedy rollouts (rollout.temperature=0) have
+        no sampling temperature; their log-probs are the raw-logit ones (T=1) -- dividing logits by
+        0 would NaN every log-prob (2026-09-07, aligned pair at T=0)."""
+        t = float(self.config.rollout.temperature)
+        return t if t > 0 else 1.0
+
     # ---- forward-only ES update (see verl/trainer/ppo/es_update.py) ----
-    def _es_params(self):
-        """Parameters the ES rails perturb: the TRAINABLE ones.
+    def _es_params(self, perturb_set: str = "all"):
+        """Parameters the ES rails perturb: the TRAINABLE ones, optionally restricted.
 
         Under full fine-tuning that is every parameter (unchanged behaviour).  Under LoRA /
         PEFT the base weights are frozen, so perturbing them would probe directions the update
         can never move -- and would blow up the random-walk displacement for nothing.  The same
         enumeration is used by es_perturb_weights and es_apply_update, so `pidx` (which seeds
         the noise) stays consistent between probing and applying.
+
+        perturb_set="layers" keeps only tensors whose name contains ".layers." -- the decoder
+        blocks (under FSDP1 flat params that is one flat tensor per wrapped decoder layer:
+        its linears + norms + biases), excluding embed_tokens / lm_head / the final norm.  This
+        is the set the es_token trainer perturbs, for the es-prefill vs es-decode control
+        (docs/results/ZO_OPD/zo_opd.md, 2026-09-07 setting audit).
         """
-        params = [p for p in self.actor_module_fsdp.parameters() if p.requires_grad]
+        named = [(n, p) for n, p in self.actor_module_fsdp.named_parameters() if p.requires_grad]
+        if perturb_set == "layers":
+            named = [(n, p) for n, p in named if ".layers." in n]
+        elif perturb_set != "all":
+            raise ValueError(f"unknown es_perturb_set={perturb_set!r} (all | layers)")
+        params = [p for _, p in named]
         if not getattr(self, "_es_params_logged", False):
             n_all = sum(1 for _ in self.actor_module_fsdp.parameters())
             print(f"[ES] perturbing {len(params)}/{n_all} tensors "
-                  f"({sum(p.numel() for p in params):,} local elements, trainable only)")
+                  f"({sum(p.numel() for p in params):,} local elements, set={perturb_set}); "
+                  f"first={named[0][0] if named else None} last={named[-1][0] if named else None}")
             self._es_params_logged = True
         return params
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def es_perturb_weights(self, seed: int, scale: float):
+    def es_perturb_weights(self, seed: int, scale: float, perturb_set: str = "all"):
         """W += scale * eps(seed) on every trainable actor parameter (in place, fp32 master)."""
         assert self._is_actor
         assert not self._is_offload_param, "algorithm.es_update needs actor.fsdp_config.param_offload=False"
         rank = torch.distributed.get_rank()
         with torch.no_grad():
-            for pidx, p in enumerate(self._es_params()):
+            for pidx, p in enumerate(self._es_params(perturb_set)):
                 flat = _es_local_flat(p)
                 for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
                     flat[start:start + noise.numel()].add_(noise, alpha=float(scale))
@@ -1023,14 +1042,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return True
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def es_apply_update(self, seeds, coeffs):
+    def es_apply_update(self, seeds, coeffs, perturb_set: str = "all"):
         """W += sum_i coeffs[i] * eps(seeds[i]).  Returns {rms_w} for footprint metrics."""
         assert self._is_actor
         assert not self._is_offload_param, "algorithm.es_update needs actor.fsdp_config.param_offload=False"
         rank = torch.distributed.get_rank()
         sq, n = 0.0, 0
         with torch.no_grad():
-            for pidx, p in enumerate(self._es_params()):
+            for pidx, p in enumerate(self._es_params(perturb_set)):
                 flat = _es_local_flat(p)
                 for seed, c in zip(seeds, coeffs):
                     for start, noise in _es_noise_chunks(flat, seed, pidx, rank):
@@ -1152,7 +1171,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = self._es_logprob_temperature()
         data.meta_info["top_k"] = self.config.rollout.get("log_prob_top_k", 0)
         # data.meta_info["top_p"] = 1.0
         # print("log_prob_top_k", data.meta_info["top_k"])
@@ -1199,7 +1218,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = self._es_logprob_temperature()
         
         with self.ulysses_sharding_manager:
             output = self.actor.compute_log_probs_for_ids(data=data)
@@ -1234,7 +1253,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = self._es_logprob_temperature()
         
         with self.ulysses_sharding_manager:
             output = self.actor.compute_distillation_reward(data=data)
@@ -1266,7 +1285,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["temperature"] = self._es_logprob_temperature()
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         data.meta_info["top_k"] = 0

@@ -61,12 +61,19 @@ es_token:
   # engine / eval (mirror np_trainer.yaml; consumed by inherited launch/eval)
   num_engines: 1
   num_iterations: 150
+  start_step: 0                    # resume: first step to run (model.path = checkpoint of start_step-1)
   precision: bfloat16
   max_tokens: 1024
   max_prompt_length: null          # drop prompts longer than this (null = keep all)
   temperature: 0.0
   eval_interval: 25
   eval_batch_size: 256
+  # In-run eval sampling. Defaults reproduce the old greedy MATH-500 eval; the ds15b
+  # aligned pair uses n=2 / T=0.6 / top-p 0.95 = verl's val_kwargs (pass@1 = acc/mean@n).
+  eval_n: 1
+  eval_temperature: 0.0
+  eval_top_p: 1.0
+  eval_max_tokens: null      # null = max_tokens
   heldout_probe_size: 16
   gpu_memory_utilization: 0.55
   teacher_gpu_memory_utilization: 0.30

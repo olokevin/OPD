@@ -1192,3 +1192,7 @@ Filed as dated sections in: [moe_compress EXPERIMENT_RESULTS](aris/moe_compress/
 **Action outstanding:** the `*_origot3_s0` ckpts earmarked for moe_compress v3
 recovery training were deleted; regenerate before that leg (command in the
 EXPERIMENT_RESULTS section, ~9-13 min each, deterministic given `--seed 0`).
+
+## [2026-09-11] ingest | aligned pair: crash post-mortem (Ray logs filled /), resume (prefill @20 verl auto-resume; decode @41 via new es_token.start_step), T=0 d_std control readout 3.0x recorded
+
+## [2026-09-12] ingest | aligned pair complete: es-prefill peak 0.808 @140 (+13.8 pp greedy), es-decode 0.740 @120 → 0.674 final; d_std 3.0x; BP@220 greedy re-score 0.678 (loops under greedy); verdict + common-ruler + length tables in zo_opd.md, headline in zo_opd_short.md

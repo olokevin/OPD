@@ -23,6 +23,7 @@ export ES_ALPHA=${ES_ALPHA:-5e-4}
 export ES_N_RAILS=${ES_N_RAILS:-32}
 export ES_NORMALIZE=${ES_NORMALIZE:-zscore}
 export ES_STEPS=${ES_STEPS:-300}
+export ES_PERTURB_SET=${ES_PERTURB_SET:-all}          # all | layers (decoder blocks only, = es_token's set)
 
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-16}        # 16 prompts x n=4 = 64 seqs / step
 export PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
@@ -32,7 +33,7 @@ export EXPERIMENT_NAME=${EXPERIMENT_NAME:-ds15b_es-prefill_k${LOG_PROB_TOP_K:-0}
 export EXTRA_HYDRA_ARGS="algorithm.es_update=True algorithm.es_sigma=${ES_SIGMA} \
   algorithm.es_antithetic=${ES_ANTITHETIC:-True} \
   algorithm.es_alpha=${ES_ALPHA} algorithm.es_n_rails=${ES_N_RAILS} \
-  algorithm.es_normalize=${ES_NORMALIZE} trainer.total_training_steps=${ES_STEPS} \
+  algorithm.es_normalize=${ES_NORMALIZE} algorithm.es_perturb_set=${ES_PERTURB_SET} trainer.total_training_steps=${ES_STEPS} \
   ${EXTRA_HYDRA_ARGS:-}"
 export LOG_DIR=${LOG_DIR:-logs/ds15b/es}
 

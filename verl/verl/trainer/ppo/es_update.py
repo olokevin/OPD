@@ -132,6 +132,7 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
     sigma = float(cfg.es_sigma)
     alpha = float(cfg.es_alpha)
     antithetic = bool(cfg.get("es_antithetic", True))
+    pset = str(cfg.get("es_perturb_set", "all"))
     rng = np.random.default_rng(int(cfg.es_seed) + int(trainer.global_steps))
     fit = _fitness_fn(trainer, batch)
     t0 = time.time()
@@ -140,11 +141,11 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
         seeds = [int(s) for s in rng.integers(0, 2**31 - 1, size=n_eff)]
         fp, fm = [], []
         for s in seeds:
-            wg.es_perturb_weights(s, +sigma)
+            wg.es_perturb_weights(s, +sigma, pset)
             fp.append(fit())
-            wg.es_perturb_weights(s, -2.0 * sigma)
+            wg.es_perturb_weights(s, -2.0 * sigma, pset)
             fm.append(fit())
-            wg.es_perturb_weights(s, +sigma)      # back to W_0 (fp32 add/sub, exact to ~1e-7)
+            wg.es_perturb_weights(s, +sigma, pset)      # back to W_0 (fp32 add/sub, exact to ~1e-7)
         fp, fm = np.array(fp), np.array(fm)
         d = 0.5 * (fp - fm)                        # zero-mean by construction
         # Normalise by the RMS so sum(coef^2) = alpha^2 / n_eff EXACTLY (std would inflate
@@ -156,9 +157,9 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
         seeds = [int(s) for s in rng.integers(0, 2**31 - 1, size=n_eff)]
         f = []
         for s in seeds:
-            wg.es_perturb_weights(s, +sigma)
+            wg.es_perturb_weights(s, +sigma, pset)
             f.append(fit())
-            wg.es_perturb_weights(s, -sigma)
+            wg.es_perturb_weights(s, -sigma, pset)
         f = np.array(f)
         fp, fm = f, np.full_like(f, float(f.mean()))
         d = f - f.mean()                           # centering plays the antithetic role
@@ -172,7 +173,7 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
     else:
         raise ValueError(f"unknown es_normalize={mode!r}")
     t0 = time.time()
-    stats = wg.es_apply_update(seeds, [float(c) for c in coeffs])
+    stats = wg.es_apply_update(seeds, [float(c) for c in coeffs], pset)
     stats = stats[0] if isinstance(stats, list) else stats
     t_apply = time.time() - t0
     # Did the step actually ascend the batch objective?  One more rail at W_new.
@@ -203,6 +204,7 @@ def es_update_actor(trainer, batch: DataProto) -> dict:
         "es/n_rails": (2 * n_eff) if antithetic else n_eff,
         "es/sigma": sigma,
         "es/alpha": alpha,
+        "es/perturb_set": {"all": 0, "layers": 1}[pset],
         "timing_s/es_rails": t_rails,
         "timing_s/es_apply": t_apply,
         "timing_s/es_per_rail": t_rails / ((2 * n_eff) if antithetic else n_eff),

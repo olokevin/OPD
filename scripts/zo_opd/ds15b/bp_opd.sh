@@ -76,7 +76,7 @@ PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-9216}
 EXTRA_HYDRA_ARGS="+data.apply_chat_template_kwargs.enable_thinking=False \
   reward_model.use_dynamic_bsz=True \
   reward_model.forward_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-  trainer.max_actor_ckpt_to_keep=1 trainer.max_critic_ckpt_to_keep=1 \
+  trainer.max_actor_ckpt_to_keep=${MAX_CKPT_KEEP:-1} trainer.max_critic_ckpt_to_keep=1 \
   ${EXTRA_HYDRA_ARGS:-}"
 
 CUDA_VISIBLE_DEVICES=${TRAIN_GPU:-4}

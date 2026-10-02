@@ -1720,13 +1720,148 @@ pass@1 = greedy accuracy (`val-core/<bench>/acc/mean@1`), every 20 steps.
 | step | es-prefill MATH-500 | es-prefill AIME24 | es-decode MATH-500 | es-decode AIME24 |
 |---|---|---|---|---|
 | 0 | 0.670 | 0.133 | 0.648 | 0.233 |
+| 20 | 0.676 | 0.233 | 0.696 / 0.690† | 0.133 / 0.100† |
+| 40 | 0.676 | 0.167 | 0.696 | 0.167 |
+| 60 | 0.720 | 0.200 | 0.676 | 0.100 |
+| 80 | 0.734 | 0.233 | 0.682 | 0.200 |
+| 100 | **0.770** | 0.267 | **0.734** | 0.233 |
+| 120 | 0.756 | 0.167 | **0.740** | 0.100 |
+| 140 | **0.808** | 0.267 | 0.702 | 0.167 |
+| 160 | 0.794 | 0.200 | 0.680 | 0.167 |
+| 180 | 0.776 | 0.200 | 0.710 | 0.233 |
+| 200 | 0.788 | 0.167 | 0.700 | 0.233 |
+| 220 | 0.762 | 0.200 | 0.696 | 0.167 |
+| 240 | 0.792 | 0.100 | 0.676 | 0.067 |
+| 260 | 0.784 | 0.167 | 0.676 | 0.233 |
+| 279 (final) | — | — | 0.674 | 0.167 |
+
+es-prefill ended at step 279 (one epoch = 279 batches of 64 prompts, 2026-09-12 11:29); its last in-run
+eval is step 260; verl's keep=1 pruned the older actors (empty `global_step_*` shells remain; only 20 — the resume
+source — and 260 hold weights), so the step-140 peak (0.808) exists only as its in-run eval — which is the same evaluator
+as the ruler (the @260 re-score reproduces the in-run 0.784 / 0.167 exactly). es-decode ends at step 279
+with a final eval and checkpoint.
+
+### Common greedy ruler (`ruler_ckpt_greedy.sh`: verl val_only, greedy n=1 / top-p 1.0 / 7168; scores in `scripts/zo_opd/es_profile/results/ruler_scores_greedy.tsv`)
+
+| checkpoint | MATH-500 | AIME24 | MATH-500 mean len / cap-hit | AIME24 mean len / cap-hit |
+|---|---|---|---|---|
+| base (R1-Distill-1.5B) | 0.670 | 0.133 | 3756 / 0.31 | 6539 / 0.83 |
+| **BP @220** (2026-08-31 run: 64×4, T=1.0 rollouts, Adam 1e-6; sampled eval was 0.845 / 0.283) | **0.678** | **0.267** | 4806 / 0.36 | 6678 / 0.73 |
+| es-prefill @140 (peak; checkpoint pruned, in-run eval = same evaluator) | 0.808 | 0.267 | 2969 / 0.17 | 6013 / 0.67 |
+| es-prefill @260 (final) | 0.784 | 0.167 | 3347 / 0.18 | 6545 / 0.80 |
+| es-decode @279 (final; in-run on the es_token engine: 0.674 / 0.167) | 0.686 | 0.200 | — | — |
+
+es-prefill's in-run greedy curve with the same length statistics (verl validation dumps,
+`validation_log/ds15b_es-prefill_layers_T0_*`):
+
+| step | MATH-500 acc | mean len | cap-hit | AIME24 acc | mean len | cap-hit |
+|---|---|---|---|---|---|---|
+| 0 | 0.670 | 3756 | 0.31 | 0.133 | 6539 | 0.83 |
+| 20 | 0.676 | 3766 | 0.30 | 0.233 | 6453 | 0.77 |
+| 60 | 0.720 | 3469 | 0.23 | 0.200 | 6472 | 0.80 |
+| 100 | 0.770 | 3135 | 0.19 | 0.267 | 6068 | 0.70 |
+| 140 | **0.808** | 2969 | **0.17** | 0.267 | 6013 | 0.67 |
+| 200 | 0.788 | 3120 | 0.18 | 0.167 | 6378 | 0.70 |
+| 260 | 0.784 | 3347 | 0.18 | 0.167 | 6545 | 0.80 |
+
+es-decode's in-run greedy curve with mean response lengths (its evaluator logs no cap-hit rate; steps
+step 0 from part 1; 20† onward from the resumed run — the 20† row is the re-eval of the reloaded
+step-20 checkpoint on a fresh engine, the pre-crash in-run value was 0.696 / 0.133):
+
+| step | MATH-500 acc | mean len | AIME24 acc | mean len |
+|---|---|---|---|---|
+| 0 | 0.648 | 3886 | 0.233 | 6550 |
+| 20† | 0.690 | 3726 | 0.100 | 6804 |
+| 40 | 0.696 | 3660 | 0.167 | 6549 |
+| 60 | 0.676 | 3538 | 0.100 | 6719 |
+| 80 | 0.682 | 3578 | 0.200 | 6532 |
+| 100 | 0.734 | 3283 | 0.233 | 6345 |
+| 120 | 0.740 | 3290 | 0.100 | 6782 |
+| 140 | 0.702 | 3467 | 0.167 | 6439 |
+| 160 | 0.680 | 3609 | 0.167 | 6581 |
+| 180 | 0.710 | 3504 | 0.233 | 6425 |
+| 200 | 0.700 | 3607 | 0.233 | 6473 |
+| 220 | 0.696 | 3545 | 0.167 | 6632 |
+| 240 | 0.676 | 3778 | 0.067 | 6924 |
+| 260 | 0.676 | 3859 | 0.233 | 6530 |
+| 279 | 0.674 | 3908 | 0.167 | 6644 |
+
+Read: under the greedy protocol the BP reference barely moves (0.670 → 0.678) because its
+T=1.0-trained policy **loops more** when decoded greedily (cap-hit 0.31 → 0.36, +1 k tokens), whereas
+the greedy-trained es-prefill cuts the cap-hit rate almost in half and gains +13.8 pp at its peak. The
+greedy ruler therefore favours the arms trained on greedy rollouts; BP's advantage on the sampled ruler
+(0.845 vs es-prefill C's 0.829) is a different protocol, and a like-for-like BP would have to be trained
+with T=0 rollouts too.
+
+### Verdict (2026-09-12, both runs complete)
+
+Greedy pass@1 on MATH-500 / AIME24, each ES arm against its own step-0 base (es-prefill: verl evaluator,
+base 0.670 / 0.133; es-decode: es_token evaluator, base 0.648 / 0.233):
+
+| arm | signal `es/d_std` (steps 1–10) | peak MATH-500 | at step | final (step 260 / 279) | MATH-500 gain at peak / final | s / step |
+|---|---|---|---|---|---|---|
+| es-prefill (layers, 64×1, N=32 random, T=0) | **1.23e-3** | **0.808** (AIME 0.267) | 140 | **0.784** (0.167) | **+13.8 / +11.4 pp** | 334 |
+| es-decode r1 (same) | 0.40e-3 | 0.740 (0.100) | 120 | 0.674 (0.167); common ruler 0.686 / 0.200 | +9.2 / +2.6 pp (+1.6 pp vs the verl base on the common ruler) | 296 |
+| BP @220 (reference, T=1.0 rollouts, greedy re-score) | — | — | — | 0.678 (0.267) | +0.8 pp | 329–433 |
+
+1. **The clean-KV decode rail is a 3× weaker estimator, and that is the whole story.** With the
+   parameter set, batch, noise rule, step rule, sampling and evaluator protocol all matched, es-decode's
+   per-rail fitness spread is ⅓ of es-prefill's (0.40e-3 vs 1.23e-3 at T=0; 1.9× at T=1.0). The z-scored
+   step spends the same displacement either way, so es-decode walks the same distance with ⅓ the
+   coherent component: it peaks earlier (+9.2 pp @120) and has reverted almost to base by the end
+   (+2.6 pp @279), while es-prefill peaks higher (+13.8 pp @140) and holds +11.4 pp at step 260. The
+   09-07 conclusion stands with the confounds removed — es-decode has no niche; its 11 % lower step cost
+   does not compensate.
+2. **Under the greedy protocol es-prefill beats the sampled-trained BP reference (0.784–0.808 vs
+   0.678), but this is a protocol effect, not a method result.** BP's T=1.0-trained policy loops under
+   greedy decoding (cap-hit 0.36, 4.8 k tokens), so its sampled gains (0.751 → 0.845) do not show; a
+   like-for-like comparison needs BP trained with T=0 rollouts. On the sampled ruler the standing order
+   (BP 0.859 > es-prefill C 0.829) is unchanged.
+3. **The greedy gains are largely "stop looping".** es-prefill's MATH-500 cap-hit rate falls 0.31 → 0.17
+   and mean length 3756 → 2969 at the peak, the same truncation-reduction mechanism found for the
+   7168-token setting on 2026-09-01; AIME24 (30 problems, 67–83 % capped) stays inside noise.
+4. Housekeeping learnt the hard way: Ray session logs can fill the root disk in hours (now rotated);
+   verl `max_actor_ckpt_to_keep=1` really keeps one (the peak checkpoint is gone — keep ≥ 3 next time);
+   the two evaluators differ by ~2 pp on identical weights, so cross-arm comparisons go through the
+   common ruler or each arm's own base.
+
+Next: (a) BP with T=0 rollouts at 64 × 1 for the like-for-like greedy reference; (b) if the sampled ruler
+is what matters, rerun es-prefill at the standing setting with T=1.0 / n=2 @ T=0.6 eval; (c) checkpoints
+every 20 with keep ≥ 3 on `/data`.
+
+† second value = the resumed run's re-eval of the reloaded step-20 checkpoint on a fresh engine (greedy
+is batch-layout dependent in bf16: 0.6 pp / 1 AIME problem of engine nondeterminism).
 
 Step 0 is the same weights, so the row measures the **evaluator offset**: verl's vLLM rollout worker vs
 the es_token engine's `generate` (its wrapped linears/attention idle) take different bf16 kernel paths,
 greedy trajectories diverge, and MATH-500 lands 2.2 pp apart (AIME24: 3 of 30 problems). Read each arm
 against its own step 0; the final checkpoints get one common greedy re-score (`ruler_ckpt.sh`) at the end.
 
-`es/d_std` at T=0 (control readout): pending.
+**Crash and resume (2026-09-08 → 09-11).** Both runs died at 2026-09-08 01:45 (es-prefill at step 36,
+es-decode during its step-40 eval): Ray's session logs (`raylet.out` / `gcs_server.out`, including the
+raylet's own every-10-s "disk over 95 % full" lines) grew to 8.9 GB under `/tmp/ray_opd_gpu6` and
+filled the root disk, after which the log sinks and checkpoint writes failed. Fix: the launcher now sets
+`RAY_ROTATION_MAX_BYTES=200 MB`, `RAY_ROTATION_BACKUP_COUNT=1`. Resumed 2026-09-11 11:23 from the
+surviving checkpoints: es-prefill from verl `global_step_20` (`trainer.resume_mode=auto`, same data
+order, wandb `…_resume`, GPU 6); es-decode from its HF `step_20` checkpoint with the new
+`es_token.start_step=21` (same data pointer and per-step seeds; the fp32 master restarts from the bf16
+weights, < 1 ulp lost; `es/cum_footprint` restarts from 0, add 0.0184; wandb `…_r21`). Its `step_40`
+checkpoint was being written when the disk filled and is truncated (safetensors header incomplete), so
+steps 21–40 are redone; queued by `wait_gpu_then.sh` for GPU 7 (another user's job) or GPU 6 after
+es-prefill finishes. The resumed es-decode logs its step-20 eval first. Part-1 logs: `logs/ds15b/aligned/{prefill_T0_part1_step0-36,decode_T0_part1_step0-40}.log`.
+
+`es/d_std` at T=0 (the control readout; same sets, batches, rule, sampling on both sides):
+
+| | step 0 | steps 1–10 median | range |
+|---|---|---|---|
+| es-prefill (layers, 64×1, non-antithetic, greedy) | — | **1.23e-3** | 1.01–1.57e-3 (steps 1–9) |
+| es-decode r1 (same) | 3.3e-4 | **0.40e-3** | 0.28–0.48e-3 |
+
+Read at 10 steps: with every knob matched the held decode rail carries **⅓ (3.0×)** of the prefill
+rail's signal on greedy rollouts — the clean-KV attenuation itself, no confound left. (At T=1.0 the
+same pair read 1.9×: es-decode's spread fell from 0.62e-3 to 0.40e-3 going greedy while es-prefill's
+stayed ~1.2e-3, so the attenuation is stronger on the lower-entropy trajectory.) Step time at T=0:
+es-prefill ≈ 334 s, es-decode ≈ 302 s.
 
 ---
 

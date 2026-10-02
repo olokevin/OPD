@@ -181,6 +181,66 @@ class RayESTokenTrainer(RayNPTrainer):
                 self.es.get("teacher_batch_size", 16))
         print("Workers initialized successfully.")
 
+    # ---------------------------------------------------------------- eval ---
+    def _evaluate_model(self, engine, eval_data, step, logger):
+        """Per-benchmark sampled eval mirroring verl's val_kwargs (n, T, top-p, max_tokens).
+
+        Logs `val-core/<data_source>/acc/mean@n` (the pass@1 estimate BP / es-prefill log
+        under the same key), `val-core/<src>/resp_len/mean`, and keeps `eval/accuracy`
+        (first source, percent) so old greedy curves still overlay.  eval_n=1 / T=0 = the
+        historical greedy MATH-500 eval."""
+        if not eval_data:
+            return {}
+        cfg = self.es
+        n = int(cfg.get("eval_n", 1) or 1)
+        temp = float(cfg.get("eval_temperature", 0.0) or 0.0)
+        top_p = float(cfg.get("eval_top_p", 1.0) or 1.0)
+        max_tokens = int(cfg.get("eval_max_tokens", None) or cfg.max_tokens)
+        batch_size = int(cfg.get("eval_batch_size", 256))
+        sp = SamplingParams(n=n, temperature=temp, top_p=top_p, max_tokens=max_tokens,
+                            seed=int(cfg.get("global_seed", 999)))
+        start = time.time()
+        per_src = {}   # src -> {"acc": [...per generation...], "len": [...], "pass": [...per problem...]}
+        for b in range(0, len(eval_data), batch_size):
+            batch = eval_data[b:b + batch_size]
+            if self.prompt_processor:
+                prompts = [self.prompt_processor(d, self.tokenizer) for d in batch]
+            else:
+                prompts = [d.get("prompt", d.get("context")) for d in batch]
+            outputs = ray.get(engine.generate.remote(prompts, sp, use_tqdm=False))
+            for out, data in zip(outputs, batch):
+                src = str(data.get("data_source", "val"))
+                rec = per_src.setdefault(src, {"acc": [], "len": [], "pass": []})
+                hits = []
+                for o in out.outputs:
+                    r = self.val_reward_fn(o.text, data)
+                    a = (r.get("reward_info", {}).get("answer_reward", r.get("reward", 0.0))
+                         if isinstance(r, dict) else float(r))
+                    hits.append(1.0 if a > 0 else 0.0)
+                    rec["len"].append(len(o.token_ids))
+                rec["acc"] += hits
+                rec["pass"].append(1.0 if any(h > 0 for h in hits) else 0.0)
+            del outputs
+            gc.collect()
+        elapsed = time.time() - start
+        metrics = {"eval/time": elapsed, "eval/n": n}
+        first = None
+        for src, rec in per_src.items():
+            acc = float(np.mean(rec["acc"])) if rec["acc"] else 0.0
+            metrics[f"val-core/{src}/acc/mean@{n}"] = acc
+            metrics[f"val-core/{src}/acc/best@{n}/mean"] = float(np.mean(rec["pass"])) if rec["pass"] else 0.0
+            metrics[f"val-core/{src}/resp_len/mean"] = float(np.mean(rec["len"])) if rec["len"] else 0.0
+            metrics[f"val-core/{src}/n_problems"] = len(rec["pass"])
+            if first is None:
+                first = acc
+        metrics["eval/accuracy"] = 100.0 * (first or 0.0)
+        print(f"[Eval @ step {step}] " + "  ".join(
+            f"{src}: acc@{n}={float(np.mean(r['acc'])):.4f} len={float(np.mean(r['len'])):.0f} (n={len(r['pass'])})"
+            for src, r in per_src.items()) + f"  time={elapsed:.0f}s", flush=True)
+        gc.collect()
+        torch.cuda.empty_cache()
+        return metrics
+
     # ---------------------------------------------------------- checkpoint ---
     def _save_hf_checkpoint(self, step: int, base_dir: str, keep_last: int = 2):
         """Write a plain HF checkpoint of the CURRENT perturbed weights.
@@ -318,7 +378,8 @@ class RayESTokenTrainer(RayNPTrainer):
             prompts = kept
 
         n_heldout = int(cfg.get("heldout_probe_size", 16))
-        heldout = prompts[-n_heldout:] if len(prompts) > 2 * n_heldout else []
+        # n_heldout=0 must mean "no probe": prompts[-0:] would be the WHOLE list.
+        heldout = prompts[-n_heldout:] if n_heldout > 0 and len(prompts) > 2 * n_heldout else []
         if heldout:
             prompts = prompts[: len(prompts) - n_heldout]
         heldout_pids = [(p["prompt_token_ids"] if isinstance(p, dict) else p)
@@ -412,7 +473,16 @@ class RayESTokenTrainer(RayNPTrainer):
         use_graph = bool(cfg.get("use_cuda_graph", True))
         ES_DEBUG = os.environ.get("ES_DEBUG_DECODE", "0") == "1"
 
-        progress = tqdm(range(num_iterations), desc="ES-token Training")
+        # Resume: es_token.start_step=k continues the data pointer, per-step seeds and step
+        # numbering at k (model.path = the step-(k-1) HF checkpoint). The fp32 master restarts
+        # from the bf16 weights (< 1 ulp lost) and es/cum_footprint restarts from 0.
+        start_step = int(cfg.get("start_step", 0) or 0)
+        if start_step > 0 and eval_interval and self.eval_data:
+            m0 = self._evaluate_model(self.engines[0], self.eval_data, start_step - 1, logger)
+            if m0:
+                logger.log(data=m0, step=start_step - 1)
+        progress = tqdm(range(start_step, num_iterations), desc="ES-token Training",
+                        initial=start_step, total=num_iterations)
         for step in progress:
             t0 = time.time()
             pids = [prompts[(step * batch_size + b) % len(prompts)]

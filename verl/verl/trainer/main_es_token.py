@@ -45,9 +45,14 @@ def run_es_token(config) -> None:
         if config.data.get("train_max_samples", -1) > 0:
             train_data = train_data[: config.data.train_max_samples]
     if config.data.get("val_files"):
-        eval_data = load_data(config.data.val_files)
-        if config.data.get("val_max_samples", -1) > 0:
-            eval_data = eval_data[: config.data.val_max_samples]
+        vf = config.data.val_files
+        vf = list(vf) if not isinstance(vf, str) else [vf]
+        eval_data = []
+        for f in vf:   # several benchmarks: keep all, each capped separately; data_source tags them
+            d = load_data(f)
+            if config.data.get("val_max_samples", -1) > 0:
+                d = d[: config.data.val_max_samples]
+            eval_data += d
 
     task_type = config.data.get("task_type", "opd_math")
     if task_type in ["countdown", "gsm8k", "math", "math500", "olympiadbench",

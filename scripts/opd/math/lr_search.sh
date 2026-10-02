@@ -99,8 +99,8 @@ while [ $idx -lt $n ] || [ ${#SLOT_PID[@]} -gt 0 ]; do
       wait "$pid" 2>/dev/null; rc=$?
       echo "[lr_search] $(date) — run on GPU $gpu (pid $pid) exited rc=$rc"
       unset 'SLOT_PID[$gpu]'
-      # Best-effort cleanup of this GPU's isolated Ray head.
-      RAY_TMPDIR="/tmp/ray_opd_gpu${gpu}" ray stop --force >/dev/null 2>&1 || true
+      # on_policy_distillation.sh waits for its supervisor's per-run cleanup.
+      # RAY_TMPDIR does not scope `ray stop`: that would kill sibling runs.
     fi
     # Slot is now untracked. If work remains and the GPU is idle, fill it.
     if [ $idx -lt $n ] && ! gpu_busy "$gpu"; then
