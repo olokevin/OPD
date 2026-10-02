@@ -656,6 +656,76 @@ arms only ever cashed in the 1-D "shorten" component. Whether BP-level motion bo
 converts to BP-level quality is the hypothesis a mid-scale run (C ≈ 1e5–1e6, e.g. 8 GPUs × 1–2
 days at small α) would test before any large-scale build-out.
 
+## 10. 2026-10-02 — Paper framing: formulation, why the loss is right, what it buys over BP
+
+> Query answer (how to write es-prefill up as a paper). Short version: the defensible claim is
+> **"OPD's dense, fixed-trajectory teacher reward turns ES from rollout-per-probe into
+> prefill-per-probe, and makes it an unbiased sketch of the BP-OPD gradient"** — a systems/theory
+> paper on forward-only OPD, not "ES beats BP". The current data supports the mechanism and the
+> scaling law, not a quality win.
+
+### 10.1 Problem statement
+
+Student `π_W`, teacher `q`. OPD minimises the on-policy reverse KL
+`J(W) = E_{x, y~π_W} Σ_t KL(π_W(·|s_t) ‖ q(·|s_t))`. BP-OPD (k1, K=0) uses the per-token PG estimator
+`g_BP = Σ_t A_t ∇log π_W(y_t)`, `A_t = log q(y_t) − log π_0(y_t)` frozen. Forward-only goal: get this update
+with **forward passes only**, and with only `(seed, scalar)` on the wire.
+
+### 10.2 The loss and why it is justified (three statements, all already proved/measured here)
+
+Rail fitness on one fixed rollout `y ~ π_0` (§R4, `es_update.py`):
+`F(W) = Σ_t m_t A_t (log π_W(y_t) − log π_0(y_t)) / Σ m_t`.
+
+| # | statement | justification | status |
+|---|---|---|---|
+| P1 | `∇F(W_0) = g_BP` exactly (same batch) | differentiate; `A_t` is frozen | trivial, exact |
+| P2 | `F` is the first-order expansion of the CPI/TRPO surrogate `Σ_t A_t (π_W/π_0 − 1)` — so `J(π_0) − J(π_W) ≥ F(W) − C·max KL(π_0‖π_W)` (Kakade–Langford / TRPO bound) | `π_W/π_0 = 1 + Δlog π + O(Δ²)`; ES's z-scored step has a **fixed per-step displacement α/√N** → it is an implicit trust region | standard bound; cite, don't re-prove |
+| P3 | ES step `ĝ = (1/Nσ) Σ_n (F(W_0+σε_n) − F̄) ε_n` is unbiased for `∇F_σ(W_0) = g_BP + O(σ²)` (Gaussian smoothing) | Stein's lemma; FD linearity verified to 3 % at σ=1e-3 (§5) | measured |
+
+Consequences worth a figure each:
+- **Fixed trajectory is not optional.** Scoring each perturbed policy on its *own* rollout makes length a
+  decision variable: `mean` rewards padding, `sum` rewards truncation (zo_opd_short "problems found" #2,
+  −78 % length). The fixed-rollout surrogate removes that, and P1 says it costs nothing in bias.
+- **ES-OPD = randomized sketch of the BP gradient.** So convergence reduces to sketch theory:
+  progress ratio `1/(1 + r_eff/N)`, `r_eff = tr(H)/κ_g ≈ 160` measured vs `D = 1.78 B` (§3, §5) — the
+  dimension-free statement (same spirit as MeZO's effective-rank argument, but measured on OPD).
+- **Displacement-budget law** `coherent motion = √(2δ·C/tr(H))`, C = total rail forwards (§3). It
+  predicted the per-step descent and the peak step `S* ≈ (5 %/footprint)²` of every arm (§7).
+- **Where to evaluate the rail** (prefill vs clean-KV decode): decode rails estimate the
+  history-detached gradient; measured 3.0× smaller `d_std` with everything matched (zo_opd.md
+  aligned pair). Per-token fresh noise adds targets, not probes (R2).
+
+**Caveat to state, not hide:** the standing setting trains on **T=0 (greedy) rollouts**. Then `y` is
+the argmax path, `E_y` is not taken, and P3 estimates the gradient of the greedy-path surrogate — a
+*mode-seeking* objective, not an unbiased `∇KL(π‖q)`. Defensible (it optimises the decoding policy
+that is evaluated; loop tokens get `A_t < 0` → pushed down, matching the cap-hit 0.31 → 0.17), but
+it is a different objective from BP's T=1 run and must be named as such.
+
+### 10.3 Advantages over BP — what is measured vs what is claimed
+
+| axis | ES-prefill | BP | evidence |
+|---|---|---|---|
+| quality, sampled ruler, 7168 cap | 0.829 peak | **0.859** | §7, measured — BP wins |
+| quality, 16k cap | ≤ +1.8 pp | **+6.0 / +23 pp** | §7.1, measured — BP wins; ES gains are truncation |
+| quality, greedy ruler | **0.808 / 0.784** | 0.678 (T=1-trained) | aligned pair — **confounded**, needs BP @ T=0 |
+| cost per sequence (1 GPU) | 5.0 s | **1.29 s** | measured — BP 4× cheaper |
+| memory | weights + forward activations (no grads, no Adam, no activation tape at 7k tokens) | ~16 B/param + backward tape | **not yet measured** |
+| communication | **N scalars + seeds / step** | full gradient all-reduce | by construction (§9) |
+| stack | **stock inference forward** (vLLM/HF prefill), works on non-differentiable / quantized weights | autograd + optimizer | by construction |
+| rail cost vs ES-for-RL | **one prefill / probe** on a shared rollout | — | OPD-specific: reward-only ES needs a rollout per probe |
+
+So the paper's advantage claim is **communication + memory + inference-only workers**, paid for in
+FLOPs (§9 table: 20–2000×). The quality claim is open.
+
+### 10.4 Experiments a reviewer will require (in order)
+
+1. **BP at T=0, 64×1** — the like-for-like greedy reference (the only thing between us and a "matches BP" line).
+2. **16k-cap re-eval of the aligned es-prefill run** — does the greedy gain survive without truncation (§7.1 says probably not).
+3. **Seeds** (≥ 3) — ruler noise is ±2 pp.
+4. **Peak memory** of ES vs BP at 7168 tokens, and a **multi-worker seeds-only run** (the §9 regime) with wall-clock and bytes on the wire.
+5. **Baselines:** MeZO/SPSA (N=1, same budget), reward-only ES (have es-rl @150 0.808), off-policy SFT.
+6. **Mid-scale C ≈ 1e5–1e6** (§9 open question): does more coherent motion convert to BP-level quality?
+
 ## Reference
 
 ### R1. Derivation of the progress ratio

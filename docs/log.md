@@ -1210,3 +1210,7 @@ Moved the aligned-pair checkpoints (~40 GB) from `/home/yequan/ckpt_scratch` bac
 ## [2026-10-02] design | Paper-faithful ISO-Optimizer BP modes (`iso`/`isobtt`); Cayley arms renamed `iso_cayley`/`isobtt_cayley`
 
 New `IsoFrameLinear`/`IsoFrameAdapter` in `verl/workers/peft/iso.py`: `W = U S0 Vᵀ` (whole matrix, or per input block for `isobtt`), AdamW on U,V, fp64 polar retraction after every step (`retract_iso`, hooked into `dp_actor._optimizer_step`), unit-by-unit FSDP gather for retraction/export. Gates `scripts/es/test_iso_frame_bp.py` all pass (incl. FSDP×2, bf16 MP); Qwen3-4B-Base step 0 bit-identical, retraction 5.6 s (iso) / 0.4 s (isobtt) per step. `grpo.sh` / `run_bp_math.sh` / `run_bp_all.sh` updated. Details: [ES/es_results.md §13.x](results/ES/es_results.md).
+
+## [2026-10-02] query | es-prefill paper framing: formulation, loss justification, advantages vs BP
+
+Filed as [es_rails_formulation.md §10](results/ZO_OPD/es_rails_formulation.md). Claim to make: OPD's fixed-trajectory dense reward makes ES a prefill-per-probe, unbiased sketch of the BP-OPD gradient (∇F(W0)=g_BP; CPI/TRPO surrogate; r_eff≈160; displacement-budget law). Advantages over BP are communication/memory/inference-only (by construction, memory not yet measured); quality is BP-favoured on sampled/16k rulers, greedy-ruler win confounded (needs BP@T=0). T=0 training = greedy-path objective, flagged. Six required experiments listed.
