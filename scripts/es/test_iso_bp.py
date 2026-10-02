@@ -178,7 +178,7 @@ def main():
     args = ap.parse_args()
     print("=== unit checks ===")
     allok = unit_checks(args.device)
-    for mode in ("iso", "isobtt", "isobtt_mix"):
+    for mode in ("iso_cayley", "isobtt_cayley", "isobtt_mix"):
         for dtype in (torch.float32, torch.bfloat16):
             print(f"\n=== mode {mode} ({dtype}) ===")
             allok &= run_mode(mode, args.device, dtype)

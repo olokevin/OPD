@@ -178,8 +178,8 @@ export VAL_TEMPERATURE=${VAL_TEMPERATURE:-1.0}
 # run; keeping it True preserves the sampled n>1 protocol.
 export VAL_DO_SAMPLE=${VAL_DO_SAMPLE:-True}
 export VAL_TOP_P=${VAL_TOP_P:-0.95}
-export SAVE_FREQ=${SAVE_FREQ:-20}
 export TEST_FREQ=${TEST_FREQ:-20}
+export SAVE_FREQ=${SAVE_FREQ:-$TEST_FREQ}   # save right after each in-run eval; keep-1 replaces the previous ckpt
 export TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 export VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-False}
 export REWARD_MICRO_BATCH_SIZE_PER_GPU=${REWARD_MICRO_BATCH_SIZE_PER_GPU:-24}

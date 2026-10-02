@@ -1196,3 +1196,17 @@ EXPERIMENT_RESULTS section, ~9-13 min each, deterministic given `--seed 0`).
 ## [2026-09-11] ingest | aligned pair: crash post-mortem (Ray logs filled /), resume (prefill @20 verl auto-resume; decode @41 via new es_token.start_step), T=0 d_std control readout 3.0x recorded
 
 ## [2026-09-12] ingest | aligned pair complete: es-prefill peak 0.808 @140 (+13.8 pp greedy), es-decode 0.740 @120 → 0.674 final; d_std 3.0x; BP@220 greedy re-score 0.678 (loops under greedy); verdict + common-ruler + length tables in zo_opd.md, headline in zo_opd_short.md
+
+## [2026-10-02] maintenance | branch + worktree cleanup; OPD-estoken artifacts moved into main
+
+Deleted merged branches `feat/blocktt-svd-llamafactory`, `feat/es-trainer-port`, `feat/np-trainer`, `np-fold-xcapture`, `np-v2-cudagraph-rails`, `merge/es-token-trainer` and the `OPD-np` worktree (its untracked NP files were a superseded draft). Copied the `OPD-estoken` worktree's git-ignored artifacts (`logs/`, `validation_log/`, `wandb/`, `outputs/`, `scripts/zo_opd/es_profile/results/*` logs) into main, byte-verified; repointed `run_phase5.sh`, `run_phase6.sh`, `nersc_align/final_eval.sh` and the zo_opd.md log path at main.
+
+## [2026-10-02] maintenance | checkpoints: ckpt_scratch moved to /data; /data-only + keep-latest-only rule
+
+Moved the aligned-pair checkpoints (~40 GB) from `/home/yequan/ckpt_scratch` back into the usual `/data` roots (paths in [zo_opd.md § aligned pair](results/ZO_OPD/zo_opd.md)). New checkpoint rule, enforced in code:
+- **Only under `/data`**: verl `RayPPOTrainer.fit` and `RayESTokenTrainer.fit` assert the checkpoint dir resolves under `/data/` when `save_freq > 0`.
+- **Keep only the latest, saved right after the in-run eval**: `max_{actor,critic}_ckpt_to_keep` default 1 (`ppo_trainer.yaml` + generated), `es_token.ckpt_keep_last` default 1; es_token now saves after eval (was before); verl prunes whole `global_step_*` folders only after the new one is fully written (the worker-side rotation deleted the old actor first and left `data.pt`-only folders). Launchers default `SAVE_FREQ` to the eval interval (`on_policy_distillation.sh`, `bp_opd.sh`, `opd_es_token.sh`, `es_decode.sh`).
+
+## [2026-10-02] design | Paper-faithful ISO-Optimizer BP modes (`iso`/`isobtt`); Cayley arms renamed `iso_cayley`/`isobtt_cayley`
+
+New `IsoFrameLinear`/`IsoFrameAdapter` in `verl/workers/peft/iso.py`: `W = U S0 Vᵀ` (whole matrix, or per input block for `isobtt`), AdamW on U,V, fp64 polar retraction after every step (`retract_iso`, hooked into `dp_actor._optimizer_step`), unit-by-unit FSDP gather for retraction/export. Gates `scripts/es/test_iso_frame_bp.py` all pass (incl. FSDP×2, bf16 MP); Qwen3-4B-Base step 0 bit-identical, retraction 5.6 s (iso) / 0.4 s (isobtt) per step. `grpo.sh` / `run_bp_math.sh` / `run_bp_all.sh` updated. Details: [ES/es_results.md §13.x](results/ES/es_results.md).

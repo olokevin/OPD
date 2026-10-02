@@ -33,7 +33,7 @@ class PEFTAdapter(ABC):
         from verl.workers.peft.qlora import QLoRAAdapter
         from verl.workers.peft.blocktt import BlockTTAdapter
         from verl.workers.peft.svd import SVDAdapter
-        from verl.workers.peft.iso import IsoAdapter
+        from verl.workers.peft.iso import IsoAdapter, IsoFrameAdapter
 
         registry = {
             "none": NullAdapter,
@@ -41,8 +41,10 @@ class PEFTAdapter(ABC):
             "qlora": QLoRAAdapter,
             "blocktt": BlockTTAdapter,
             "svd": SVDAdapter,
-            "iso": IsoAdapter,
-            "isobtt": IsoAdapter,
+            "iso": IsoFrameAdapter,
+            "isobtt": IsoFrameAdapter,
+            "iso_cayley": IsoAdapter,
+            "isobtt_cayley": IsoAdapter,
             "isobtt_mix": IsoAdapter,
         }
         cls_ = registry[peft_cfg.mode]

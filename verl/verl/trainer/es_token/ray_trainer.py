@@ -390,6 +390,9 @@ class RayESTokenTrainer(RayNPTrainer):
         eval_interval = (self.config.trainer.get("test_freq", None)
                          or cfg.get("eval_interval", 25))
         save_freq = int(self.config.trainer.get("save_freq", 0) or 0)
+        if save_freq:
+            assert os.path.realpath(logging_dir).startswith("/data/"), \
+                f"checkpoints must be saved under /data, got {os.path.realpath(logging_dir)}"
 
         sp = SamplingParams(temperature=cfg.get("temperature", 0.0),
                             max_tokens=int(cfg.max_tokens))
@@ -434,7 +437,7 @@ class RayESTokenTrainer(RayNPTrainer):
             assert cfg.sample_method == "bernoulli", "es-decode noise is Rademacher (packed bits)"
             if es_antithetic:
                 assert int(cfg.n_sample) % 2 == 0, "antithetic es-decode needs an even n_sample"
-        ckpt_keep_last = int(cfg.get("ckpt_keep_last", 2))
+        ckpt_keep_last = int(cfg.get("ckpt_keep_last", 1))
         # es-decode: after the update, re-score the FIRST wave's rollouts (first
         # es_post_gain_tokens tokens, teacher-forced, clean rail only) to log
         # F(W_new) - F(W_0) on the batch -- es_update.py's post_update_gain.
@@ -657,12 +660,6 @@ class RayESTokenTrainer(RayNPTrainer):
                     "L_clean": f"{metrics['train/L_clean_mean']:.3f}",
                     "dec": f"{decode_s:.1f}s", "tch": f"{teacher_s:.1f}s", "asm": f"{assemble_s:.1f}s",
                 }, refresh=False)
-                if save_freq and (step > 0 and step % save_freq == 0
-                                  or step == num_iterations - 1):
-                    try:
-                        self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
-                    except Exception as e:
-                        print(f"[es ckpt] save failed at step {step}: {e}")
                 if eval_interval and (step % eval_interval == 0
                                       or step == num_iterations - 1):
                     eval_metrics = self._evaluate_model(
@@ -674,6 +671,13 @@ class RayESTokenTrainer(RayNPTrainer):
                         logger.log(data={"eval/heldout_clean_loss": hk}, step=step)
                         print(f"[Probe @ step {step}] heldout_clean_loss={hk:.4f} "
                               f"(fixed {len(heldout_pids)} prompts; lower=better)")
+                # save after the in-run eval; keep_last=1 then replaces the previous one
+                if save_freq and (step > 0 and step % save_freq == 0
+                                  or step == num_iterations - 1):
+                    try:
+                        self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
+                    except Exception as e:
+                        print(f"[es ckpt] save failed at step {step}: {e}")
                 gc.collect()
                 torch.cuda.empty_cache()
                 continue
@@ -782,13 +786,6 @@ class RayESTokenTrainer(RayNPTrainer):
                 "asm": f"{assemble_s:.1f}s",
             }, refresh=False)
 
-            if save_freq and (step > 0 and step % save_freq == 0
-                              or step == num_iterations - 1):
-                try:
-                    self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
-                except Exception as e:
-                    print(f"[es ckpt] save failed at step {step}: {e}")
-
             if eval_interval and (step % eval_interval == 0
                                   or step == num_iterations - 1):
                 eval_metrics = self._evaluate_model(
@@ -800,6 +797,14 @@ class RayESTokenTrainer(RayNPTrainer):
                     logger.log(data={"eval/heldout_clean_loss": hk}, step=step)
                     print(f"[Probe @ step {step}] heldout_clean_loss={hk:.4f} "
                           f"(fixed {len(heldout_pids)} prompts; lower=better)")
+
+            # save after the in-run eval; keep_last=1 then replaces the previous one
+            if save_freq and (step > 0 and step % save_freq == 0
+                              or step == num_iterations - 1):
+                try:
+                    self._save_hf_checkpoint(step, logging_dir, keep_last=ckpt_keep_last)
+                except Exception as e:
+                    print(f"[es ckpt] save failed at step {step}: {e}")
 
             gc.collect()
             torch.cuda.empty_cache()

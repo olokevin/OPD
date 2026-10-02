@@ -168,6 +168,8 @@ The teacher model is wired through verl's `reward_model.*` config — i.e. the "
 
 Standing settings for every future forward-only (ES) run on the ds15b pair, set 2026-09-07: **64 prompts per step (one rollout each), N=32 perturbations, non-antithetic (plain random draws, mean baseline)**, σ=1e-3, α=1.25e-3 z-scored, 7168 response tokens, **T=0 / top-p 1.0 for both the training rollout and the eval (greedy, n=1)**, in-run eval MATH-500 + AIME24 every 20 steps, wandb project `es_opd_JustRL_1p5b`. Launcher: `scripts/zo_opd/ds15b/aligned_es_pair.sh` (`ARM=prefill|decode`). Record the full hyper-parameter table of any new run in `docs/results/ZO_OPD/zo_opd.md`.
 
+**Checkpoints (all training runs, set 2026-10-02):** save only under `/data` (verl runs → `/data/yequan/opd/opd/<dataset>/`, es_token runs → `/data/yequan/compress_train/OPD/checkpoint/`, merged HF → `/data/yequan/opd/merged/`); keep only the latest checkpoint, written right after each in-run eval (`SAVE_FREQ` = eval interval, keep 1). Both trainers assert the `/data` path at startup; never point `SAVE_DIR`/`CKPT_PATH`/`PROJECT_PATH` at `/home` or `/tmp`.
+
 ## Data layout
 
 - `datasets/*.parquet` — training datasets in verl's expected parquet format (DAPO-Math-17k, DeepMath-103K-deduped, OpenThoughts3 OPD slice).

@@ -837,8 +837,11 @@ class RayPPOTrainer:
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
 
+        # Rotation is done below on whole global_step_* folders, AFTER the new one is
+        # fully written; the workers' own rotation deletes the old actor BEFORE writing
+        # (a crash mid-write then leaves nothing) and leaves data.pt-only folders behind.
         self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=None
         )
 
         if self.use_critic:
@@ -851,7 +854,7 @@ class RayPPOTrainer:
                 )
             )
             self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
+                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=None
             )
 
         # save dataloader
@@ -866,6 +869,21 @@ class RayPPOTrainer:
         )
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
+
+        # keep only the newest `keep` global_step_* folders (actor + critic + data.pt)
+        keep = max(max_actor_ckpt_to_keep or 0, max_critic_ckpt_to_keep or 0)
+        if keep > 0:
+            import shutil
+
+            root = self.config.trainer.default_local_dir
+            steps = sorted(
+                int(d[len("global_step_") :])
+                for d in os.listdir(root)
+                if d.startswith("global_step_") and d[len("global_step_") :].isdigit()
+            )
+            for old in steps[:-keep]:
+                print(f"[ckpt] removing {os.path.join(root, f'global_step_{old}')}")
+                shutil.rmtree(os.path.join(root, f"global_step_{old}"), ignore_errors=True)
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -996,6 +1014,10 @@ class RayPPOTrainer:
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
+
+        if self.config.trainer.save_freq > 0:
+            ckpt_dir = os.path.realpath(self.config.trainer.default_local_dir)
+            assert ckpt_dir.startswith("/data/"), f"checkpoints must be saved under /data, got {ckpt_dir}"
 
         logger = Tracking(
             project_name=self.config.trainer.project_name,

@@ -7,9 +7,12 @@
 #
 # BP_MODE selects the arm (maps to PEFT_MODE):
 #   dense       full-parameter fine-tuning (baseline)
-#   iso         W = C_L W0 C_R^T, block-diagonal Cayley rotations, spectrum fixed
-#   isobtt      block-wise SVD, R_j in O(b) trained, per-block spectrum fixed
-#   isobtt_mix  isobtt + orthogonal input mixer M in O(n_blk)
+#   iso            paper ISO-Optimizer: W = U S0 V^T, AdamW on U,V + polar retraction
+#   isobtt         the same on the block-wise SVD (per-block spectrum fixed)
+#   iso_cayley     W = C_L W0 C_R^T, block-diagonal Cayley rotations, spectrum fixed
+#   isobtt_cayley  block-wise SVD, R_j in O(b) trained, per-block spectrum fixed
+#   isobtt_mix     isobtt_cayley + orthogonal input mixer M in O(n_blk)
+# (iso_cayley / isobtt_cayley were called iso / isobtt before 2026-10-02.)
 #
 # Usage:  DEVICES=6,7 BP_MODE=iso bash scripts/es/run_bp_math.sh
 
@@ -68,7 +71,16 @@ case "$BP_MODE" in
     export ACTOR_OPTIM_OFFLOAD=${ACTOR_OPTIM_OFFLOAD:-True}
     export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.45}
     TAG=bp-dense ;;
-  iso|isobtt|isobtt_mix)
+  iso|isobtt)
+    export PEFT_MODE=$BP_MODE
+    # Paper's ISO-AdamW LR (7.5e-7 on U,V for Qwen3 math). The frame tensors are
+    # ~1.3-1.4x the dense size (iso; ~1x for isobtt) plus frozen copies, so offload
+    # the optimizer like full FT does.
+    export LR=${LR:-7.5e-7}
+    export ACTOR_OPTIM_OFFLOAD=${ACTOR_OPTIM_OFFLOAD:-True}
+    export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.45}
+    TAG=bp-$BP_MODE ;;
+  iso_cayley|isobtt_cayley|isobtt_mix)
     export PEFT_MODE=$BP_MODE
     # LR matched on per-step *relative weight motion*. AdamW moves each coordinate
     # by ~lr, so full FT moves ||dW||/||W|| ~ lr/0.02 = 50*lr (5e-5 at lr=1e-6).

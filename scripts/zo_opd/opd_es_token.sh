@@ -81,7 +81,7 @@ export VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-200}
 export NUM_ITERATIONS=${NUM_ITERATIONS:-150}
 export EVAL_INTERVAL=${EVAL_INTERVAL:-25}
 export HELDOUT_PROBE_SIZE=${HELDOUT_PROBE_SIZE:-16}
-export SAVE_FREQ=${SAVE_FREQ:-0}   # 0 = never; >0 writes an HF checkpoint every N steps
+export SAVE_FREQ=${SAVE_FREQ:-$EVAL_INTERVAL}   # HF ckpt right after each in-run eval (0 = never); keep-1 replaces the previous one
 
 # ---- logging ----
 export PROJECT_NAME=${PROJECT_NAME:-opd-qwen-math}
@@ -109,7 +109,7 @@ python3 -m verl.trainer.main_es_token --config-name es_token_trainer \
     es_token.es_alpha=${ES_ALPHA:-1.25e-3} \
     es_token.es_antithetic=${ES_ANTITHETIC:-true} \
     es_token.es_normalize=${ES_NORMALIZE:-zscore} \
-    es_token.ckpt_keep_last=${CKPT_KEEP_LAST:-2} \
+    es_token.ckpt_keep_last=${CKPT_KEEP_LAST:-1} \
     es_token.es_post_gain_tokens=${ES_POST_GAIN_TOKENS:-0} \
     es_token.pack_width=${PACK_WIDTH} \
     "es_token.b_pack_buckets=${B_PACK_BUCKETS}" \

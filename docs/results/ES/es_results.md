@@ -1275,6 +1275,49 @@ Train reward agrees: `isobtt` 0.23 → 0.70 (s61) → **0.14 (s91)** → 0.65 (s
 
 <!-- BP:RESULTS END -->
 
+### 13.x [2026-10-02] Paper-faithful ISO-Optimizer: new `iso` / `isobtt`; the Cayley arms renamed
+
+> The BP `iso` / `isobtt` above were **not** the paper's optimizer (Cayley rotations on a
+> random block basis / right-only block rotation). They are now `iso_cayley` /
+> `isobtt_cayley` (`isobtt_mix` unchanged), so the results in this section stay
+> reproducible. The names `iso` / `isobtt` now mean the paper's ISO-AdamW (§4.3 of the paper).
+
+**What the new modes do** (`verl/workers/peft/iso.py`, `IsoFrameLinear` / `IsoFrameAdapter`):
+
+| mode | parameterisation | trained | after every optimizer step | spectrum fixed |
+|---|---|---|---|---|
+| `iso` | `W = U S0 Vᵀ`, thin SVD of the whole matrix | `U`, `V` (AdamW, grads = paper Eq. 34) | `U ← polar(U)`, `V ← polar(V)` in fp64 | global `σ(W)` |
+| `isobtt` | the same per input block: `W[:, blk_j] = U_j S_j V_jᵀ` (fura's `_closest_factor_pair` blocks) | `U_j`, `V_j` | per-block polar | per block |
+
+Implementation choices that don't change the maths (details in the module docstring):
+- **Delta storage**: `U = U0 + dU`; forward `W0 + (U S0 Vᵀ − U0 S0 V0ᵀ)`. Same trajectory as stepping `U` when weight decay is 0, so `retract_iso` refuses any other value. Under bf16 FSDP the actor sees `W0` exactly, so step 0 is bit-identical to the base and actor weights match vLLM's.
+- **Polar via fp64 Newton–Schulz**: matches the SVD polar to 4e-14, 0.018 s vs 0.7 s per 9728×2560 frame. Falls back to SVD if it doesn't converge.
+- **FSDP1 only**, `use_orig_params=True`. Retraction and vLLM export gather **one FSDP unit at a time**, because the full frame model is about 3.5× the dense size.
+- **Non-converted tensors** (embeddings / tied head, norms) are trained by plain AdamW (`peft.iso.train_others=True`). The paper doesn't say how it handles them.
+
+**Gates** (`scripts/es/test_iso_frame_bp.py`; `--fsdp` under torchrun ×2): all pass.
+
+| check | iso | isobtt |
+|---|---|---|
+| step 0 == base, bit-for-bit (tiny Qwen3 and **Qwen3-4B-Base**) | ✅ | ✅ |
+| frame grads == Eq. 34 | 2.4e-7 | 2.5e-7 |
+| delta storage == literal AdamW-on-(U,V) + SVD polar, 5 steps (rel err of update) | 1.6e-6 | 7.1e-6 |
+| `σ(W) == S0` after steps (rel), fp32 / FSDP bf16-MP | 5.9e-8 / 5.9e-8 | 8.0e-8 / 7.9e-8 |
+| FSDP×2 step + retraction == single process (fp32) | exact | exact |
+| unit-by-unit export == dense weights | exact | exact |
+
+**Cost on Qwen3-4B-Base** (1×H100 NVL, unsharded):
+
+| | iso | isobtt |
+|---|---|---|
+| init SVD (once per rank) | 143 s | 33 s |
+| stored params (fp32) | 13.8 B (51.7 GiB) | 11.5 B (42.8 GiB) |
+| trainable (frame deltas + others) | 5.28 B | 4.11 B |
+| retraction, whole model | 5.6 s/step | 0.4 s/step |
+| dense export for vLLM | 1.5 s | 0.2 s |
+
+Launch: `PEFT_MODE=iso|isobtt bash grpo.sh` (sets `weight_decay=0`, `use_orig_params=True`), or `BP_MODE=iso scripts/es/run_bp_math.sh` (LR default 7.5e-7 = the paper's). The ES-side `iso` / `isobtt` in `es_worker_extension.py` are unchanged.
+
 ## 14. Catastrophic forgetting — does the perturbation subspace decide it?
 
 > **Motivation: training on edge devices.** ES is attractive there because it needs no

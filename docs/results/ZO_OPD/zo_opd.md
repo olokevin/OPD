@@ -1563,7 +1563,7 @@ this changes the estimator: the systems claim now holds, the learning question (
 > Sources: `scripts/zo_opd/ds15b/{bp_opd,es_opd,es_decode}.sh`, `on_policy_distillation.sh`,
 > `verl/verl/trainer/ppo/es_update.py`, `verl/verl/workers/fsdp_workers.py` (`_es_params`, k=0 score),
 > `verl/verl/trainer/es_token/ray_trainer.py` (seq branch), `rail_seq_kernels.py`,
-> `es_token_worker_extension.py`, run logs `OPD-estoken/logs/ds15b/{es/C,es_decode}`.
+> `es_token_worker_extension.py`, run logs `logs/ds15b/{es/C,es_decode}` (moved from the removed `OPD-estoken` worktree, 2026-10-02).
 
 ### Shared pipeline (verified in code)
 
@@ -1642,8 +1642,11 @@ on `embed_tokens`, `lm_head`, norms and biases so `_es_params` skips them), 64 p
 > runs `ds15b_es-prefill_layers_T0_b64n1_N32rand_sig1e-3_a1.25e-3` (GPU 6) and
 > `ds15b_es-decode_r1_T0_b64n1_N32rand_sig1e-3_a1.25e-3` (GPU 7), launched 2026-09-07 22:10 (a first
 > attempt at T=1.0 / sampled eval ran 25 steps and was stopped — its readouts are kept below).
-> Logs `logs/ds15b/aligned/{prefill,decode}.log`. Checkpoints under `/home/yequan/ckpt_scratch`
-> (rolling keep=1: `/data` was 100 % full at launch).
+> Logs `logs/ds15b/aligned/{prefill,decode}.log`. Checkpoints were written to `/home/yequan/ckpt_scratch`
+> (rolling keep=1: `/data` was 100 % full at launch) and moved to `/data` on 2026-10-02:
+> es-prefill → `/data/yequan/opd/opd/DAPO-Math-17k/token_reward_direct_…7168-T_0-…-2026-09-07_22-11-05/`
+> (`global_step_20`, `global_step_260`); es-decode → `/data/yequan/compress_train/OPD/checkpoint/ds15b_es-decode_r1_T0_b64n1_N32rand_sig1e-3_a1.25e-3{,_r21}/`
+> (final `_r21/…/step_279`); merged HF → `/data/yequan/opd/merged/{es-prefill_layers_T0_step260,bp_T1_n4_step220}`.
 
 ### Hyper-parameters
 

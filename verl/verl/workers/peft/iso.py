@@ -3,55 +3,50 @@
 The ES side of this thread lives in
 ``verl/workers/rollout/vllm_rollout/es_worker_extension.py`` and is documented in
 ``docs/results/ES/es_results.md`` §10.  This module is the **first-order (BP)**
-counterpart, exposing the *same* three parameterisations to verl's FSDP actor so
-that ES-vs-BP is a controlled comparison.
+side, exposed to verl's FSDP actor through ``peft.mode``.
 
-Recap of the geometry.  ISO constrains every 2-D weight to the fixed-spectrum
-family ``F(W0) = {U S0 V^T}``.  Because ``O(m)`` acts transitively on the Stiefel
-manifold, that family is exactly the **bi-orthogonal orbit**
+Paper-faithful modes (ISO-Optimizer, §4.3 of the paper)
+-------------------------------------------------------
+``iso``      every target linear is ``W = U S0 V^T`` (thin SVD of W0, ``S0`` frozen).
+             The base optimizer (AdamW) steps ``U`` and ``V`` directly -- their
+             autograd gradients are exactly Eq. 34, ``G_U = G_W V S0`` and
+             ``G_V = G_W^T U S0`` -- and after every step both factors are mapped back
+             onto the Stiefel manifold with the polar retraction (Eq. 30/36),
+             computed in fp64.  ``sigma(W) == S0`` up to floating-point error.
+``isobtt``   the same thing on fura's block-wise SVD: ``W[:, blk_j] = U_j S_j V_j^T``
+             per input block (blocks from ``_closest_factor_pair``, as in the ES
+             ``isobtt`` / fura factoring), ``S_j`` frozen, ``U_j, V_j`` trained and
+             retracted.  Each *block's* spectrum is fixed; the global one is not.
 
-    F(W0) = { C_L W0 C_R^T : C_L in O(m), C_R in O(n) },
+Two implementation details that do not change the maths:
 
-so feasibility needs no SVD and no retraction: any bi-orthogonal transform of W is
-in the family and preserves sigma(W) *exactly*.  ISO's own optimizer instead steps
-``U, V`` freely and projects back with an fp64 polar retraction every step, which
-is affordable for one gradient step but not for anything else.
+* **Delta storage.**  ``U = U0 + dU`` with ``U0`` frozen and ``dU`` the trainable
+  tensor (same for V), and the forward is ``W0 + (U S0 V^T - U0 S0 V0^T)`` with the
+  frozen original ``W0``.  With weight decay 0 (the paper's setting, enforced in
+  ``retract_iso``) AdamW is shift-invariant, so the trajectory is identical to
+  stepping ``U`` itself.  What it buys: under FSDP bf16 mixed precision the forward
+  sees ``W0`` exactly plus a small correction, so step 0 is the base model
+  bit-for-bit and the actor's weights match the bf16 weights vLLM samples from;
+  stepping full ``U`` in bf16 would put ~1 ulp of noise on every weight.
+* **Retraction by Newton-Schulz.**  The paper uses an fp64 SVD polar.  ``polar(X)``
+  is unique for full-rank X, and the fp64 Newton-Schulz iteration converges to the
+  same matrix (max diff 4e-14 on a 9728x2560 frame) in 2 iterations, ~40x faster
+  than the SVD; the SVD remains as the fallback if NS does not converge.
 
-For BP we get the constraint for free by **parameterising the orthogonal factors
-themselves**: every ``C`` is ``Cay(Omega)`` for a trainable skew ``Omega``, where
+Legacy Cayley modes (ES-vs-BP thread, Aug 2026)
+-----------------------------------------------
+These were called ``iso`` / ``isobtt`` until 2026-10-02 and are kept so the BP runs
+in ``docs/results/ES/es_results.md`` stay reproducible.  They use the identity
+``F(W0) = {C_L W0 C_R^T : C_L in O(m), C_R in O(n)}`` and parameterise each ``C``
+as ``Cay(Omega) = (I - Omega/2)^-1 (I + Omega/2)`` of a trainable skew ``Omega``,
+so the constraint holds for any optimizer output and no retraction is needed.
 
-    Cay(X) := (I - X/2)^-1 (I + X/2)
-
-is exactly orthogonal for any skew X.  Consequences:
-
-  * ``Omega = 0`` at init  =>  ``C = I``  =>  the step-0 forward is the pretrained
-    model bit-for-bit (mode ``iso``) or at the bf16 BTT-reconstruction floor
-    (``isobtt*``), so every arm starts from the same place.
-  * the constraint holds for *any* value the optimizer produces -- plain AdamW and
-    plain FSDP work unchanged, with no Riemannian optimizer, no retraction step and
-    no projection.  There is nothing to drift off, so the ``_iso_recondition``
-    machinery the ES trainer needs has no analogue here.
-  * ``Omega`` is stored as a full square matrix and skew-symmetrised in the
-    forward; the symmetric half sits in the kernel of the map and receives exactly
-    zero gradient, so the *effective* trainable dimension is ``b(b-1)/2`` per
-    block, half the stored count.  Both are reported.
-
-Modes
------
-``iso``         ``W_eff = C_L W0 C_R^T`` with ``C`` block-diagonal (block ``b``) in a
-                fixed random basis.  W0 stays frozen and is never materialised
-                during training: the forward is ``x -> x C_R -> W0 -> C_L^T``, two
-                cheap block-diagonal matmuls around the untouched base linear.
-``isobtt``      block-wise SVD ``W[:, blk_j] = A_j R_j`` with ``A_j = U_j diag(S_j)``
-                frozen and ``R_j = Cay(Omega_j) R0_j`` in ``O(b)`` trained.  Each
-                *block's* spectrum is fixed exactly.
-``isobtt_mix``  ``isobtt`` plus an orthogonal input mixer ``M in O(n_blk)`` applied to
-                the block-slices before the contraction, relaxing the block-locality
-                of Remark 5.2 (cf. the free-``M`` ablation in
-                lora-without-regret ``docs/exp_results/lift_commonsense.md``).  As a
-                full-input operator ``M (x) I_b`` is orthogonal, so the *global*
-                spectrum of W stays exactly fixed and the arm remains inside
-                ``F(W0)`` -- unlike a free ``M``, which would leave the family.
+``iso_cayley``     ``W_eff = C_L W0 C_R^T`` with ``C`` block-diagonal (block ``b``) in a
+                   fixed random basis -- a strict subset of the paper's family.
+``isobtt_cayley``  block-wise right rotation ``W[:, blk_j] = W0[:, blk_j] C_j``.
+``isobtt_mix``     ``isobtt_cayley`` plus an orthogonal input mixer ``M in O(n_blk)``
+                   acting on the block-slices; ``M (x) I_b`` is orthogonal, so the
+                   *global* spectrum of W stays exactly fixed.
 """
 from __future__ import annotations
 
@@ -65,7 +60,8 @@ import torch.nn.functional as F
 
 from verl.workers.peft.base import PEFTAdapter
 
-ISO_MODES = ("iso", "isobtt", "isobtt_mix")
+ISO_MODES = ("iso", "isobtt")
+ISO_CAYLEY_MODES = ("iso_cayley", "isobtt_cayley", "isobtt_mix")
 
 _ATTN = ("q_proj", "k_proj", "v_proj", "o_proj")
 _MLP = ("gate_proj", "up_proj", "down_proj")
@@ -273,7 +269,7 @@ class IsoAdapter(PEFTAdapter):
 
         stored = eff = 0
         for name, mod in replace:
-            if self.mode == "iso":
+            if self.mode == "iso_cayley":
                 new = IsoLinear(mod, block, gen)
             else:
                 new = IsoBTTLinear(mod, mix=(self.mode == "isobtt_mix"))
@@ -363,3 +359,275 @@ class IsoAdapter(PEFTAdapter):
             "iso": {"block_size": self.peft_cfg.iso.block_size, "seed": self.peft_cfg.iso.seed},
             "converted": len(self._converted),
         }
+
+
+# ----------------------------------------------------------------------------------
+# Paper-faithful ISO-Optimizer: modes `iso` / `isobtt`
+# ----------------------------------------------------------------------------------
+
+_FRAME_TRAINABLE = ("iso_du", "iso_dv")
+
+
+@torch.no_grad()
+def _polar(x: torch.Tensor, tol: float = 1e-13, max_iter: int = 20) -> torch.Tensor:
+    """polar(X) = P Q^T for the thin SVD X = P S Q^T (paper Eq. 30), batched, fp64.
+
+    Newton-Schulz ``X <- X (3I - X^T X) / 2`` keeps the singular vectors and drives
+    every singular value to 1, so it converges to exactly this matrix whenever
+    ``||X^T X - I|| < 1`` -- always true right after one small optimizer step.
+    """
+    x = x.double()
+    eye = torch.eye(x.shape[-1], device=x.device, dtype=x.dtype)
+    for _ in range(max_iter):
+        g = x.mT @ x
+        err = (g - eye).abs().amax()
+        if err < tol:
+            return x
+        if err >= 1:
+            break
+        x = x @ (1.5 * eye - 0.5 * g)
+    p, _, qh = torch.linalg.svd(x, full_matrices=False)
+    return p @ qh
+
+
+class IsoFrameLinear(nn.Module):
+    """``W = W0 + (U S0 V^T - U0 S0 V0^T)`` per input block, U/V trained + retracted.
+
+    ``n_blk == 1`` is the paper's ISO (one thin SVD of the whole matrix);
+    ``n_blk > 1`` is ``isobtt`` (one thin SVD per input block of width ``b``).
+    Factor tensors are batched over blocks: ``U0, dU: (n_blk, m, q)``,
+    ``V0, dV: (n_blk, b, q)``, ``S0: (n_blk, q)`` with ``q = min(m, b)``.
+
+    Every tensor is an ``nn.Parameter`` in the actor's dtype (frozen ones with
+    ``requires_grad=False``) so FSDP shards all of them and gathers them together.
+    """
+
+    def __init__(self, lin: nn.Linear, n_blk: int):
+        super().__init__()
+        w = lin.weight.data
+        out_f, in_f = w.shape
+        assert in_f % n_blk == 0, (in_f, n_blk)
+        b = in_f // n_blk
+        self.n_blk, self.b, self.out_f, self.in_f = n_blk, b, out_f, in_f
+        dev = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else w.device
+        wb = w.to(dev, torch.float64).reshape(out_f, n_blk, b).permute(1, 0, 2)
+        u, s, vh = torch.linalg.svd(wb, full_matrices=False)
+        dt, wd = w.dtype, w.device
+
+        def _p(t, grad=False):
+            return nn.Parameter(t.to(wd, dt).contiguous(), requires_grad=grad)
+
+        self.weight = nn.Parameter(w, requires_grad=False)
+        self.bias = _p(lin.bias.data) if lin.bias is not None else None
+        self.iso_u0 = _p(u)
+        self.iso_s = _p(s)
+        self.iso_v0 = _p(vh.mT)
+        self.iso_du = _p(torch.zeros_like(u), grad=True)
+        self.iso_dv = _p(torch.zeros_like(vh.mT), grad=True)
+
+    def _delta(self, dtype) -> torch.Tensor:
+        """U S0 V^T - U0 S0 V0^T  ==  dU S0 V^T + U0 S0 dV^T, as an (out, in) matrix."""
+        s = self.iso_s.to(dtype).unsqueeze(-2)
+        u0, du = self.iso_u0.to(dtype), self.iso_du.to(dtype)
+        v0, dv = self.iso_v0.to(dtype), self.iso_dv.to(dtype)
+        d = torch.bmm(du * s, (v0 + dv).mT) + torch.bmm(u0 * s, dv.mT)
+        return d.permute(1, 0, 2).reshape(self.out_f, self.in_f)
+
+    def forward(self, x):
+        w = self.weight.to(x.dtype) + self._delta(x.dtype)
+        return F.linear(x, w, None if self.bias is None else self.bias.to(x.dtype))
+
+    @torch.no_grad()
+    def materialize(self) -> torch.Tensor:
+        """Dense W in fp32, computed in fp64 (cast by the caller)."""
+        return (self.weight.double() + self._delta(torch.float64)).float()
+
+    @torch.no_grad()
+    def retract(self) -> None:
+        """U <- polar(U0 + dU), V <- polar(V0 + dV) (paper Eq. 36); stored back as deltas."""
+        for p0, dp in ((self.iso_u0, self.iso_du), (self.iso_v0, self.iso_dv)):
+            x0 = p0.double()
+            dp.copy_((_polar(x0 + dp.double()) - x0).to(dp.dtype))
+
+    def trainable_numel(self):
+        return self.iso_du.numel() + self.iso_dv.numel()
+
+
+def _fsdp_units(root: nn.Module):
+    """Group every submodule under the FSDP unit that owns its parameters.
+
+    Returns ``[(unit, [(name, module), ...]), ...]``; ``unit`` is None when ``root`` is
+    not FSDP-wrapped.  Lets callers gather one unit (one decoder layer) at a time:
+    gathering the whole frame-parameterised model at once is ~3.5x the dense size.
+    """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    try:
+        from torch.distributed.fsdp import FSDPModule
+    except ImportError:  # torch < 2.6
+        FSDPModule = ()
+    groups: dict = {}
+
+    def walk(mod, name, unit):
+        if FSDPModule and isinstance(mod, FSDPModule):
+            raise NotImplementedError("peft.mode iso/isobtt supports FSDP1 (actor.strategy=fsdp) only")
+        if isinstance(mod, FSDP):
+            unit = mod
+        groups.setdefault(unit, []).append((name, mod))
+        for cn, c in mod.named_children():
+            walk(c, f"{name}.{cn}" if name else cn, unit)
+
+    walk(root, "", None)
+    return list(groups.items())
+
+
+def _summon(unit, writeback: bool):
+    import contextlib
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    if unit is None:
+        return contextlib.nullcontext()
+    return FSDP.summon_full_params(unit, recurse=False, writeback=writeback)
+
+
+@torch.no_grad()
+def retract_iso(module: nn.Module, optimizer=None) -> bool:
+    """Polar-retract every ``IsoFrameLinear`` after an optimizer step. No-op otherwise.
+
+    Called from ``dp_actor._optimizer_step``.  Gathers one FSDP unit at a time with
+    writeback; every rank computes the (deterministic, cheap) retraction of the
+    gathered unit and writes back its own shard.
+    """
+    groups = module.__dict__.get("_iso_frame_groups")
+    if groups is None:
+        groups = [(u, [m for _, m in mods if isinstance(m, IsoFrameLinear)])
+                  for u, mods in _fsdp_units(module)]
+        groups = [(u, ms) for u, ms in groups if ms]
+        module.__dict__["_iso_frame_groups"] = groups
+    if not groups:
+        return False
+    if optimizer is not None and any(g.get("weight_decay", 0) != 0 for g in optimizer.param_groups):
+        # The paper trains with weight decay 0 (App. H).  With delta storage a nonzero
+        # decay would shrink U - U0 instead of U, i.e. a different optimizer.
+        raise ValueError("peft.mode iso/isobtt requires actor.optim.weight_decay=0")
+    for unit, mods in groups:
+        with _summon(unit, writeback=True):
+            for m in mods:
+                m.retract()
+    return True
+
+
+def _clean(n: str) -> str:
+    return n.replace("_fsdp_wrapped_module.", "").replace("_fsdp_wrapped_module", "")
+
+
+@torch.no_grad()
+def _dense_state_dict(root: nn.Module, dtype=torch.bfloat16) -> dict:
+    """HF-named dense weights, materialised one FSDP unit at a time."""
+    out, seen = {}, set()
+    for unit, mods in _fsdp_units(root):
+        with _summon(unit, writeback=False):
+            for name, mod in mods:
+                if isinstance(mod, IsoFrameLinear):
+                    out[_clean(f"{name}.weight")] = mod.materialize().to(dtype)
+                    if mod.bias is not None:
+                        out[_clean(f"{name}.bias")] = mod.bias.detach().to(dtype).clone()
+                    continue
+                for pn, p in mod._parameters.items():
+                    if p is None or id(p) in seen or "flat_param" in pn:
+                        continue
+                    seen.add(id(p))
+                    t = p.detach()
+                    out[_clean(f"{name}.{pn}" if name else pn)] = (
+                        t.to(dtype) if t.is_floating_point() else t).clone()
+    return out
+
+
+def _convert_frames(model: nn.Module, mode: str, targets) -> tuple[list[str], int]:
+    replace = [(n, m) for n, m in model.named_modules()
+               if isinstance(m, nn.Linear) and not any(s in n for s in _SKIP) and n.endswith(targets)]
+    names, stored = [], 0
+    for name, mod in replace:
+        n_blk = 1 if mode == "iso" else _closest_factor_pair(mod.in_features)[0]
+        new = IsoFrameLinear(mod, n_blk)
+        parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
+        setattr(parent, name.rsplit(".", 1)[-1], new)
+        names.append(name)
+        stored += new.trainable_numel()
+    return names, stored
+
+
+def _set_frame_trainable(model: nn.Module, train_others: bool) -> None:
+    frozen = set()
+    for m in model.modules():
+        if isinstance(m, IsoFrameLinear):
+            frozen |= {id(m.weight), id(m.iso_u0), id(m.iso_v0), id(m.iso_s)}
+    for n, p in model.named_parameters():
+        p.requires_grad_(n.endswith(_FRAME_TRAINABLE) or (train_others and id(p) not in frozen))
+
+
+class IsoFrameAdapter(IsoAdapter):
+    """Modes ``iso`` / ``isobtt``: the paper's ISO-Optimizer (see module docstring).
+
+    Everything that is not a converted linear (embeddings / tied LM head, norms,
+    biases) is trained by the plain base optimizer when ``peft.iso.train_others``
+    (default), so ISO-AdamW vs AdamW differ only in how the projection matrices are
+    parameterised.  The paper does not say how it treats these tensors.
+    """
+
+    # The worker must hand export_for_vllm the FSDP root, not wrap it in a whole-model
+    # summon_full_params: we gather unit by unit.
+    export_needs_fsdp_root = True
+
+    def apply(self, model, *, tokenizer, calib_loader_builder):
+        dtypes = {p.dtype for p in model.parameters()}
+        if dtypes != {torch.float32}:
+            # The trainable deltas are their own optimizer master copy; in bf16 a
+            # lr~1e-6 step on U would round away.
+            raise ValueError(f"peft.mode={self.mode} needs fp32 actor params (MODEL_DTYPE=fp32); got {dtypes}")
+        self._converted, stored = _convert_frames(model, self.mode, self._targets())
+        _set_frame_trainable(model, bool(self.peft_cfg.iso.train_others))
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(f"[ISO] mode={self.mode} converted={len(self._converted)} linears | "
+                  f"frame deltas={stored:,} | trainable total={trainable:,} | "
+                  f"stored total={total:,} | train_others={self.peft_cfg.iso.train_others}", flush=True)
+        return model
+
+    def export_for_vllm(self, fsdp_module):
+        return _dense_state_dict(fsdp_module)
+
+    def save_pretrained(self, fsdp_module, out_dir: str) -> None:
+        """Dense bf16 HF checkpoint (rank 0 writes; every rank joins the gathers)."""
+        import torch.distributed as dist
+        sd = _dense_state_dict(fsdp_module)
+        if dist.is_initialized() and dist.get_rank() != 0:
+            return
+        from huggingface_hub import save_torch_state_dict
+        os.makedirs(out_dir, exist_ok=True)
+        save_torch_state_dict({k: v.cpu() for k, v in sd.items()}, out_dir)
+        inner = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+        inner.config.save_pretrained(out_dir)
+        if getattr(inner, "generation_config", None) is not None:
+            inner.generation_config.save_pretrained(out_dir)
+
+    def topology_meta(self) -> dict:
+        return {
+            "mode": self.mode,
+            "target_modules": self.peft_cfg.target_modules,
+            "iso": {"train_others": bool(self.peft_cfg.iso.train_others)},
+            "converted": len(self._converted),
+        }
+
+    @classmethod
+    def rebuild_from_meta(cls, model, meta):
+        """Resume: rebuild the same module topology; the checkpoint load fills the values."""
+        tm = meta.get("target_modules", "all")
+        targets = (_ATTN if tm == "attn" else _MLP if tm == "mlp"
+                   else _ATTN + _MLP if isinstance(tm, str) else tuple(tm))
+        _convert_frames(model, meta["mode"], targets)
+        _set_frame_trainable(model, bool(meta.get("iso", {}).get("train_others", True)))
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        return model

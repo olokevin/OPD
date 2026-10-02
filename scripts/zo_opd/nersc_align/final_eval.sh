@@ -7,7 +7,7 @@
 #
 # enable_thinking=false is mandatory -- these models were trained non-thinking.
 set -u
-R=/home/yequan/Project/compression/OPD-estoken
+R=$(realpath "$(dirname "$0")/../../..")
 cd "$R"
 export HF_HOME=/data/yequan/huggingface
 PY=/home/yequan/miniconda3/envs/verl/bin/python

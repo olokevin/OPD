@@ -10,7 +10,10 @@ from typing import Any, Optional, Union
 from omegaconf import DictConfig, OmegaConf
 
 
-VALID_MODES = ("none", "lora", "qlora", "blocktt", "svd", "iso", "isobtt", "isobtt_mix")
+VALID_MODES = (
+    "none", "lora", "qlora", "blocktt", "svd",
+    "iso", "isobtt", "iso_cayley", "isobtt_cayley", "isobtt_mix",
+)
 VALID_CALIB_MODES = (
     "none", "v2", "v2_bp", "v2_combined", "twosteps", "svd_v2", "svd_v2_combined",
 )
@@ -62,10 +65,13 @@ class SVDConfig:
 @dataclass
 class IsoConfig:
     """Fixed-spectrum (ISO) BP modes. See verl/workers/peft/iso.py."""
-    # Block size of the Cayley rotation generators (mode `iso` only; the
-    # `isobtt*` modes take their block size from the layer's own factorisation).
+    # iso / isobtt: also train every non-converted tensor (embeddings, norms, biases)
+    # with the plain base optimizer. False freezes them.
+    train_others: bool = True
+    # Block size of the Cayley rotation generators (mode `iso_cayley` only; the
+    # `isobtt_cayley`/`isobtt_mix` modes take it from the layer's own factorisation).
     block_size: int = 128
-    # Seed for the fixed random block basis (mode `iso` only).
+    # Seed for the fixed random block basis (mode `iso_cayley` only).
     seed: int = 0
 
 
@@ -115,7 +121,7 @@ class PEFTConfig:
             )
         if self.mode == "qlora" and self.lora.rank <= 0:
             raise ValueError("qlora requires peft.lora.rank > 0")
-        if self.mode in {"iso", "isobtt", "isobtt_mix"} and self.iso.block_size < 2:
+        if self.mode in {"iso_cayley", "isobtt_cayley", "isobtt_mix"} and self.iso.block_size < 2:
             raise ValueError("peft.iso.block_size must be >= 2")
         if self.calib.mode != "none" and self.mode not in {"blocktt", "svd"}:
             raise ValueError(

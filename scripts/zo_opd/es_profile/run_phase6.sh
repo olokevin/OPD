@@ -5,7 +5,7 @@
 #   bash scripts/zo_opd/es_profile/run_phase6.sh
 set -u
 cd "$(dirname "$0")"
-export PYTHONPATH=/home/yequan/Project/compression/OPD-estoken/verl
+export PYTHONPATH="$(realpath ../../../verl)"
 PY=/home/yequan/miniconda3/envs/verl/bin/python
 BS=${BS:-4,8,16}
 NS=${NS:-0,4,8,16}

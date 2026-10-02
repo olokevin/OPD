@@ -63,7 +63,7 @@ VAL_TOP_P=${VAL_TOP_P:-0.95}
 export VAL_DO_SAMPLE=${VAL_DO_SAMPLE:-True}
 TEST_FREQ=${TEST_FREQ:-20}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-True}
-SAVE_FREQ=${SAVE_FREQ:-20}
+SAVE_FREQ=${SAVE_FREQ:-$TEST_FREQ}   # save right after each in-run eval; keep-1 replaces the previous ckpt
 
 # ---- single-GPU memory budget ----
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.4}

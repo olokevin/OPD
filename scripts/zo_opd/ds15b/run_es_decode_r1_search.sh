@@ -11,7 +11,7 @@ ARMS=${ARMS:-"a1.25e-3:ES_ALPHA=1.25e-3,ES_ITERS=40 raw_a2.8e-3:ES_ALPHA=2.8e-3,
 for arm in $ARMS; do
   tag=${arm%%:*}; envs=${arm#*:}
   echo "[search] arm=$tag envs=$envs start $(date '+%F %T')"
-  ( export TRAIN_GPU=${TRAIN_GPU:-7} NOISE_RANK=1 EVAL_INTERVAL=10 SAVE_FREQ=10 CKPT_KEEP_LAST=5
+  ( export TRAIN_GPU=${TRAIN_GPU:-7} NOISE_RANK=1 EVAL_INTERVAL=10 SAVE_FREQ=10 CKPT_KEEP_LAST=1
     for kv in ${envs//,/ }; do export "$kv"; done
     bash scripts/zo_opd/ds15b/es_decode.sh )
   echo "[search] arm=$tag exit=$? $(date '+%F %T')"

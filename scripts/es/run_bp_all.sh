@@ -5,7 +5,7 @@ set -u
 REPO=${REPO:-/home/yequan/Project/compression/OPD}
 cd "$REPO"
 DEVICES=${DEVICES:-6,7}
-MODES=${@:-"dense iso isobtt isobtt_mix"}
+MODES=${@:-"dense iso_cayley isobtt_cayley isobtt_mix"}
 mkdir -p logs/bp
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate verl

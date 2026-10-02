@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")"
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
-export PYTHONPATH=/home/yequan/Project/compression/OPD-estoken/verl
+export PYTHONPATH="$(realpath ../../../verl)"
 PY=/home/yequan/miniconda3/envs/verl/bin/python
 BS=${BS:-1,4,8,16,64}
 NS=${NS:-0,1,4,8,16,32}

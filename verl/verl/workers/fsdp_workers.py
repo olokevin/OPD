@@ -404,7 +404,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # of meta tensor". Force real weights on CPU for those modes.
         _peft_cfg = self.config.get("peft", None)
         _peft_mode = _peft_cfg.get("mode", "none") if _peft_cfg is not None else "none"
-        _peft_needs_real_weights = str(_peft_mode) in ("blocktt", "svd", "iso", "isobtt", "isobtt_mix")
+        _peft_needs_real_weights = str(_peft_mode) in (
+            "blocktt", "svd", "iso", "isobtt", "iso_cayley", "isobtt_cayley", "isobtt_mix")
         init_context = get_init_weight_context_manager(
             use_meta_tensor=(not actor_model_config.tie_word_embeddings) and not _peft_needs_real_weights,
             mesh=self.device_mesh,
@@ -774,7 +775,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 adapter.export_for_vllm.__func__
                 is not _PEFTAdapterBase.export_for_vllm
             )
-            if has_export_override:
+            if has_export_override and getattr(adapter, "export_needs_fsdp_root", False):
+                # The adapter gathers one FSDP unit at a time itself (ISO frames are
+                # ~3.5x the dense model; a whole-model summon would not fit next to vLLM).
+                adapter_dense_params = adapter.export_for_vllm(self.actor_module_fsdp) or None
+            elif has_export_override:
                 # Need full unsharded weights for the export. summon_full_params will
                 # gather across all ranks.
                 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP

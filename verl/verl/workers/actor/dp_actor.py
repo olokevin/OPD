@@ -687,6 +687,10 @@ class DataParallelPPOActor(BasePPOActor):
                 _reapply(self.actor_module)
             except ImportError:
                 pass
+            # ISO-Optimizer (peft.mode iso/isobtt): polar retraction of the frame
+            # factors after every step. No-op for every other mode.
+            from verl.workers.peft.iso import retract_iso
+            retract_iso(self.actor_module, self.actor_optimizer)
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)

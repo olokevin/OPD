@@ -207,10 +207,14 @@ export BTT_FACTORIZE_BY_HEAD=${BTT_FACTORIZE_BY_HEAD:-True}
 export BTT_NORMALIZE_AFTER_UPDATE=${BTT_NORMALIZE_AFTER_UPDATE:-False}
 export BTT_QFURA=${BTT_QFURA:-False}
 
-# ---- ISO (fixed-spectrum BP): peft.mode = iso | isobtt | isobtt_mix ----
-# See verl/workers/peft/iso.py and docs/results/ES/es_results.md §11.
-export ISO_BLOCK_SIZE=${ISO_BLOCK_SIZE:-128}   # Cayley generator block (mode `iso` only)
-export ISO_SEED=${ISO_SEED:-0}                 # fixed random block basis (mode `iso` only)
+# ---- ISO (fixed-spectrum BP), see verl/workers/peft/iso.py ----
+# iso | isobtt: the paper's ISO-Optimizer (AdamW on U,V + fp64 polar retraction),
+#   whole-matrix / block-wise SVD. Forces weight_decay=0 (paper App. H).
+# iso_cayley | isobtt_cayley | isobtt_mix: the Aug-2026 Cayley variants
+#   (docs/results/ES/es_results.md §11).
+export ISO_TRAIN_OTHERS=${ISO_TRAIN_OTHERS:-True} # iso/isobtt: also train embeddings/norms with AdamW
+export ISO_BLOCK_SIZE=${ISO_BLOCK_SIZE:-128}   # Cayley generator block (mode `iso_cayley` only)
+export ISO_SEED=${ISO_SEED:-0}                 # fixed random block basis (mode `iso_cayley` only)
 
 export SVD_TRAIN_POSITION=${SVD_TRAIN_POSITION:-output}
 export SVD_S_MERGED_TO=${SVD_S_MERGED_TO:-frozen}
@@ -264,7 +268,12 @@ case "$PEFT_MODE" in
       ++actor_rollout_ref.peft.blocktt.factorize_by_head=$BTT_FACTORIZE_BY_HEAD \
       ++actor_rollout_ref.peft.blocktt.normalize_after_update=$BTT_NORMALIZE_AFTER_UPDATE \
       ++actor_rollout_ref.peft.blocktt.qfura.enabled=$BTT_QFURA" ;;
-  iso|isobtt|isobtt_mix)
+  iso|isobtt)
+    PEFT_ARGS="$PEFT_ARGS \
+      actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+      actor_rollout_ref.actor.optim.weight_decay=0 \
+      ++actor_rollout_ref.peft.iso.train_others=$ISO_TRAIN_OTHERS" ;;
+  iso_cayley|isobtt_cayley|isobtt_mix)
     PEFT_ARGS="$PEFT_ARGS \
       actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
       ++actor_rollout_ref.peft.iso.block_size=$ISO_BLOCK_SIZE \
