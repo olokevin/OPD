@@ -1214,3 +1214,7 @@ New `IsoFrameLinear`/`IsoFrameAdapter` in `verl/workers/peft/iso.py`: `W = U S0 
 ## [2026-10-02] query | es-prefill paper framing: formulation, loss justification, advantages vs BP
 
 Filed as [es_rails_formulation.md §10](results/ZO_OPD/es_rails_formulation.md). Claim to make: OPD's fixed-trajectory dense reward makes ES a prefill-per-probe, unbiased sketch of the BP-OPD gradient (∇F(W0)=g_BP; CPI/TRPO surrogate; r_eff≈160; displacement-budget law). Advantages over BP are communication/memory/inference-only (by construction, memory not yet measured); quality is BP-favoured on sampled/16k rulers, greedy-ruler win confounded (needs BP@T=0). T=0 training = greedy-path objective, flagged. Six required experiments listed.
+
+## [2026-10-05] ingest | ISO-AdamW Fig. 6 reproduction (4B, 50 steps) + `isobtt` LR tuning and run
+
+New page [results/FURA/iso.md](results/FURA/iso.md). DAPO launcher `scripts/iso/dapo_math_4b.sh` (paper App. H: 256×12, 8K, clip 0.2/0.28, KL 1e-3, dynamic filtering) on GPUs 5+7. ISO-AdamW 7.5e-7: 20.0 → 29.9/30.6/31.4/31.9/32.2 @10..50, within ~1 pp of the paper's curve. `isobtt`: 7.5e-6 unstable (entropy 1.4→0.16 in one step, truncation 9.6% by step 6), 2.5e-6 healthy → 30.6/34.0/35.3/37.6/37.7, +5.5 pp over ISO @50 with ~3× longer answers. Fixes: Qwen3 default chat template (enable_thinking=False gave base 9.8 vs paper 16.15), `ppo_max_token_len_per_gpu` 9216 (16384 OOM'd), DAPO trainer `true_reward_score`, ref policy skips the ISO conversion.

@@ -483,6 +483,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         peft_raw = self.config.get("peft", None)
         peft_cfg = PEFTConfig.legacy_shim(peft_cfg=peft_raw, model_cfg=self.config.model)
+        if role != "actor" and peft_cfg.mode in ("iso", "isobtt"):
+            # The reference policy is the base model; an ISO frame copy would only
+            # add ~3.5x memory (and needs use_orig_params, which ref does not set).
+            peft_cfg = PEFTConfig()
         # Teacher LM path for calib.loss=="opd". The full verl config is not
         # available here (self.config is just actor_rollout_ref), so we read
         # from the REWARD_MODEL_PATH env var that the OPD launch scripts

@@ -217,6 +217,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                         reward_tensor, reward_extra_infos_dict = compute_reward(new_batch, self.reward_fn)
 
                         new_batch.batch["token_level_scores"] = reward_tensor
+                        # This fork's compute_data_metrics reads the raw outcome reward
+                        # here (ray_trainer.py sets the same fallback).
+                        new_batch.batch["true_reward_score"] = reward_tensor
 
                         if reward_extra_infos_dict:
                             new_batch.non_tensor_batch.update(
