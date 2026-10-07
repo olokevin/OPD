@@ -99,7 +99,12 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        # (skipped on resume: the step-0 eval was logged by the first segment)
+        if (
+            self.val_reward_fn is not None
+            and self.config.trainer.get("val_before_train", True)
+            and (self.global_steps == 0 or self.config.trainer.get("val_only", False))
+        ):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")

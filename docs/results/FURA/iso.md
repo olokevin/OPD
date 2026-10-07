@@ -175,6 +175,59 @@ longer. That is the same direction the paper reports for ISO at 8B (longer answe
 The length growth did not turn into the 7.5e-6 failure: truncation peaked and came back down while
 eval kept rising.
 
+## [2026-10-06] Full 400-step reproduction on NERSC (2 nodes × 4 A100-80GB, 4 runs)
+
+> Same recipe as above (paper App. H: 256 prompts × 12 rollouts, 8K, DAPO), now at the paper's
+> full length (400 steps ≈ 1 pass over DeepMath-103K) on 8 GPUs per run. wandb `iso_rlvr_qwen3_4b`.
+
+| run | arm | LR | wandb id | status |
+|---|---|---|---|---|
+| full | weight-space AdamW (`PEFT_MODE=none`) | 2e-6 (paper's best AdamW) | `q3-4b_full_lr2e-6_c` | running (phase 1) |
+| fura | BlockTT small core only, output_one_block, S merged into frozen core, FSDP2 | 2e-5 (10× full) | `q3-4b_fura_lr2e-5_c` | running (phase 1) |
+| iso | ISO-AdamW | 7.5e-7 | `q3-4b_iso_lr7p5e-7_c` | queued (starts when full ends) |
+| isobtt | ISO on block-wise SVD (U_j, V_j trained) | 2.5e-6 | `q3-4b_isobtt_lr2p5e-6_c` | queued (starts when fura ends) |
+
+wandb runs are the `_c` ids (offline segments appended by `slurm/iso/wandb_append_daemon.sh`;
+display name = id without `_c`), in project
+[iso_rlvr_qwen3_4b](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/iso_rlvr_qwen3_4b).
+
+**Changes vs the 2-GPU runs:** 8 GPUs (2 nodes) instead of 2; eval every **20** steps (was 10),
+ckpt every 10 (keep 1); step-0 eval only for full and fura (iso/isobtt step 0 = base bit-for-bit, reuse full's).
+fura's blocks = closest factor pair (`factorize_by_head=False`), the same blocks isobtt uses.
+
+**First reads (full, step 0–1):** step-0 avg **20.17** (AIME24 11.3 / AIME25 6.0 / AMC23 28.8 /
+Minerva 25.1 / Olympiad 29.6) = the 2-GPU base 20.01, so the setup transfers. Step 1: 13.6 min
+(gen 377 s, actor update 306 s), 61 GB reserved/GPU, score 0.36, length 1.19K, 2.7% truncated,
+2 gen batches. ⇒ ~90 h train per run + evals ≈ 25 four-hour segments; phases run back to back.
+
+**Smoke-verified on 2 nodes before launch** (2 steps → ckpt → resume to 4): full, fura, iso all
+train, save, eval and resume (model + optimizer + rng + lr_scheduler loaded; old ckpt pruned).
+isobtt not smoked separately (same code path as iso).
+
+How to launch / monitor / stop:
+
+```bash
+bash slurm/iso/launch.sh full      # or fura | iso | isobtt; SMOKE=1 [SMOKE_STEPS=4] for a smoke test
+setsid nohup bash slurm/iso/chain_phase2.sh > $PSCRATCH/opd/logs/iso/chain_phase2.log 2>&1 &
+setsid nohup bash slurm/iso/wandb_append_daemon.sh > $PSCRATCH/opd/logs/iso/wandb_append_daemon.log 2>&1 &
+tail -f $PSCRATCH/opd/logs/iso/ctl_q3-4b_<arm>_*.log          # segments / resume points
+python3 scripts/iso/collect_val.py $PSCRATCH/opd/logs/iso/q3-4b_<arm>_attempt*.log
+# stop: kill the controller PID (pgrep -af slurm/iso/controller.sh), then scancel its job
+```
+
+Paths: ckpts `$PSCRATCH/opd/checkpoints/iso/dapo_q3-4b-base_deepmath_<arm>_lr<LR>_2node/`
+(eval dumps in `val_generations/<step>.jsonl`), logs `$PSCRATCH/opd/logs/iso/`.
+
+Code changes for these runs (details in Reference):
+- `peft/blocktt.py` export: gather DTensor cores before contracting. Multi-rank FSDP2 with
+  `s_merged_to=frozen` otherwise fails ("Attempted to flatten sharded dimension").
+- `peft/iso.py retract_iso`: no-op when the model has no ISO frames. It used to raise
+  "FSDP1 only" on any FSDP2 model, e.g. fura.
+- DAPO trainer: skip `val_before_train` when resuming (it re-ran the step-0 eval every 4 h segment).
+- `scripts/iso/dapo_math_4b.sh`: env-overridable REPO/CKPT/NNODES/RESUME_MODE/strategy,
+  `RAY_EXTERNAL=1`, new `PEFT_MODE=fura`, `SMOKE_STEPS`; `slurm/opd/opd_2node_inside.sh` takes
+  `RAYENV_SCRIPT` (iso needs `verl/` on the raylets' PYTHONPATH for `recipe.dapo`).
+
 ## Next steps
 
 1. **Weight-space AdamW (2e-6) baseline** on the same 2 GPUs — needed to state ISO-vs-AdamW

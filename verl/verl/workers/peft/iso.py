@@ -497,6 +497,8 @@ def retract_iso(module: nn.Module, optimizer=None) -> bool:
     gathered unit and writes back its own shard.
     """
     groups = module.__dict__.get("_iso_frame_groups")
+    if groups is None and not any(isinstance(m, IsoFrameLinear) for m in module.modules()):
+        groups = module.__dict__["_iso_frame_groups"] = []   # not an ISO model (e.g. FSDP2 blocktt)
     if groups is None:
         groups = [(u, [m for _, m in mods if isinstance(m, IsoFrameLinear)])
                   for u, mods in _fsdp_units(module)]

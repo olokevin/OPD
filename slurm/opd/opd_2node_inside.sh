@@ -16,7 +16,7 @@ PORT=6379
 # Ray ACTORS inherit env from the raylet (the `ray start` step), NOT from the
 # driver — so every ray-start srun step must source the full runtime env. $ACT
 # does that (conda + HF/wandb/vLLM/NCCL/caches); see opd_2node_rayenv.sh.
-ACT="source $OPD_REPO/slurm/opd/opd_2node_rayenv.sh;"
+ACT="source $OPD_REPO/slurm/${RAYENV_SCRIPT:-opd/opd_2node_rayenv.sh};"
 
 # Head IP reachable by workers (management net is fine for Ray's control plane).
 HEAD_IP=$(srun --jobid="$JID" -N1 -n1 -w "$HEAD" hostname --ip-address 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | head -1)

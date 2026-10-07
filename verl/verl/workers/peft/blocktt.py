@@ -29,6 +29,27 @@ def _calib_cache_root() -> str:
     return "/tmp/opd_calib_cache"
 
 
+def _dense_weight(module) -> torch.Tensor:
+    """``module.materialize_dense_weight()`` on full tensors.
+
+    Under multi-rank FSDP2 the cores are DTensors sharded on dim 0; the final
+    ``reshape`` in ``materialize_dense_weight`` then fails ("Attempted to flatten
+    sharded dimension") whenever the sharded dim is not the leftmost of the result,
+    e.g. s_merged_to=frozen.  Gather one module's cores and contract them locally.
+    """
+    from torch.distributed.tensor import DTensor
+
+    def _full(t):
+        return t.full_tensor() if isinstance(t, DTensor) else t
+
+    m, a, n, b, r = module.m, module.a, module.n, module.b, module.rank
+    btt_r = _full(module.btt_r).reshape(n, b, m, r)
+    btt_l = _full(module.btt_l).reshape(m, n, r, a)
+    if module.btt_s is not None:
+        btt_l = btt_l * _full(module.btt_s).unsqueeze(-1)
+    return torch.einsum("nbmr,mnra->manb", btt_r, btt_l).reshape(m * a, n * b)
+
+
 class BlockTTAdapter(PEFTAdapter):
     mode = "blocktt"
 
@@ -512,7 +533,7 @@ class BlockTTAdapter(PEFTAdapter):
             btt_prefixes.append(name + ".")
             # bf16: vLLM stores bf16 and casts on copy anyway; an fp32 export
             # doubles the transient (30 GB for a 7B fp32-master actor).
-            out[_clean(f"{name}.weight")] = module.materialize_dense_weight().to(_torch.bfloat16)
+            out[_clean(f"{name}.weight")] = _dense_weight(module).to(_torch.bfloat16)
             if module.bias is not None:
                 out[_clean(f"{name}.bias")] = module.bias.detach()
 
