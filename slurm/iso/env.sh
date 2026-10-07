@@ -14,7 +14,7 @@ export NNODES=${NNODES:-2}
 export RESUME_MODE=auto
 export TOTAL_STEPS=${TOTAL_STEPS:-400}
 export TEST_FREQ=${TEST_FREQ:-20}
-export SAVE_FREQ=${SAVE_FREQ:-10}
+export SAVE_FREQ=${SAVE_FREQ:-2}   # saves take 4-12 s; limits loss at each 4h cutoff
 export PPO_TOK=${PPO_TOK:-9216}
 export PROJECT=${WANDB_PROJECT}
 exec bash "${OPD_REPO}/scripts/iso/dapo_math_4b.sh"

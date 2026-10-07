@@ -192,7 +192,7 @@ display name = id without `_c`), in project
 [iso_rlvr_qwen3_4b](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/iso_rlvr_qwen3_4b).
 
 **Changes vs the 2-GPU runs:** 8 GPUs (2 nodes) instead of 2; eval every **20** steps (was 10),
-ckpt every 10 (keep 1); step-0 eval only for full and fura (iso/isobtt step 0 = base bit-for-bit, reuse full's).
+ckpt every 2 (keep 1; saves take 4–12 s, so at most ~1 step is lost per 4 h cutoff — was 10, which lost 8 steps in segment 1); step-0 eval only for full and fura (iso/isobtt step 0 = base bit-for-bit, reuse full's).
 fura's blocks = closest factor pair (`factorize_by_head=False`), the same blocks isobtt uses.
 
 **First reads (full, step 0–1):** step-0 avg **20.17** (AIME24 11.3 / AIME25 6.0 / AMC23 28.8 /
