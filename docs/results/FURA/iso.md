@@ -200,6 +200,16 @@ Minerva 25.1 / Olympiad 29.6) = the 2-GPU base 20.01, so the setup transfers. St
 (gen 377 s, actor update 306 s), 61 GB reserved/GPU, score 0.36, length 1.19K, 2.7% truncated,
 2 gen batches. ⇒ ~90 h train per run + evals ≈ 25 four-hour segments; phases run back to back.
 
+**Eval (avg@16, 5-benchmark mean; paper read-offs: AdamW 2e-6 28.8 @20 / 30.1 @40, ISO 29.5 @20 / 32.2 @40):**
+
+| step | full AIME24/25, AMC, Minerva, Oly | **full avg** | fura | **fura avg** | iso | isobtt |
+|---|---|---|---|---|---|---|
+| 0 | 11.3 / 6.0 / 28.8 / 25.1 / 29.6 | **20.17** | 12.1 / 5.2 / 29.4 / 24.1 / 30.2 | **20.18** | = full | = full |
+| 20 | 11.5 / 10.0 / 46.9 / 40.6 / 42.0 | **30.18** | | | | |
+
+Read: full AdamW @20 = 30.2, +1.4 over the paper's AdamW and ≈ our 2-GPU ISO (30.6). Tables are
+rebuilt with `python3 scripts/iso/collect_val.py $PSCRATCH/opd/logs/iso/q3-4b_<arm>_attempt*.log`.
+
 **Smoke-verified on 2 nodes before launch** (2 steps → ckpt → resume to 4): full, fura, iso all
 train, save, eval and resume (model + optimizer + rng + lr_scheduler loaded; old ckpt pruned).
 isobtt not smoked separately (same code path as iso).
