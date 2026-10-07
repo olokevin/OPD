@@ -206,9 +206,9 @@ Minerva 25.1 / Olympiad 29.6) = the 2-GPU base 20.01, so the setup transfers. St
 |---|---|---|---|---|---|---|
 | 0 | 11.3 / 6.0 / 28.8 / 25.1 / 29.6 | **20.17** | 12.1 / 5.2 / 29.4 / 24.1 / 30.2 | **20.18** | = full | = full |
 | 20 | 11.5 / 10.0 / 46.9 / 40.6 / 42.0 | **30.18** | 11.7 / 7.9 / 47.5 / 41.3 / 41.8 | **30.03** | | |
-| 40 | | | 15.0 / 11.3 / 47.2 / 41.7 / 43.6 | **31.75** | | |
+| 40 | 14.2 / 11.7 / 48.5 / 41.6 / 44.0 | **31.98** | 15.0 / 11.3 / 47.2 / 41.7 / 43.6 | **31.75** | | |
 
-Read: @20 full AdamW 30.2 (+1.4 over the paper's AdamW, ≈ our 2-GPU ISO 30.6) and fura 30.0 — tied, with fura training only the small BTT cores. Tables are
+Read: full AdamW 30.2 @20 / 32.0 @40 (paper AdamW 28.8 / 30.1; our 2-GPU ISO 30.6 / 31.9); fura tracks it within 0.2 pp (30.0 / 31.8) while training only the small BTT cores. Tables are
 rebuilt with `python3 scripts/iso/collect_val.py $PSCRATCH/opd/logs/iso/q3-4b_<arm>_attempt*.log`.
 
 **Smoke-verified on 2 nodes before launch** (2 steps → ckpt → resume to 4): full, fura, iso all
