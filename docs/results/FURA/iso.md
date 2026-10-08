@@ -209,10 +209,12 @@ Minerva 25.1 / Olympiad 29.6) = the 2-GPU base 20.01, so the setup transfers. St
 | 20 | 11.5 / 10.0 / 46.9 / 40.6 / 42.0 | **30.18** | 11.7 / 7.9 / 47.5 / 41.3 / 41.8 | **30.03** | | |
 | 40 | 14.2 / 11.7 / 48.5 / 41.6 / 44.0 | **31.98** | 15.0 / 11.3 / 47.2 / 41.7 / 43.6 | **31.75** | | |
 | 60 | 16.3 / 12.3 / 50.4 / 41.3 / 46.0 | **33.24** | 20.0 / 15.6 / 51.1 / 41.4 / 46.2 | **34.87** | | |
+| 80 | 16.5 / 14.2 / 56.0 / 42.8 / 50.1 | **35.88** | 19.6 / 15.8 / 52.0 / 41.5 / 46.6 | **35.10** | | |
 
 Read: full AdamW 30.2 @20 / 32.0 @40 (paper AdamW 28.8 / 30.1; our 2-GPU ISO 30.6 / 31.9); fura tracks it within 0.2 pp (30.0 / 31.8) while training only the small BTT cores; @60 fura pulls ahead (34.9 vs 33.2, gain on AIME24/25).
 Watch: from ~step 45 fura's answers lengthen (2.5K tokens, 11% truncated at 8K, 25 min/step @60)
-while full stays at ~1.6K / 2% — the same length growth isobtt showed at 2.5e-6 above. Tables are
+while full stays at ~1.6K / 2% — the same length growth isobtt showed at 2.5e-6 above. @80 they are level
+again (full 35.9, fura 35.1); full's answers now grow too (3.3K, 14% truncated, 36 min/step @95), fura flat ~2.4K / 10%. Tables are
 rebuilt with `python3 scripts/iso/collect_val.py $PSCRATCH/opd/logs/iso/q3-4b_<arm>_attempt*.log`.
 
 **Smoke-verified on 2 nodes before launch** (2 steps → ckpt → resume to 4): full, fura, iso all
