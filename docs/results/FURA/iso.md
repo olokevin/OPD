@@ -177,8 +177,9 @@ eval kept rising.
 
 ## [2026-10-06] Full 400-step reproduction on NERSC (2 nodes × 4 A100-80GB, 4 runs)
 
-> Same recipe as above (paper App. H: 256 prompts × 12 rollouts, 8K, DAPO), now at the paper's
-> full length (400 steps ≈ 1 pass over DeepMath-103K) on 8 GPUs per run. wandb `iso_rlvr_qwen3_4b`.
+> Same recipe as above (paper App. H: 256 prompts × 12 rollouts, 8K, DAPO) on 8 GPUs per run, wandb
+> `iso_rlvr_qwen3_4b`. Launched for 400 steps; **cut to 160 steps for all four runs on 2026-10-07** (cost:
+> answers lengthened to 2.3K+, 23–30 min/step; 400 steps ≈ 1,400–1,600 node-hours, 160 ≈ ~40% of that).
 
 | run | arm | LR | wandb id | status |
 |---|---|---|---|---|

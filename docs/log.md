@@ -1222,3 +1222,7 @@ New page [results/FURA/iso.md](results/FURA/iso.md). DAPO launcher `scripts/iso/
 ## [2026-10-06] experiment | ISO paper 400-step reproduction on NERSC, 4 runs (full / fura / iso / isobtt)
 
 [results/FURA/iso.md](results/FURA/iso.md) §2026-10-06. New `slurm/iso/` (launch / controller / chain / wandb daemon), 2 nodes × 4 A100 per run, 2 runs at a time. Full step-0 = 20.17 (matches 20.01), 13.6 min/step. Fixes: blocktt FSDP2 frozen-S export, retract_iso on non-ISO FSDP2, no step-0 re-eval on resume.
+
+## [2026-10-07] decision | ISO 400-step runs cut to 160 steps
+
+All four runs (full/fura running, iso/isobtt queued) now stop at 160 steps (`slurm/iso/env.sh` TOTAL_STEPS default) — step times grew 2.5–3× with answer length; see [results/FURA/iso.md](results/FURA/iso.md).
