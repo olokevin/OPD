@@ -1226,3 +1226,7 @@ New page [results/FURA/iso.md](results/FURA/iso.md). DAPO launcher `scripts/iso/
 ## [2026-10-07] decision | ISO 400-step runs cut to 160 steps
 
 All four runs (full/fura running, iso/isobtt queued) now stop at 160 steps (`slurm/iso/env.sh` TOTAL_STEPS default) — step times grew 2.5–3× with answer length; see [results/FURA/iso.md](results/FURA/iso.md).
+
+## [2026-10-08] experiment | iso / isobtt submitted as regular batch jobs
+
+`slurm/iso/{batch.sbatch,submit_batch.sh}`: 24 h 2-node regular-QOS jobs chained afterany (iso ×3, isobtt ×4), 160 steps, same ckpt/wandb ids. Phase-2 interactive chain stopped; wandb daemon also holds back segments of queued/running batch jobs. Full/fura: save every step (steps now 25–36 min). Full @100 = 38.37.

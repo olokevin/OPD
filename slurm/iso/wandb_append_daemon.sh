@@ -38,6 +38,8 @@ ctl_alive_for() {
     t=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep '^JOB_TAG=' | cut -d= -f2)
     [ "$t" = "$1" ] && return 0
   done
+  # batch runs (submit_batch.sh): job name = run id, running or queued
+  [ -n "$(squeue --me -h -n "$1" -o %i 2>/dev/null)" ] && return 0
   return 1
 }
 

@@ -185,8 +185,8 @@ eval kept rising.
 |---|---|---|---|---|
 | full | weight-space AdamW (`PEFT_MODE=none`) | 2e-6 (paper's best AdamW) | `q3-4b_full_lr2e-6_c` | running (phase 1) |
 | fura | BlockTT small core only, output_one_block, S merged into frozen core, FSDP2 | 2e-5 (10× full) | `q3-4b_fura_lr2e-5_c` | running (phase 1) |
-| iso | ISO-AdamW | 7.5e-7 | `q3-4b_iso_lr7p5e-7_c` | queued (starts when full ends) |
-| isobtt | ISO on block-wise SVD (U_j, V_j trained) | 2.5e-6 | `q3-4b_isobtt_lr2p5e-6_c` | queued (starts when fura ends) |
+| iso | ISO-AdamW | 7.5e-7 | `q3-4b_iso_lr7p5e-7_c` | regular-QOS batch, submitted 2026-10-08 (jobs 59567885 → 916 → 917) |
+| isobtt | ISO on block-wise SVD (U_j, V_j trained) | 2.5e-6 | `q3-4b_isobtt_lr2p5e-6_c` | regular-QOS batch, submitted 2026-10-08 (jobs 59567919 → 921 → 923 → 926) |
 
 wandb runs are the `_c` ids (offline segments appended by `slurm/iso/wandb_append_daemon.sh`;
 display name = id without `_c`), in project
@@ -232,6 +232,11 @@ tail -f $PSCRATCH/opd/logs/iso/ctl_q3-4b_<arm>_*.log          # segments / resum
 python3 scripts/iso/collect_val.py $PSCRATCH/opd/logs/iso/q3-4b_<arm>_attempt*.log
 # stop: kill the controller PID (pgrep -af slurm/iso/controller.sh), then scancel its job
 ```
+
+iso / isobtt run as **regular-QOS batch jobs** instead (2026-10-08; phase-2 interactive chain stopped):
+`bash slurm/iso/submit_batch.sh <arm> [n_jobs]` submits n × 24 h jobs (`slurm/iso/batch.sbatch`, 2 nodes)
+chained `afterany`; each resumes from the ckpt and exits at once if step 160 is done. Logs
+`$PSCRATCH/opd/logs/iso/<wandb id>_batch_<jobid>.log`; cancel with `scancel -n <wandb id>`.
 
 Paths: ckpts `$PSCRATCH/opd/checkpoints/iso/dapo_q3-4b-base_deepmath_<arm>_lr<LR>_2node/`
 (eval dumps in `val_generations/<step>.jsonl`), logs `$PSCRATCH/opd/logs/iso/`.
