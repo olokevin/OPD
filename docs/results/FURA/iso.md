@@ -193,7 +193,7 @@ display name = id without `_c`), in project
 [iso_rlvr_qwen3_4b](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/iso_rlvr_qwen3_4b).
 
 **Changes vs the 2-GPU runs:** 8 GPUs (2 nodes) instead of 2; eval every **20** steps (was 10),
-ckpt every 2 (keep 1; saves take 4–12 s, so at most ~1 step is lost per 4 h cutoff — was 10, which lost 8 steps in segment 1); step-0 eval only for full and fura (iso/isobtt step 0 = base bit-for-bit, reuse full's).
+ckpt every step (keep 1; saves take 4–12 s; was 10, then 2 — at 25–36 min/step an unsaved odd step cost ~30 min per 4 h cutoff); step-0 eval only for full and fura (iso/isobtt step 0 = base bit-for-bit, reuse full's).
 fura's blocks = closest factor pair (`factorize_by_head=False`), the same blocks isobtt uses.
 
 **First reads (full, step 0–1):** step-0 avg **20.17** (AIME24 11.3 / AIME25 6.0 / AMC23 28.8 /
@@ -210,6 +210,7 @@ Minerva 25.1 / Olympiad 29.6) = the 2-GPU base 20.01, so the setup transfers. St
 | 40 | 14.2 / 11.7 / 48.5 / 41.6 / 44.0 | **31.98** | 15.0 / 11.3 / 47.2 / 41.7 / 43.6 | **31.75** | | |
 | 60 | 16.3 / 12.3 / 50.4 / 41.3 / 46.0 | **33.24** | 20.0 / 15.6 / 51.1 / 41.4 / 46.2 | **34.87** | | |
 | 80 | 16.5 / 14.2 / 56.0 / 42.8 / 50.1 | **35.88** | 19.6 / 15.8 / 52.0 / 41.5 / 46.6 | **35.10** | | |
+| 100 | 23.1 / 17.7 / 57.2 / 42.5 / 51.3 | **38.37** | | (pending) | | |
 
 Read: full AdamW 30.2 @20 / 32.0 @40 (paper AdamW 28.8 / 30.1; our 2-GPU ISO 30.6 / 31.9); fura tracks it within 0.2 pp (30.0 / 31.8) while training only the small BTT cores; @60 fura pulls ahead (34.9 vs 33.2, gain on AIME24/25).
 Watch: from ~step 45 fura's answers lengthen (2.5K tokens, 11% truncated at 8K, 25 min/step @60)
