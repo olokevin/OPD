@@ -1230,3 +1230,7 @@ All four runs (full/fura running, iso/isobtt queued) now stop at 160 steps (`slu
 ## [2026-10-08] experiment | iso / isobtt submitted as regular batch jobs
 
 `slurm/iso/{batch.sbatch,submit_batch.sh}`: 24 h 2-node regular-QOS jobs chained afterany (iso ×3, isobtt ×4), 160 steps, same ckpt/wandb ids. Phase-2 interactive chain stopped; wandb daemon also holds back segments of queued/running batch jobs. Full/fura: save every step (steps now 25–36 min). Full @100 = 38.37.
+
+## [2026-10-08] decision | all four ISO-paper runs stopped
+
+By request: full (ckpt 106) and fura (ckpt 102) interactive runs terminated; iso/isobtt batch chains cancelled before starting. Checkpoints kept, resumable via `slurm/iso/launch.sh` or `submit_batch.sh`. See [results/FURA/iso.md](results/FURA/iso.md).

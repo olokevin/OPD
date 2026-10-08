@@ -183,10 +183,10 @@ eval kept rising.
 
 | run | arm | LR | wandb id | status |
 |---|---|---|---|---|
-| full | weight-space AdamW (`PEFT_MODE=none`) | 2e-6 (paper's best AdamW) | `q3-4b_full_lr2e-6_c` | running (phase 1) |
-| fura | BlockTT small core only, output_one_block, S merged into frozen core, FSDP2 | 2e-5 (10× full) | `q3-4b_fura_lr2e-5_c` | running (phase 1) |
-| iso | ISO-AdamW | 7.5e-7 | `q3-4b_iso_lr7p5e-7_c` | regular-QOS batch, submitted 2026-10-08 (jobs 59567885 → 916 → 917) |
-| isobtt | ISO on block-wise SVD (U_j, V_j trained) | 2.5e-6 | `q3-4b_isobtt_lr2p5e-6_c` | regular-QOS batch, submitted 2026-10-08 (jobs 59567919 → 921 → 923 → 926) |
+| full | weight-space AdamW (`PEFT_MODE=none`) | 2e-6 (paper's best AdamW) | `q3-4b_full_lr2e-6_c` | **stopped 2026-10-08 at ckpt step 106** (by request) |
+| fura | BlockTT small core only, output_one_block, S merged into frozen core, FSDP2 | 2e-5 (10× full) | `q3-4b_fura_lr2e-5_c` | **stopped 2026-10-08 at ckpt step 102** (by request) |
+| iso | ISO-AdamW | 7.5e-7 | `q3-4b_iso_lr7p5e-7_c` | batch jobs submitted then **cancelled 2026-10-08 before starting** (never ran) |
+| isobtt | ISO on block-wise SVD (U_j, V_j trained) | 2.5e-6 | `q3-4b_isobtt_lr2p5e-6_c` | batch jobs submitted then **cancelled 2026-10-08 before starting** (never ran) |
 
 wandb runs are the `_c` ids (offline segments appended by `slurm/iso/wandb_append_daemon.sh`;
 display name = id without `_c`), in project
