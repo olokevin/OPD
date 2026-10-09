@@ -23,7 +23,7 @@ in-run evals are sampled (n=2 @ T=0.6); its only greedy number is the step-220 r
 |---|---|---|---|---|---|---|
 | 0 | 0.670 | 0.233 | 0.670 | 0.133 | 0.751 | 0.150 |
 | 20 | **0.818** | 0.200 | **0.766** | 0.300 | 0.823 | 0.317 |
-| 40 | | | | | 0.843 | 0.267 |
+| 40 | 0.766 | 0.333 | 0.776 | 0.233 | 0.843 | 0.267 |
 | 60 | | | | | 0.846 | 0.267 |
 | 80 | | | | | 0.848 | 0.367 |
 | 100 | | | | | 0.844 | 0.317 |
@@ -51,6 +51,11 @@ Same-step greedy curves for comparison: es-prefill 0.676 @20, es-decode 0.696 @2
 Student entropy rises 0.30 → 0.85 in both arms (teacher entropy ≈ 0.68). A flatter policy has more
 near-ties, so a fixed σ flips more greedy tokens: the full arm's effective exploration grew 8× by step 20
 with no change to σ. IS stays healthy so far.
+
+**Step-40 read.** full falls back to 0.766 (−5.2 pp from @20, about 2.7 SE on 500 problems) while AIME24
+rises to 0.333. isobtt holds at 0.776. Training-rollout looping keeps falling (cap-hit 0.72 → 0.49 full,
+0.72 → 0.61 isobtt). Policy gap: full 0.085 / divergence at token 12, entropy 0.74; isobtt 0.019 /
+token 65, entropy 0.88. IS ESS 0.98 / 1.00.
 
 Step 0 reads 0.670 on MATH-500 for both arms, the same as the base on the old A800 box. AIME24 differs by
 3 of 30 problems between the two runs on identical weights (greedy bf16 nondeterminism).
