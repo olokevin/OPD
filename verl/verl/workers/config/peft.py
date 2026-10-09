@@ -68,6 +68,9 @@ class IsoConfig:
     # iso / isobtt: also train every non-converted tensor (embeddings, norms, biases)
     # with the plain base optimizer. False freezes them.
     train_others: bool = True
+    # iso / isobtt: which frame factors train. "uv" = both (paper); "v" = only V (the small
+    # per-block b x b cores under isobtt), U and S frozen.
+    train_factors: str = "uv"
     # Block size of the Cayley rotation generators (mode `iso_cayley` only; the
     # `isobtt_cayley`/`isobtt_mix` modes take it from the layer's own factorisation).
     block_size: int = 128

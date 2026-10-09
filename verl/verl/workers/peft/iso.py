@@ -402,7 +402,7 @@ class IsoFrameLinear(nn.Module):
     ``requires_grad=False``) so FSDP shards all of them and gathers them together.
     """
 
-    def __init__(self, lin: nn.Linear, n_blk: int):
+    def __init__(self, lin: nn.Linear, n_blk: int, train_u: bool = True):
         super().__init__()
         w = lin.weight.data
         out_f, in_f = w.shape
@@ -422,15 +422,19 @@ class IsoFrameLinear(nn.Module):
         self.iso_u0 = _p(u)
         self.iso_s = _p(s)
         self.iso_v0 = _p(vh.mT)
-        self.iso_du = _p(torch.zeros_like(u), grad=True)
+        # train_u=False (peft.iso.train_factors=v): only the small per-block cores V_j train;
+        # U_j stays U0_j and no dU is stored (it would be as large as W).
+        self.iso_du = _p(torch.zeros_like(u), grad=True) if train_u else None
         self.iso_dv = _p(torch.zeros_like(vh.mT), grad=True)
 
     def _delta(self, dtype) -> torch.Tensor:
         """U S0 V^T - U0 S0 V0^T  ==  dU S0 V^T + U0 S0 dV^T, as an (out, in) matrix."""
         s = self.iso_s.to(dtype).unsqueeze(-2)
-        u0, du = self.iso_u0.to(dtype), self.iso_du.to(dtype)
+        u0 = self.iso_u0.to(dtype)
         v0, dv = self.iso_v0.to(dtype), self.iso_dv.to(dtype)
-        d = torch.bmm(du * s, (v0 + dv).mT) + torch.bmm(u0 * s, dv.mT)
+        d = torch.bmm(u0 * s, dv.mT)
+        if self.iso_du is not None:
+            d = d + torch.bmm(self.iso_du.to(dtype) * s, (v0 + dv).mT)
         return d.permute(1, 0, 2).reshape(self.out_f, self.in_f)
 
     def forward(self, x):
@@ -446,11 +450,13 @@ class IsoFrameLinear(nn.Module):
     def retract(self) -> None:
         """U <- polar(U0 + dU), V <- polar(V0 + dV) (paper Eq. 36); stored back as deltas."""
         for p0, dp in ((self.iso_u0, self.iso_du), (self.iso_v0, self.iso_dv)):
+            if dp is None:
+                continue
             x0 = p0.double()
             dp.copy_((_polar(x0 + dp.double()) - x0).to(dp.dtype))
 
     def trainable_numel(self):
-        return self.iso_du.numel() + self.iso_dv.numel()
+        return (0 if self.iso_du is None else self.iso_du.numel()) + self.iso_dv.numel()
 
 
 def _fsdp_units(root: nn.Module):
@@ -543,13 +549,15 @@ def _dense_state_dict(root: nn.Module, dtype=torch.bfloat16) -> dict:
     return out
 
 
-def _convert_frames(model: nn.Module, mode: str, targets) -> tuple[list[str], int]:
+def _convert_frames(model: nn.Module, mode: str, targets, train_factors: str = "uv") -> tuple[list[str], int]:
+    if train_factors not in ("uv", "v"):
+        raise ValueError(f"peft.iso.train_factors must be 'uv' or 'v', got {train_factors!r}")
     replace = [(n, m) for n, m in model.named_modules()
                if isinstance(m, nn.Linear) and not any(s in n for s in _SKIP) and n.endswith(targets)]
     names, stored = [], 0
     for name, mod in replace:
         n_blk = 1 if mode == "iso" else _closest_factor_pair(mod.in_features)[0]
-        new = IsoFrameLinear(mod, n_blk)
+        new = IsoFrameLinear(mod, n_blk, train_u=train_factors == "uv")
         parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
         setattr(parent, name.rsplit(".", 1)[-1], new)
         names.append(name)
@@ -585,7 +593,8 @@ class IsoFrameAdapter(IsoAdapter):
             # The trainable deltas are their own optimizer master copy; in bf16 a
             # lr~1e-6 step on U would round away.
             raise ValueError(f"peft.mode={self.mode} needs fp32 actor params (MODEL_DTYPE=fp32); got {dtypes}")
-        self._converted, stored = _convert_frames(model, self.mode, self._targets())
+        self._converted, stored = _convert_frames(model, self.mode, self._targets(),
+                                                  str(self.peft_cfg.iso.train_factors))
         _set_frame_trainable(model, bool(self.peft_cfg.iso.train_others))
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -594,7 +603,8 @@ class IsoFrameAdapter(IsoAdapter):
         if int(os.environ.get("RANK", "0")) == 0:
             print(f"[ISO] mode={self.mode} converted={len(self._converted)} linears | "
                   f"frame deltas={stored:,} | trainable total={trainable:,} | "
-                  f"stored total={total:,} | train_others={self.peft_cfg.iso.train_others}", flush=True)
+                  f"stored total={total:,} | train_others={self.peft_cfg.iso.train_others} | "
+                  f"train_factors={self.peft_cfg.iso.train_factors}", flush=True)
         return model
 
     def export_for_vllm(self, fsdp_module):
@@ -618,7 +628,8 @@ class IsoFrameAdapter(IsoAdapter):
         return {
             "mode": self.mode,
             "target_modules": self.peft_cfg.target_modules,
-            "iso": {"train_others": bool(self.peft_cfg.iso.train_others)},
+            "iso": {"train_others": bool(self.peft_cfg.iso.train_others),
+                    "train_factors": str(self.peft_cfg.iso.train_factors)},
             "converted": len(self._converted),
         }
 
@@ -628,7 +639,7 @@ class IsoFrameAdapter(IsoAdapter):
         tm = meta.get("target_modules", "all")
         targets = (_ATTN if tm == "attn" else _MLP if tm == "mlp"
                    else _ATTN + _MLP if isinstance(tm, str) else tuple(tm))
-        _convert_frames(model, meta["mode"], targets)
+        _convert_frames(model, meta["mode"], targets, meta.get("iso", {}).get("train_factors", "uv"))
         _set_frame_trainable(model, bool(meta.get("iso", {}).get("train_others", True)))
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()

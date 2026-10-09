@@ -1075,6 +1075,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
+        # The batch inherits meta_info["temperature"] = rollout.temperature; greedy rollouts (T=0)
+        # would divide the training logits by 0 (NaN loss) -- train on the raw-logit (T=1) log-probs.
+        data.meta_info["temperature"] = self._es_logprob_temperature()
 
         with self.ulysses_sharding_manager:
             # Keep on GPU to avoid expensive CPU-GPU-CPU round trip

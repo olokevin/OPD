@@ -227,6 +227,13 @@ algorithm:
   es_seed: 1234
   es_perturb_set: all
 
+  # Parameter-space-noise exploration for BP-OPD (ppo/pn_explore.py)
+  pn_explore: False
+  pn_sigma: 1.0e-3
+  pn_n_clean: 1
+  pn_seed: 4321
+  pn_perturb_set: all
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 

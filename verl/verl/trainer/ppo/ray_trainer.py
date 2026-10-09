@@ -1091,12 +1091,21 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
+                        if self.config.algorithm.get("pn_explore", False):
+                            # parameter-space-noise exploration: clean + perturbed greedy slots
+                            from verl.trainer.ppo.pn_explore import pn_generate
+
+                            assert not self.async_rollout_mode, "pn_explore needs rollout.mode=sync"
+                            gen_batch_output, pn_metrics, pn_timing = pn_generate(self, gen_batch)
+                            metrics.update(pn_metrics)
+                            timing_raw.update(pn_timing)
+                        elif not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        if "timing" in gen_batch_output.meta_info:
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -1157,6 +1166,10 @@ class RayPPOTrainer:
                                 # if "entropys" in old_log_prob.batch.keys():
                                 #    old_log_prob.batch.pop("entropys")
                                 batch = batch.union(old_log_prob)
+                                if "pn_is_clean" in batch.batch.keys():
+                                    from verl.trainer.ppo.pn_explore import pn_fill_clean
+
+                                    metrics.update(pn_fill_clean(batch))
 
                             # Get Top-K parameters from config
                             top_k = self.config.actor_rollout_ref.rollout.get("log_prob_top_k", 0)

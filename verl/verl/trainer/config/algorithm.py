@@ -368,3 +368,13 @@ class AlgoConfig(BaseConfig):
     es_seed: int = 1234
     es_perturb_set: str = "all"   # "all" = every trainable tensor | "layers" = tensors whose name
                                   # contains ".layers." (decoder blocks only: no embed/lm_head/final norm)
+    # Parameter-space-noise exploration for BP-OPD (see ppo/pn_explore.py): of the rollout.n
+    # rollouts per prompt, the first pn_n_clean come from the clean policy and each other slot from
+    # the policy under its own seeded weight perturbation W + pn_sigma * eps (greedy decoding makes
+    # every slot deterministic). The BP update stays on the clean weights; off-policy slots are
+    # corrected with token-level IS via algorithm.rollout_correction.
+    pn_explore: bool = False
+    pn_sigma: float = 1e-3
+    pn_n_clean: int = 1
+    pn_seed: int = 4321
+    pn_perturb_set: str = "all"   # same sets as es_perturb_set

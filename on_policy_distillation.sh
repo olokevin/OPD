@@ -328,6 +328,11 @@ case "$PEFT_MODE" in
       ++actor_rollout_ref.peft.svd.train_position=$SVD_TRAIN_POSITION \
       ++actor_rollout_ref.peft.svd.s_merged_to=$SVD_S_MERGED_TO \
       ++actor_rollout_ref.peft.svd.compression_ratio=$SVD_COMPRESSION_RATIO" ;;
+  iso|isobtt)
+    PEFT_ARGS="$PEFT_ARGS \
+      actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+      ++actor_rollout_ref.peft.iso.train_others=${ISO_TRAIN_OTHERS:-True} \
+      ++actor_rollout_ref.peft.iso.train_factors=${ISO_TRAIN_FACTORS:-uv}" ;;
   *) echo "Unknown PEFT_MODE=$PEFT_MODE" >&2; exit 1 ;;
 esac
 
