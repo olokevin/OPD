@@ -22,7 +22,7 @@ in-run evals are sampled (n=2 @ T=0.6); its only greedy number is the step-220 r
 | step | full MATH-500 | full AIME24 | isobtt MATH-500 | isobtt AIME24 | BP MATH-500 (sampled) | BP AIME24 (sampled) |
 |---|---|---|---|---|---|---|
 | 0 | 0.670 | 0.233 | 0.670 | 0.133 | 0.751 | 0.150 |
-| 20 | | | | | 0.823 | 0.317 |
+| 20 | **0.818** | 0.200 | **0.766** | 0.300 | 0.823 | 0.317 |
 | 40 | | | | | 0.843 | 0.267 |
 | 60 | | | | | 0.846 | 0.267 |
 | 80 | | | | | 0.848 | 0.367 |
@@ -36,6 +36,21 @@ in-run evals are sampled (n=2 @ T=0.6); its only greedy number is the step-220 r
 
 Greedy references on the same evaluator (from [zo_opd.md § aligned pair](zo_opd.md)): base 0.670 / 0.133;
 es-prefill peak 0.808 @140, final 0.784 @260; BP @220 greedy re-score 0.678 / 0.267.
+
+**Step-20 read (2026-10-09).** Both arms learn fast under greedy evaluation. full +14.8 pp (0.818),
+already above es-prefill's best (0.808 @140); isobtt +9.6 pp (0.766), versus es-prefill's 0.676 @20.
+Same-step greedy curves for comparison: es-prefill 0.676 @20, es-decode 0.696 @20.
+
+| step | arm | entropy | \|log π_W − log π_pert\| / tok | first divergence (tok) | IS ESS | tokens with IS > 2 | mean len | cap-hit |
+|---|---|---|---|---|---|---|---|---|
+| 1 | full | 0.30 | 0.012 | 67 | 0.999 | 0.0 % | 6.6 k | 0.84 |
+| 20 | full | 0.86 | 0.098 | 16 | 0.976 | 1.2 % | 6.6 k | 0.72 |
+| 1 | isobtt | 0.30 | 0.009 | 99 | 1.000 | 0.0 % | 6.5 k | 0.83 |
+| 20 | isobtt | 0.84 | 0.022 | 54 | 0.999 | 0.0 % | 6.3 k | 0.72 |
+
+Student entropy rises 0.30 → 0.85 in both arms (teacher entropy ≈ 0.68). A flatter policy has more
+near-ties, so a fixed σ flips more greedy tokens: the full arm's effective exploration grew 8× by step 20
+with no change to σ. IS stays healthy so far.
 
 Step 0 reads 0.670 on MATH-500 for both arms, the same as the base on the old A800 box. AIME24 differs by
 3 of 30 problems between the two runs on identical weights (greedy bf16 nondeterminism).
