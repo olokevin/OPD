@@ -1237,4 +1237,4 @@ By request: full (ckpt 106) and fura (ckpt 102) interactive runs terminated; iso
 
 ## [2026-10-08] experiment | pn-explore: parameter-space exploration for BP-OPD (full + isobtt)
 
-New `algorithm.pn_explore` trainer mode (greedy clean + 3 perturbed slots per prompt, token TIS) and `peft.iso.train_factors=v`. Runs on GPU 2 (full, lr 1e-6, σ 1e-3) and GPU 3 (isobtt V_j only, lr 1e-5, σ 2e-3), wandb `es_opd_JustRL_1p5b_0903` (`1sz7lpbq`, `aupz6xbl`). Fixed: T=0 rollouts made the BP loss NaN (logits/0). See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).
+New `algorithm.pn_explore` trainer mode (greedy clean + 3 perturbed slots per prompt, token TIS) and `peft.iso.train_factors=v`. Runs on GPU 2 (full, lr 1e-6, σ 1e-3) and GPU 3 (isobtt V_j only, lr 1e-5, σ 2e-3), wandb `es_opd_JustRL_1p5b_0903` (`kt8hbgk9`, `aupz6xbl`). Fixed: T=0 rollouts made the BP loss NaN (logits/0). See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).

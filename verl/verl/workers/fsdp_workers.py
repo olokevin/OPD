@@ -1073,7 +1073,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
+        # OPTIM_LOAD_AT_STEP=1: keep the offloaded optimizer states on CPU through forward/backward
+        # and bring them to the GPU only around each optimizer.step() (48 GB cards: fp32 params +
+        # grads + Adam states + 9k-token logits do not fit at once).
+        load_at_step = self._is_offload_optimizer and os.environ.get("OPTIM_LOAD_AT_STEP", "0") == "1"
+        if load_at_step:
+            self.actor.optim_step_hooks = (
+                lambda: load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id()),
+                lambda: offload_fsdp_optimizer(optimizer=self.actor_optimizer),
+            )
+        elif self._is_offload_optimizer:
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=get_device_id())
         # The batch inherits meta_info["temperature"] = rollout.temperature; greedy rollouts (T=0)
         # would divide the training logits by 0 (NaN loss) -- train on the raw-logit (T=1) log-probs.
@@ -1109,7 +1118,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
-        if self._is_offload_optimizer:
+        if self._is_offload_optimizer and not load_at_step:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 

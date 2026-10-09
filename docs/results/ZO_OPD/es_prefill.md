@@ -10,7 +10,7 @@
 
 | run | GPU | wandb | state |
 |---|---|---|---|
-| **full** — all params, Adam 1e-6, perturb decoder blocks, σ=1e-3 | 2 | [1sz7lpbq](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/1sz7lpbq) | running (launched 2026-10-08 18:19 PDT) |
+| **full** — all params, Adam 1e-6, perturb decoder blocks, σ=1e-3 | 2 | [kt8hbgk9](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/kt8hbgk9) | running (relaunched 2026-10-08 19:20 PDT after an OOM at step 1) |
 | **isobtt** — only the small cores V_j trained + perturbed, Adam 1e-5, σ=2e-3 | 3 | [aupz6xbl](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/aupz6xbl) | running (launched 2026-10-08 18:19 PDT) |
 | BP baseline (reference, 2026-08-31) — T=1 sampling, all params, Adam 1e-6 | — | [s7x9sidi](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/s7x9sidi) | finished |
 
@@ -70,7 +70,14 @@ step 1, not adapted). Smoke test, 64 prompts × 1024 tokens:
 | isobtt (V_j only) | 1e-3 | 0 % | 151 | 0.011 | 1.0001 |
 
 At the same σ, perturbing only the V_j cores moves the policy about half as much. So isobtt uses
-**σ=2e-3**, which roughly matches the full arm's policy gap.
+**σ=2e-3**, which roughly matches the full arm's policy gap. At full length (step 1, 7168 tokens):
+full |log-ratio| 0.012, first divergence at token 67; isobtt 0.009, token 99. Neither arm ever
+produced a perturbed decode identical to the clean one.
+
+**Cost** (step 1, RTX 6000 Ada): ~990 s/step, split as generation 470 s (4 greedy passes + 58 s
+behaviour log-probs), teacher 104 s, clean log-probs 78 s, update 334 s. The base student loops on
+DAPO prompts under greedy decoding (mean length 6.5 k, 83 % hit the 7168 cap), so 279 steps take
+about 3.3 days at the current lengths.
 
 ## Setup
 
@@ -123,7 +130,11 @@ only V_j moves, so each block's singular values stay fixed.
      T=1 like the log-prob path.
   2. `algorithm.rollout_correction` defaults never load (the `algorithm@@…` defaults entry), so the keys
      are created with `++`.
-  3. `scripts/opd/run_systemd.py` `Path.open(opener=)` bug. Bypassed with `OPD_SYSTEMD=0`; the Ray temp
+  3. OOM in the full arm's update on the 48 GB card. The offloaded Adam states (14 GB) were loaded
+     before forward/backward. `OPTIM_LOAD_AT_STEP=1` now loads them only around each
+     `optimizer.step()`. Log of the OOM'd attempt: `logs/ds15b/pn_explore/full_oom_step1.out`
+     (wandb `1sz7lpbq`).
+  4. `scripts/opd/run_systemd.py` `Path.open(opener=)` bug. Bypassed with `OPD_SYSTEMD=0`; the Ray temp
      dir moved to `/data/yequan/temp` (root disk is 96 % full).
 - **Aborted first launch** (wrong wandb project, stopped after the step-0 eval): `kquhpetn` / `eiqkcxa4`
   in `es_opd_JustRL_1p5b`.

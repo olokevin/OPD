@@ -678,7 +678,12 @@ class DataParallelPPOActor(BasePPOActor):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
+            hooks = getattr(self, "optim_step_hooks", None)   # (load, offload): see fsdp_workers.update_actor
+            if hooks is not None:
+                hooks[0]()
             self.actor_optimizer.step()
+            if hooks is not None:
+                hooks[1]()
             # SparseGPT preservation: re-zero masked weights after Adam step.
             # Belt-and-braces — even with mask_gradients zeroing grads, FSDP1
             # reduce-scatter / FSDP2 all-gather can introduce float noise.

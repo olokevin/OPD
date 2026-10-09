@@ -19,6 +19,7 @@ export N_RESPONSES=${N_RESPONSES:-4}            # 1 clean + 3 perturbed per prom
 export TEMPERATURE=0                            # greedy training rollout (standing ES setting)
 export VAL_N=1 VAL_DO_SAMPLE=False VAL_TEMPERATURE=0 VAL_TOP_P=1.0   # greedy eval
 export ACTOR_PARAM_OFFLOAD=False                # perturbations act on the resident fp32 master
+export OPTIM_LOAD_AT_STEP=1                      # Adam states on GPU only around optimizer.step() (48 GB cards)
 export PN_SIGMA=${PN_SIGMA:-1e-3}
 export PN_PERTURB_SET=${PN_PERTURB_SET:-layers}
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
