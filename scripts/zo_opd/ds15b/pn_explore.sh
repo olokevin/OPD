@@ -47,6 +47,7 @@ export EXTRA_HYDRA_ARGS="algorithm.pn_explore=True algorithm.pn_sigma=${PN_SIGMA
   algorithm.pn_perturb_set=${PN_PERTURB_SET} \
   ++algorithm.rollout_correction.rollout_is=token ++algorithm.rollout_correction.rollout_is_threshold=2.0 \
   ${ARM_ARGS} ${EXTRA_HYDRA_ARGS:-}"
+export PROJECT_NAME=${PROJECT_NAME:-es_opd_JustRL_1p5b_0903}   # = the BP baseline's project (run s7x9sidi)
 export LOG_DIR=${LOG_DIR:-logs/ds15b/pn_explore}
 
 exec bash "$SCRIPT_DIR/bp_opd.sh"
