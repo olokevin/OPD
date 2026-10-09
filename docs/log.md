@@ -1238,3 +1238,7 @@ By request: full (ckpt 106) and fura (ckpt 102) interactive runs terminated; iso
 ## [2026-10-08] experiment | pn-explore: parameter-space exploration for BP-OPD (full + isobtt)
 
 New `algorithm.pn_explore` trainer mode (greedy clean + 3 perturbed slots per prompt, token TIS) and `peft.iso.train_factors=v`. Runs on GPU 2 (full, lr 1e-6, σ 1e-3) and GPU 3 (isobtt V_j only, lr 1e-5, σ 2e-3), wandb `es_opd_JustRL_1p5b_0903` (`kt8hbgk9`, `aupz6xbl`). Fixed: T=0 rollouts made the BP loss NaN (logits/0). See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).
+
+## [2026-10-09] experiment | pn-explore runs stopped; step-60 BP-protocol eval
+
+Both runs stopped by request (full @79, isobtt @76; Ray exited cleanly). Last ckpt step 60 re-scored with BP's eval (n=2, T=0.6, top-p 0.95): full 0.856 / 0.250, isobtt 0.821 / 0.250, vs BP @60 0.846 / 0.267 (BP peak 0.861). See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).
