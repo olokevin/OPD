@@ -890,7 +890,11 @@ class DataParallelPPOActor(BasePPOActor):
                         log_prob_for_loss = topk_log_probs
                         
                     else:
-                        _, log_prob, *_ = self._forward_micro_batch(
+                        # Capture entropy (not `_`): the 2D-advantages path also needs
+                        # it when entropy_coeff != 0 (line ~925 uses `entropy`). The 3D
+                        # top-k branch above already captures it; dropping it here caused
+                        # an UnboundLocalError once entropy_coeff was set (SimpleRL: 0.001).
+                        entropy, log_prob, *_ = self._forward_micro_batch(
                             model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                         )
                         log_prob_for_loss = log_prob
