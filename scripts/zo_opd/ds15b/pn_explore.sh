@@ -17,7 +17,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARM=${ARM:-full}
 export N_RESPONSES=${N_RESPONSES:-4}            # 1 clean + 3 perturbed per prompt
 export TEMPERATURE=0                            # greedy training rollout (standing ES setting)
-export VAL_N=1 VAL_DO_SAMPLE=False VAL_TEMPERATURE=0 VAL_TOP_P=1.0   # greedy eval
+# in-run eval: greedy by default; VAL_SAMPLED=1 = the BP baseline's protocol (n=2 @ T=0.6, top-p 0.95)
+if [ "${VAL_SAMPLED:-0}" = "1" ]; then
+  export VAL_N=2 VAL_DO_SAMPLE=True VAL_TEMPERATURE=0.6 VAL_TOP_P=0.95
+else
+  export VAL_N=1 VAL_DO_SAMPLE=False VAL_TEMPERATURE=0 VAL_TOP_P=1.0
+fi
 export ACTOR_PARAM_OFFLOAD=False                # perturbations act on the resident fp32 master
 export OPTIM_LOAD_AT_STEP=1                      # Adam states on GPU only around optimizer.step() (48 GB cards)
 export PN_SIGMA=${PN_SIGMA:-1e-3}

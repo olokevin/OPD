@@ -190,7 +190,8 @@ def validate_config(
 
     # check eval config
     if config.actor_rollout_ref.rollout.val_kwargs.do_sample:
-        assert config.actor_rollout_ref.rollout.temperature > 0, (
+        # the eval sampling temperature, not the training one (greedy training + sampled eval is valid)
+        assert config.actor_rollout_ref.rollout.val_kwargs.temperature > 0, (
             "validation gen temperature should be greater than 0 when enabling do_sample"
         )
 
