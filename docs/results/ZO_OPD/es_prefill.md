@@ -14,6 +14,27 @@
 | **isobtt** — only the small cores V_j trained + perturbed, Adam 1e-5, σ=2e-3 | 3 | [aupz6xbl](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/aupz6xbl) | **stopped at step 76** (2026-10-09, by request); last ckpt step 60 |
 | BP baseline (reference, 2026-08-31) — T=1 sampling, all params, Adam 1e-6 | — | [s7x9sidi](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/s7x9sidi) | finished |
 
+## Phase 2 (2026-10-09): continued training, sampled in-run eval
+
+Training rollouts stay greedy; the in-run eval now uses the BP baseline's protocol (n=2, T=0.6, top-p 0.95,
+7168 tokens, every 20 steps; `VAL_SAMPLED=1`).
+
+| run | GPU | wandb | notes |
+|---|---|---|---|
+| full, resumed from step 60 | 2 | [grpyt9y4](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/grpyt9y4) | same ckpt dir, verl auto-resume (model + optimizer + data position); step 61 continuous with step 60 |
+| isobtt **from scratch, lr 5e-5** (σ 2e-3) | 3 | [8dj8hj8x](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/8dj8hj8x) | ckpt `/data/yequan/opd/opd/DAPO-Math-17k/ds15b_pn-explore_isobtt_T0_b64n4_sig2e-3_lr5e-5` |
+
+The isobtt lr-1e-5 resume was stopped before its first step, by request (wandb `6rfec89d`, empty); its
+step-60 checkpoint is kept.
+
+Sampled eval (`mean@2`), MATH-500 / AIME24:
+
+| step | full (resumed) | isobtt lr 5e-5 | BP baseline |
+|---|---|---|---|
+| 0 | 0.776 / 0.183 (base, this box) | 0.776 / 0.183 | 0.751 / 0.150 (A800) |
+| 60 | 0.856 / 0.250 (offline re-score) | | 0.846 / 0.267 |
+| 80 | | | 0.848 / 0.367 |
+
 ## Results
 
 ### BP-protocol eval of the last checkpoint (step 60): sampled n=2, T=0.6, top-p 0.95, 7168 tokens
@@ -28,6 +49,7 @@ stopped on 2026-10-09 by request; step 60 is the last saved checkpoint for both.
 | BP baseline @60 | 0.846 | 0.267 | [s7x9sidi](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/s7x9sidi) |
 | BP baseline peak | 0.861 @180 (0.859 @120) | 0.400 @180 | same |
 | base (BP run's step 0, A800 box) | 0.751 | 0.150 | same |
+| base (this box, RTX 6000 Ada) | 0.776 | 0.183 | [8dj8hj8x](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/8dj8hj8x) step 0 |
 | es-prefill C peak (16×4) | 0.829 @60 | 0.283 | — |
 
 - **On BP's own protocol, full pn-explore at step 60 (0.856) is +1.0 pp over BP at step 60 (0.846)** and
@@ -37,8 +59,11 @@ stopped on 2026-10-09 by request; step 60 is the last saved checkpoint for both.
 - The greedy in-run curve made full look like it was declining after step 20 (0.818 → 0.754). Under
   sampling the step-60 model is strong. The greedy drop is longer answers hitting the cap (see the length
   table below), which hurts greedy decoding more than sampled.
-- Caveat: base and BP numbers come from the A800 box; these re-scores ran on the RTX 6000 Ada box. A
-  sampled re-score of the base model here would remove that last difference.
+- **Correction (2026-10-09, hardware control).** The base model scores **0.776 / 0.183** on this box under
+  the same sampled protocol (step-0 eval of the lr-5e-5 isobtt run), vs 0.751 / 0.150 on the A800 box.
+  Gains over each box's own base: **full +8.0 pp @60 vs BP +9.5 pp @60** (BP peak +11.0); isobtt +4.5 pp.
+  So on gain-over-base, full pn-explore is 1.5 pp **behind** BP at step 60, not ahead. Part of the 2.5 pp
+  base offset may be sampling noise (n=2, SE ≈ 1.3 pp per eval).
 
 Eval logs: `logs/ds15b/pn_explore/ruler/pn-explore_{full,isobtt}_step60.out`; dumps
 `validation_log/ruler_sampled_pn-explore_{full,isobtt}_step60/`. Models: full merged to
