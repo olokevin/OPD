@@ -42,9 +42,10 @@ Sampled eval (`mean@2`), MATH-500 / AIME24:
 | 120 | 0.855 / 0.317 | | | | 0.859 / 0.250 |
 | 140 | **0.875** / 0.300 | | | | 0.850 / 0.367 |
 | 160 | 0.850 / 0.333 | | | | 0.851 / 0.333 |
+| 180 | 0.855 / 0.300 | | | | 0.861 / 0.400 |
 
 Gain over each box's own base (MATH-500): isobtt lr 5e-5 **+9.3 pp @20**, +8.3 @40, +6.8 @60, +6.3 @80 (BP +7.2 / +9.2 / +9.5 / +9.7; BP peak +11.0 @180);
-full +8.0 @60, +6.9 @80, +6.9 @100, +7.9 @120, **+9.9 @140**, +7.4 @160 (BP +9.5 / +9.7 / +9.3 / +10.8 / +9.9 / +10.0).
+full +8.0 @60, +6.9 @80, +6.9 @100, +7.9 @120, **+9.9 @140**, +7.4 @160, +7.9 @180 (BP +9.5 / +9.7 / +9.3 / +10.8 / +9.9 / +10.0 / +11.0).
 
 **Step-20 read (isobtt lr 5e-5).** The 5× higher LR makes the 40 M-parameter small-core run the fastest
 learner so far: 0.869 at step 20, above every BP eval in raw score. Its policy stays close to the clean one
