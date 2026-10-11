@@ -1242,3 +1242,7 @@ New `algorithm.pn_explore` trainer mode (greedy clean + 3 perturbed slots per pr
 ## [2026-10-09] experiment | pn-explore runs stopped; step-60 BP-protocol eval
 
 Both runs stopped by request (full @79, isobtt @76; Ray exited cleanly). Last ckpt step 60 re-scored with BP's eval (n=2, T=0.6, top-p 0.95): full 0.856 / 0.250, isobtt 0.821 / 0.250, vs BP @60 0.846 / 0.267 (BP peak 0.861). See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).
+
+## [2026-10-10] experiment | pn-explore: isobtt lr 5e-5 stopped @80; isobtt lr 3e-5 + on-box sampled-BP control launched
+
+isobtt lr 5e-5 (`8dj8hj8x`) peaked at 0.869 MATH-500 @20 and fell to 0.839 @80; stopped by request. Relaunched isobtt from scratch at lr 3e-5 on GPU 3 (`1su7zgj2`). New GPU-0 control: plain BP-OPD with sampled rollouts T=0.6 / top-p 0.95, no perturbation (`9zu64ueq`), same box and eval as the pn runs. Full arm @140: 0.875. See [results/ZO_OPD/es_prefill.md](results/ZO_OPD/es_prefill.md).

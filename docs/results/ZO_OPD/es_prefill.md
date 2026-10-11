@@ -22,23 +22,25 @@ Training rollouts stay greedy; the in-run eval now uses the BP baseline's protoc
 | run | GPU | wandb | notes |
 |---|---|---|---|
 | full, resumed from step 60 | 2 | [grpyt9y4](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/grpyt9y4) | same ckpt dir, verl auto-resume (model + optimizer + data position); step 61 continuous with step 60 |
-| isobtt **from scratch, lr 5e-5** (σ 2e-3) | 3 | [8dj8hj8x](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/8dj8hj8x) | ckpt `/data/yequan/opd/opd/DAPO-Math-17k/ds15b_pn-explore_isobtt_T0_b64n4_sig2e-3_lr5e-5` |
+| isobtt **from scratch, lr 5e-5** (σ 2e-3) | 3 | [8dj8hj8x](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/8dj8hj8x) | **stopped at step 80** (2026-10-10, by request: peaked @20, then declined); ckpt `/data/yequan/opd/opd/DAPO-Math-17k/ds15b_pn-explore_isobtt_T0_b64n4_sig2e-3_lr5e-5` |
+| isobtt from scratch, **lr 3e-5** (σ 2e-3), started 2026-10-10 | 3 | [1su7zgj2](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/1su7zgj2) | ckpt `.../ds15b_pn-explore_isobtt_T0_b64n4_sig2e-3_lr3e-5`; log `isobtt_lr3e-5.out` |
+| **BP, sampled rollouts T=0.6 / top-p 0.95**, no perturbation, all params, lr 1e-6, n=4, started 2026-10-10 | 0 | [9zu64ueq](https://wandb.ai/yequan_zhao-university-of-california-santa-barbara/es_opd_JustRL_1p5b_0903/runs/9zu64ueq) | same box, same eval → on-box control for both pn arms; ckpt `.../ds15b_bp-opd_T0.6p0.95_b64n4_lr1e-6`; log `bp_T0.6.out` |
 
 The isobtt lr-1e-5 resume was stopped before its first step, by request (wandb `6rfec89d`, empty); its
 step-60 checkpoint is kept.
 
 Sampled eval (`mean@2`), MATH-500 / AIME24:
 
-| step | full (resumed) | isobtt lr 5e-5 | BP baseline |
-|---|---|---|---|
-| 0 | 0.776 / 0.183 (base, this box) | 0.776 / 0.183 | 0.751 / 0.150 (A800) |
-| 20 | — | **0.869** / 0.333 | 0.823 / 0.317 |
-| 40 | — | 0.859 / 0.333 | 0.843 / 0.267 |
-| 60 | 0.856 / 0.250 (offline re-score) | 0.844 / 0.267 | 0.846 / 0.267 |
-| 80 | 0.845 / 0.283 | 0.839 / 0.267 | 0.848 / 0.367 |
-| 100 | 0.845 / 0.300 | | 0.844 / 0.317 |
-| 120 | 0.855 / 0.317 | | 0.859 / 0.250 |
-| 140 | **0.875** / 0.300 | | 0.850 / 0.367 |
+| step | full (resumed) | isobtt lr 5e-5 | isobtt lr 3e-5 | BP T=0.6 (this box) | BP baseline (T=1, A800) |
+|---|---|---|---|---|---|
+| 0 | 0.776 / 0.183 (base) | 0.776 / 0.183 | 0.776 / 0.183 | 0.770 / 0.217 | 0.751 / 0.150 |
+| 20 | — | **0.869** / 0.333 |  |  | 0.823 / 0.317 |
+| 40 | — | 0.859 / 0.333 |  |  | 0.843 / 0.267 |
+| 60 | 0.856 / 0.250 (offline re-score) | 0.844 / 0.267 |  |  | 0.846 / 0.267 |
+| 80 | 0.845 / 0.283 | 0.839 / 0.267 |  |  | 0.848 / 0.367 |
+| 100 | 0.845 / 0.300 | | | | 0.844 / 0.317 |
+| 120 | 0.855 / 0.317 | | | | 0.859 / 0.250 |
+| 140 | **0.875** / 0.300 | | | | 0.850 / 0.367 |
 
 Gain over each box's own base (MATH-500): isobtt lr 5e-5 **+9.3 pp @20**, +8.3 @40, +6.8 @60, +6.3 @80 (BP +7.2 / +9.2 / +9.5 / +9.7; BP peak +11.0 @180);
 full +8.0 @60, +6.9 @80, +6.9 @100, +7.9 @120, **+9.9 @140** (BP +9.5 / +9.7 / +9.3 / +10.8 / +9.9).
@@ -94,9 +96,9 @@ in-run evals are sampled (n=2 @ T=0.6); its only greedy number is the step-220 r
 | 40 | 0.766 | 0.333 | 0.776 | 0.233 | 0.843 | 0.267 |
 | 60 | 0.754 | 0.267 | 0.778 | 0.167 | 0.846 | 0.267 |
 | 80 | | | | | 0.848 | 0.367 |
-| 100 | | | | | 0.844 | 0.317 |
-| 120 | | | | | 0.859 | 0.250 |
-| 140 | | | | | 0.850 | 0.367 |
+| 100 | | | | | | | 0.844 | 0.317 |
+| 120 | | | | | | | 0.859 | 0.250 |
+| 140 | | | | | | | 0.850 | 0.367 |
 | 160 | | | | | 0.851 | 0.333 |
 | 180 | | | | | 0.861 | 0.400 |
 | 200 | | | | | 0.858 | 0.350 |
